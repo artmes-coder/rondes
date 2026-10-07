@@ -1,18 +1,24 @@
 /* Rondes parkings — Ville de Cachan, DPMS
- * Application web hors ligne (PWA). Aucune donnée n'est envoyée à un serveur :
- * tout est stocké sur le téléphone et transmis par fichier au superviseur.
- * L'horodatage et la position de chaque saisie sont chiffrés avec la clé publique
- * du superviseur ; seul le téléphone superviseur peut les lire.
+ * Application web hors ligne (PWA).
+ * - L'outil appartient aux agents : ils signalent, suivent et clôturent.
+ * - Fin de ronde : envoi automatique, chiffré, vers un relais (boîte aux lettres) ;
+ *   sans réseau, l'envoi attend et repart seul.
+ * - Le superviseur relève automatiquement à l'ouverture de son application et consulte.
+ *   Ses interventions ponctuelles (clôturer, rouvrir, modifier, message) redescendent seules.
+ * - Tout ce qui transite par le relais est chiffré : le relais ne peut rien lire.
  */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const FMT_PAQUET = 'rondes-cachan-paquet';
 const FMT_ETAT = 'rondes-cachan-etat';
 const FMT_SAUVEGARDE = 'rondes-cachan-sauvegarde';
 const FMT_CLE = 'rondes-cachan-cle';
-const HISTO_JOURS = 92;          // conservation de l'historique lisible sur le téléphone agents
+const HISTO_JOURS = 92;            // historique lisible conservé sur le téléphone agents
+const DECISIONS_JOURS = 180;       // interventions du superviseur renvoyées aux agents
 const PBKDF2_ITER = 600000;
+const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi vers le relais (photos comprises)
+const SYNC_PERIODE_MS = 120000;
 
 /* ====================================================================== */
 /* Utilitaires                                                            */
@@ -50,6 +56,10 @@ function fmtDT(iso) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 function fmtHeure(iso) { if (!iso) return ''; const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function fmtQuand(iso) {
+  if (!iso) return '';
+  return localDate(new Date(iso)) === localDate() ? 'aujourd’hui à ' + fmtHeure(iso) : 'le ' + fmtDT(iso);
+}
 function fileStamp(d = new Date()) { return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`; }
 
 function canon(v) {
@@ -106,11 +116,11 @@ function openDB() {
     r.onupgradeneeded = () => {
       const d = r.result;
       d.createObjectStore('kv');
-      d.createObjectStore('events', { keyPath: 'seq' });     // agent : journal chaîné
+      d.createObjectStore('events', { keyPath: 'seq' });     // agents : journal chaîné non encore transmis
       d.createObjectStore('photos', { keyPath: 'id' });
       d.createObjectStore('sigs', { keyPath: 'id' });        // signalements
-      d.createObjectStore('histo', { keyPath: 'k' });        // agent : historique lisible
-      d.createObjectStore('sup_events', { keyPath: 'k' });   // superviseur : journal importé
+      d.createObjectStore('histo', { keyPath: 'k' });        // agents : historique lisible
+      d.createObjectStore('sup_events', { keyPath: 'k' });   // superviseur : journal reçu
       d.createObjectStore('rondes', { keyPath: 'rid' });     // superviseur : rondes reconstituées
     };
     r.onsuccess = () => { _db = r.result; res(_db); };
@@ -143,32 +153,51 @@ async function hkdfKey(bits, salt, usages) {
   const base = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt, info: HKDF_INFO }, base, { name: 'AES-GCM', length: 256 }, false, usages);
 }
-let _pubKey = null, _pubJwkStr = null;
-async function getPubKey() {
-  const jwk = state.cfg.pub;
+const _pubCache = new Map();
+async function importPub(jwk) {
   const s = JSON.stringify(jwk);
-  if (_pubKey && _pubJwkStr === s) return _pubKey;
-  _pubKey = await crypto.subtle.importKey('jwk', jwk, EC, false, []);
-  _pubJwkStr = s;
-  return _pubKey;
+  if (!_pubCache.has(s)) _pubCache.set(s, await crypto.subtle.importKey('jwk', jwk, EC, false, []));
+  return _pubCache.get(s);
 }
+function getPubKey() { return importPub(state.cfg.pub); }
+
+/* Chiffrement d'un objet (horodatage et position, dans chaque saisie) */
 async function seal(obj) {
-  const pub = await getPubKey();
+  const r = await sealBytesFor(await getPubKey(), te.encode(JSON.stringify(obj)));
+  return { epk: b64u.enc(r.subarray(1, 66)), iv: b64u.enc(r.subarray(66, 78)), ct: b64u.enc(r.subarray(78)) };
+}
+async function unseal(priv, sec) {
+  const parts = [new Uint8Array([1]), b64u.dec(sec.epk), b64u.dec(sec.iv), b64u.dec(sec.ct)];
+  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
+  parts.forEach(p => { all.set(p, o); o += p.length; });
+  return JSON.parse(td.decode(await unsealBytes(priv, all)));
+}
+/* Chiffrement d'un bloc d'octets : [1][clé éphémère 65][iv 12][chiffré + étiquette] */
+async function sealBytesFor(pubKey, bytes) {
   const eph = await crypto.subtle.generateKey(EC, true, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, eph.privateKey, 256);
+  const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pubKey }, eph.privateKey, 256);
   const epkRaw = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
   const key = await hkdfKey(bits, epkRaw, ['encrypt']);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(obj)));
-  return { epk: b64u.enc(epkRaw), iv: b64u.enc(iv), ct: b64u.enc(ct) };
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
+  const out = new Uint8Array(1 + 65 + 12 + ct.length);
+  out[0] = 1; out.set(epkRaw, 1); out.set(iv, 66); out.set(ct, 78);
+  return out;
 }
-async function unseal(priv, sec) {
-  const epkRaw = b64u.dec(sec.epk);
+async function unsealBytes(priv, data) {
+  if (data[0] !== 1 || data.length < 95) throw new Error('format chiffré inconnu');
+  const epkRaw = data.slice(1, 66);
   const epk = await crypto.subtle.importKey('raw', epkRaw, EC, false, []);
   const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: epk }, priv, 256);
   const key = await hkdfKey(bits, epkRaw, ['decrypt']);
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64u.dec(sec.iv) }, key, b64u.dec(sec.ct));
-  return JSON.parse(td.decode(pt));
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: data.slice(66, 78) }, key, data.slice(78)));
+}
+async function newKeyPair() {
+  const kp = await crypto.subtle.generateKey(EC, true, ['deriveBits']);
+  const privJwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
+  const p = await crypto.subtle.exportKey('jwk', kp.publicKey);
+  const priv = await crypto.subtle.importKey('jwk', privJwk, EC, false, ['deriveBits']); // non exportable
+  return { priv, privJwk, pub: { kty: p.kty, crv: p.crv, x: p.x, y: p.y } };
 }
 async function passKey(pass, salt, usages) {
   const base = await crypto.subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveKey']);
@@ -185,7 +214,25 @@ async function decryptWithPass(pass, box) {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64u.dec(box.iv) }, key, b64u.dec(box.ct));
   return JSON.parse(td.decode(pt));
 }
-async function getPrivKey() { return kvGet('privKey'); }
+
+/* ====================================================================== */
+/* Relais (boîte aux lettres Google Apps Script)                          */
+/* Requête « simple » (text/plain) : pas de pré-vol CORS, compatible avec */
+/* la redirection des applications web Apps Script.                       */
+/* ====================================================================== */
+async function relayCall(url, body, timeoutMs = 45000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  let r;
+  try {
+    r = await fetch(url, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow', signal: ctl.signal, cache: 'no-store' });
+  } catch (e) { throw new Error('relais injoignable'); }
+  finally { clearTimeout(t); }
+  if (!r.ok) throw new Error('relais : erreur ' + r.status);
+  let j; try { j = await r.json(); } catch (e) { throw new Error('relais : réponse illisible'); }
+  if (!j.ok) throw new Error('relais : ' + (j.err || 'refus'));
+  return j;
+}
 
 /* ====================================================================== */
 /* Configuration par défaut                                               */
@@ -214,15 +261,16 @@ function defaultConfig(pubJwk) {
       { lbl: 'Véhicules (ventouses, épaves)', cat: 'Véhicule (ventouse, épave, gênant)' }
     ],
     urgenceTel: '',
-    urgenceMail: ''
+    urgenceMail: '',
+    relay: null            // { url, agentTok } — code d'accès limité du téléphone agents
   };
 }
 const VEHICULE_RE = /v[ée]hicule/i;
 function siteById(id) { return state.cfg.sites.find(s => s.id === id); }
 function siteNom(id) { const s = siteById(id); return s ? s.nom : id; }
 function agentCfgPayload(cfg) {
-  // Ce qui part vers le téléphone des agents (jamais la clé privée)
-  return { v: cfg.v, cfgId: cfg.cfgId, pub: cfg.pub, sites: cfg.sites, agents: cfg.agents, dests: cfg.dests, cats: cfg.cats, checklist: cfg.checklist, urgenceTel: cfg.urgenceTel, urgenceMail: cfg.urgenceMail };
+  // Ce qui part vers le téléphone des agents (jamais la clé privée ni le code d'accès superviseur)
+  return { v: cfg.v, cfgId: cfg.cfgId, pub: cfg.pub, sites: cfg.sites, agents: cfg.agents, dests: cfg.dests, cats: cfg.cats, checklist: cfg.checklist, urgenceTel: cfg.urgenceTel, urgenceMail: cfg.urgenceMail, relay: cfg.relay || null };
 }
 function packCfg(cfg) { return b64u.enc(fflate.deflateSync(te.encode(JSON.stringify(agentCfgPayload(cfg))), { level: 9 })); }
 function unpackCfg(s) { return JSON.parse(td.decode(fflate.inflateSync(b64u.dec(s)))); }
@@ -231,8 +279,8 @@ function validCfg(c) {
 }
 
 /* ====================================================================== */
-/* Géolocalisation : uniquement pendant une ronde, jamais en continu hors */
-/* ronde. Seule la position au moment de chaque saisie est enregistrée.   */
+/* Géolocalisation : uniquement pendant une ronde. Seule la position au   */
+/* moment de chaque saisie est enregistrée.                               */
 /* ====================================================================== */
 const Geo = {
   watchId: null, last: null, err: null,
@@ -256,7 +304,7 @@ const Geo = {
 /* ====================================================================== */
 /* État de l'application et rendu                                         */
 /* ====================================================================== */
-const state = { mode: null, cfg: null, view: 'home', params: {}, cleanup: null };
+const state = { mode: null, cfg: null, view: 'home', params: {}, cleanup: null, sync: { busy: false, err: null } };
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -266,6 +314,7 @@ function h(tag, attrs, ...kids) {
     else if (k === 'style') el.style.cssText = v;
     else if (k === 'html') el.innerHTML = v;
     else if (k === 'value') el.value = v;
+    else if (k === 'checked') el.checked = !!v;
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? '' : v);
   }
@@ -303,19 +352,23 @@ function go(view, params = {}, opts = {}) {
   state.view = view; state.params = params;
   if (!opts.noPush && view !== 'home') history.pushState({ v: view }, '');
   render();
-  window.scrollTo(0, 0);
+  if (!opts.keepScroll) window.scrollTo(0, 0);
 }
+let _renderSeq = 0;
 async function render() {
   const root = document.getElementById('app');
   const fn = VIEWS[state.view] || VIEWS.home;
+  const my = ++_renderSeq;
   try {
     const node = await fn(state.params);
+    if (my !== _renderSeq) return;      // un rendu plus récent a été demandé entre-temps
     root.replaceChildren(node);
   } catch (e) {
     console.error(e);
     root.replaceChildren(page('Erreur', { back: true }, h('div', { class: 'banner bad' }, String(e && e.message || e))));
   }
 }
+function refreshIfHome() { if (state.view === 'home' && !document.getElementById('busy')) render(); }
 window.addEventListener('popstate', () => {
   if (state.view === 'signalement' && !confirm('Abandonner ce signalement ?')) { history.pushState({ v: state.view }, ''); return; }
   if (state.view !== 'home') go('home', {}, { noPush: true });
@@ -358,7 +411,19 @@ function photoInput(onFile) {
 }
 
 /* ====================================================================== */
-/* AGENT : journal chaîné                                                 */
+/* Statuts                                                                */
+/* ====================================================================== */
+const VERDICTS = { resolu: 'Résolu', encours: 'Toujours en cours', aggrave: 'Aggravé' };
+const STATUTS = { ouvert: 'Ouvert', clos: 'Clos' };
+function statutBadge(s) { return h('span', { class: 'badge ' + (s === 'clos' ? 'b-ok' : 'b-warn') }, STATUTS[s] || s); }
+function applyVerdict(sig, verdict, ts, agent) {
+  if (verdict === 'resolu') { sig.statut = 'clos'; sig.closLe = ts || new Date().toISOString(); sig.closPar = agent || 'agent'; }
+  else { sig.statut = 'ouvert'; sig.closLe = null; sig.closPar = null; }
+  if (verdict === 'aggrave') sig.aggrave = true;
+}
+
+/* ====================================================================== */
+/* AGENTS : journal chaîné                                                */
 /* ====================================================================== */
 async function appendEvent(type, base, data, secretExtra = {}, photos = []) {
   return withLock(async () => {
@@ -381,26 +446,123 @@ async function appendEvent(type, base, data, secretExtra = {}, photos = []) {
   });
 }
 async function addHisto(ev, row) { await dbPut('histo', { k: ev.seq, jour: ev.jour, site: ev.site, agent: ev.agent, ...row }); }
-async function savePhotos(list) { await dbPutMany('photos', list.map(p => ({ id: p.id, blob: p.blob, sha: p.sha }))); }
+async function savePhotos(list) { await dbPutMany('photos', list.map(p => ({ id: p.id, blob: p.blob, sha: p.sha, at: Date.now() }))); }
 
-const VERDICTS = { resolu: 'Résolu', encours: 'Toujours en cours', aggrave: 'Aggravé' };
-const STATUTS = { ouvert: 'Ouvert', a_cloturer: 'Résolu selon l’agent — à clôturer', clos: 'Clos' };
-function statutBadge(s) {
-  const cls = s === 'ouvert' ? 'b-warn' : s === 'a_cloturer' ? 'b-info' : 'b-ok';
-  return h('span', { class: 'badge ' + cls }, s === 'a_cloturer' ? 'À clôturer' : STATUTS[s] || s);
+/* Purge des saisies dont la réception est confirmée */
+async function purgeUpTo(n) {
+  return withLock(async () => {
+    const ack = (await kvGet('ack')) || 0;
+    const newAck = Math.max(ack, n);
+    const events = await dbAll('events');
+    const keep = new Set();
+    const d = await openDB();
+    const t = d.transaction(['events', 'kv'], 'readwrite');
+    for (const e of events) {
+      if (e.seq <= newAck) t.objectStore('events').delete(e.seq);
+      else e.photos.forEach(p => keep.add(p.id));
+    }
+    t.objectStore('kv').put(newAck, 'ack');
+    await txDone(t);
+    const photos = await dbAll('photos');
+    const t2 = d.transaction('photos', 'readwrite');
+    // une photo très récente peut appartenir à une saisie en cours d'enregistrement
+    photos.forEach(p => { if (!keep.has(p.id) && !(p.at && Date.now() - p.at < 3600000)) t2.objectStore('photos').delete(p.id); });
+    await txDone(t2);
+  });
 }
-function applyVerdict(sig, v) {
-  if (v.verdict === 'resolu' && sig.statut === 'ouvert') sig.statut = 'a_cloturer';
-  if (v.verdict === 'aggrave') { sig.aggrave = true; if (sig.statut === 'a_cloturer') sig.statut = 'ouvert'; }
-  if (v.verdict === 'encours' && sig.statut === 'a_cloturer') sig.statut = 'ouvert';
+/* Paquet : zip (journal + photos), puis chiffré pour le seul superviseur */
+async function buildPaquetSealed(events) {
+  const files = {};
+  const ids = new Set(events.flatMap(e => e.photos.map(p => p.id)));
+  for (const id of ids) {
+    const p = await dbGet('photos', id);
+    if (p) files[`photos/${id}.jpg`] = [new Uint8Array(await p.blob.arrayBuffer()), { level: 0 }];
+  }
+  const dev = await kvGet('dev');
+  const paquet = {
+    format: FMT_PAQUET, v: 2, app: APP_VERSION, dev, devPub: await kvGet('devPub'), cfgId: state.cfg.cfgId,
+    cree: new Date().toISOString(), from: events[0].seq, to: events[events.length - 1].seq, events
+  };
+  files['paquet.json'] = te.encode(JSON.stringify(paquet));
+  return { sealed: await sealBytesFor(await getPubKey(), fflate.zipSync(files)), from: paquet.from, to: paquet.to, dev };
+}
+async function nextBatch() {
+  const ack = (await kvGet('ack')) || 0;
+  const events = (await dbAll('events')).filter(e => e.seq > ack).sort((a, b) => a.seq - b.seq);
+  const batch = []; let bytes = 0;
+  for (const e of events) {
+    batch.push(e);
+    for (const p of e.photos) { const ph = await dbGet('photos', p.id); if (ph) bytes += ph.blob.size; }
+    if (bytes > LOT_MAX_OCTETS) break;
+  }
+  return batch;
+}
+
+/* ---------- Synchronisation automatique du téléphone agents ---------- */
+let _syncP = null;
+function syncNow() {
+  if (_syncP) return _syncP;
+  _syncP = (async () => {
+    state.sync.busy = true;
+    try { return state.mode === 'agent' ? await agentSync() : state.mode === 'superviseur' ? await supSync() : null; }
+    catch (e) { state.sync.err = e.message; await kvSet('syncErr', { at: new Date().toISOString(), msg: e.message }); return { err: e.message }; }
+    finally { state.sync.busy = false; _syncP = null; }
+  })();
+  return _syncP;
+}
+async function agentSync() {
+  const relay = state.cfg && state.cfg.relay;
+  if (!relay || !relay.url) return { skipped: true };
+  if (!navigator.onLine) return { offline: true };
+  const dev = await kvGet('dev');
+  let sent = 0;
+  for (let guard = 0; guard < 50; guard++) {
+    const batch = await nextBatch();
+    if (!batch.length) break;
+    const pk = await buildPaquetSealed(batch);
+    await relayCall(relay.url, { op: 'put', tok: relay.agentTok, dev, from: pk.from, to: pk.to, data: b64u.enc(pk.sealed) }, 120000);
+    await purgeUpTo(pk.to);
+    sent += batch.length;
+  }
+  // Interventions du superviseur et configuration
+  const r = await relayCall(relay.url, { op: 'getEtat', tok: relay.agentTok, dev });
+  let maj = false;
+  if (r.data && r.ver !== (await kvGet('etatVer'))) {
+    const bytes = await unsealBytes(await kvGet('devPriv'), b64u.dec(r.data));
+    await applyEtat(JSON.parse(td.decode(fflate.inflateSync(bytes))));
+    await kvSet('etatVer', r.ver);
+    maj = true;
+  }
+  state.sync.err = null;
+  await kvDel('syncErr');
+  await kvSet('lastSync', new Date().toISOString());
+  return { sent, maj };
+}
+async function applyEtat(etat) {
+  if (etat.format !== FMT_ETAT) throw new Error('Ce fichier n’est pas une mise à jour du DPMS.');
+  if (!validCfg(etat.cfg)) throw new Error('Configuration reçue invalide.');
+  if (JSON.stringify(etat.cfg.pub) !== JSON.stringify(state.cfg.pub)) throw new Error('Mise à jour produite par un autre superviseur : refusée.');
+  await kvSet('cfg', etat.cfg); state.cfg = etat.cfg;
+  const applied = new Set((await kvGet('appliedDec')) || []);
+  const decs = [...(etat.decisions || [])].sort((a, b) => a.ts.localeCompare(b.ts));
+  for (const d of decs) {
+    if (applied.has(d.id)) continue;
+    const local = await dbGet('sigs', d.sig.id);
+    if (!local || !local.lastLocalTs || d.ts > local.lastLocalTs) {
+      await dbPut('sigs', { ...(local || {}), ...d.sig, thumb: d.sig.thumb || (local && local.thumb) || null, lastLocalTs: (local && local.lastLocalTs) || null });
+    }
+    applied.add(d.id);
+  }
+  await kvSet('appliedDec', [...applied].slice(-3000));
+  const dev = await kvGet('dev');
+  if (etat.ack && etat.ack[dev]) await purgeUpTo(etat.ack[dev]);
+  await kvSet('lastEtatImport', new Date().toISOString());
 }
 
 /* ====================================================================== */
 /* VUES                                                                   */
 /* ====================================================================== */
 const VIEWS = {};
-
-/* ---------- Accueil (aiguillage) ---------- */
 VIEWS.home = async () => {
   if (!state.mode) return viewSetup();
   return state.mode === 'agent' ? agentHome() : supHome();
@@ -414,7 +576,7 @@ async function viewSetup() {
       h('div', { class: 'card' },
         h('h3', null, 'Configurer ce téléphone comme téléphone des agents ?'),
         h('p', { class: 'muted' }, `Parkings : ${pending.sites.map(s => s.nom).join(', ')}.`),
-        h('p', { class: 'muted' }, 'Les saisies seront chiffrées pour le seul téléphone superviseur qui a produit ce code.'),
+        h('p', { class: 'muted' }, pending.relay ? 'Envoi automatique des rondes activé.' : 'Transmission par fichier (relais non configuré).'),
         h('button', { class: 'ok', onclick: safe(async () => { await setupAgent(pending); }) }, 'Oui, configurer'),
         h('button', { class: 'sec', onclick: () => { state.pendingCfg = null; render(); } }, 'Annuler')));
   }
@@ -425,7 +587,7 @@ async function viewSetup() {
       h('button', { class: 'big', onclick: () => go('scan') }, 'Scanner le QR de configuration')),
     h('div', { class: 'card' },
       h('h3', null, 'Téléphone superviseur (DPMS)'),
-      h('p', { class: 'muted' }, 'Crée la clé qui seule permet de lire l’horodatage et la position des saisies.'),
+      h('p', { class: 'muted' }, 'Crée la clé qui seule permet de lire les rondes transmises.'),
       h('button', { class: 'sec', onclick: () => go('supInit') }, 'Créer le superviseur'),
       h('button', { class: 'sec', onclick: () => go('supRestore') }, 'Restaurer une sauvegarde superviseur')),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
@@ -437,13 +599,16 @@ async function setupAgent(cfg) {
   if (state.mode === 'agent') {
     if (JSON.stringify(state.cfg.pub) !== JSON.stringify(cfg.pub)) throw new Error('Ce code provient d’un autre superviseur. Réinitialisez d’abord le téléphone.');
     await kvSet('cfg', cfg); state.cfg = cfg; state.pendingCfg = null;
-    toast('Configuration mise à jour.'); go('home'); return;
+    toast('Configuration mise à jour.'); go('home'); syncNow().then(refreshIfHome); return;
   }
-  await kvSet('mode', 'agent');
-  await kvSet('cfg', cfg);
+  showBusy('Configuration…');
+  const kp = await newKeyPair();       // clé propre au téléphone : seul lui lit ce que le DPMS lui renvoie
+  await kvSet('devPriv', kp.priv); await kvSet('devPub', kp.pub);
   if (!(await kvGet('dev'))) await kvSet('dev', 'T-' + randCode(6));
+  await kvSet('cfg', cfg); await kvSet('mode', 'agent');
   state.mode = 'agent'; state.cfg = cfg; state.pendingCfg = null;
   await requestPersist();
+  hideBusy();
   toast('Téléphone des agents configuré.');
   go('home');
 }
@@ -494,7 +659,6 @@ VIEWS.scan = async () => {
   return node;
 };
 
-/* Traite un lien (QR scanné ou URL d'ouverture) */
 function parseLink(text) {
   let hash = '';
   try { hash = new URL(text, appBaseURL()).hash; } catch (e) { hash = ''; }
@@ -524,25 +688,41 @@ async function handleLink(text, fromScan) {
 }
 
 /* ====================================================================== */
-/* AGENT                                                                  */
+/* AGENTS                                                                 */
 /* ====================================================================== */
 async function agentHome() {
   const ronde = await kvGet('ronde');
   const sigs = await dbAll('sigs');
   const head = (await kvGet('head')) || { seq: 0 };
   const ack = (await kvGet('ack')) || 0;
-  const lastExport = await kvGet('lastExport');
-  const lastEtat = await kvGet('lastEtatImport');
-  const nonTransmis = head.seq - ack;
+  const lastSync = await kvGet('lastSync');
+  const syncErr = await kvGet('syncErr');
+  const enAttente = head.seq - ack;
   const cfg = state.cfg;
+  const auto = !!(cfg.relay && cfg.relay.url);
 
   const perSite = cfg.sites.map(s => {
     const o = sigs.filter(x => x.site === s.id && x.statut === 'ouvert').length;
-    const a = sigs.filter(x => x.site === s.id && x.statut === 'a_cloturer').length;
-    return h('div', { class: 'stat' }, h('span', null, s.nom), h('span', null,
-      h('b', null, o), h('span', { class: 'muted small' }, o > 1 ? ' ouverts' : ' ouvert'),
-      a ? h('span', { class: 'badge b-info' }, a + ' à clôturer') : null));
+    return h('div', { class: 'stat' }, h('span', null, s.nom), h('span', null, h('b', null, o), h('span', { class: 'muted small' }, o > 1 ? ' ouverts' : ' ouvert')));
   });
+
+  let transmission;
+  if (auto) {
+    transmission = h('div', { class: 'card' }, h('h2', null, 'Envoi au DPMS'),
+      enAttente > 0
+        ? h('div', { class: 'banner warn' }, `${enAttente} saisie(s) en attente d’envoi. L’envoi est automatique dès que le réseau est disponible.`)
+        : h('div', { class: 'banner ok' }, 'Tout est envoyé.'),
+      lastSync ? h('p', { class: 'muted small' }, `Dernière liaison ${fmtQuand(lastSync)}.`) : null,
+      syncErr && enAttente > 0 ? h('p', { class: 'muted small' }, `Dernier essai : ${syncErr.msg}.`) : null,
+      enAttente > 0 ? h('button', { class: 'sec', disabled: state.sync.busy, onclick: safe(async () => { showBusy('Envoi…'); const r = await syncNow(); hideBusy(); toast(r && r.err ? 'Envoi impossible : ' + r.err : r && r.offline ? 'Pas de réseau.' : 'Envoyé.', !!(r && (r.err || r.offline))); render(); }) }, 'Envoyer maintenant') : null);
+  } else {
+    transmission = h('div', { class: 'card' }, h('h2', null, 'Transmission au DPMS (par fichier)'),
+      enAttente > 0
+        ? h('div', { class: 'banner warn' }, `${enAttente} saisie(s) non encore reçue(s) par le DPMS.`)
+        : h('div', { class: 'banner ok' }, 'Tout a été reçu par le DPMS.'),
+      h('button', { disabled: enAttente <= 0 || !!ronde, onclick: safe(agentExportFichier) }, 'Transmettre au DPMS'),
+      h('button', { class: 'sec', onclick: safe(agentImportFichier) }, 'Recevoir la mise à jour du DPMS'));
+  }
 
   return page('Rondes parkings', null,
     ronde ? h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
@@ -554,15 +734,7 @@ async function agentHome() {
         h('button', { class: 'link', onclick: () => go('siteManuel') }, 'QR code illisible ? Démarrer sans QR')),
     h('div', { class: 'card' }, h('h2', null, 'Signalements en cours'), ...perSite,
       h('button', { class: 'sec', onclick: () => go('agentSigs') }, 'Voir les signalements')),
-    h('div', { class: 'card' }, h('h2', null, 'Transmission au DPMS'),
-      nonTransmis > 0
-        ? h('div', { class: 'banner warn' }, `${nonTransmis} saisie(s) non encore reçue(s) par le DPMS.`)
-        : h('div', { class: 'banner ok' }, 'Tout a été reçu par le DPMS.'),
-      lastExport ? h('p', { class: 'muted small' }, `Dernier envoi : ${fmtDT(lastExport.at)} (saisies ${lastExport.from} à ${lastExport.to}).`) : null,
-      lastEtat ? h('p', { class: 'muted small' }, `Dernière mise à jour reçue du DPMS : ${fmtDT(lastEtat)}.`) : null,
-      h('button', { disabled: nonTransmis <= 0 || !!ronde, onclick: safe(agentExport) }, 'Transmettre au DPMS'),
-      ronde ? h('p', { class: 'muted small' }, 'Terminez la ronde avant de transmettre.') : null,
-      h('button', { class: 'sec', onclick: safe(agentImportEtat) }, 'Recevoir la mise à jour du DPMS')),
+    transmission,
     h('div', { class: 'card' }, h('h2', null, 'Extrait Excel'),
       h('div', { class: 'row' },
         h('button', { class: 'sec', onclick: safe(() => agentExcel(7)) }, '7 jours'),
@@ -656,9 +828,11 @@ VIEWS.revue = async () => {
       const ev = await appendEvent('revue', ronde, { sig: s.id, ref: s.ref, verdict: d.verdict, comment: d.comment.trim() },
         { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
       const sig = await dbGet('sigs', s.id);
+      const now = new Date().toISOString();
       sig.suivi = sig.suivi || [];
       sig.suivi.push({ jour: ev.jour, agent: ronde.agent, verdict: d.verdict, comment: d.comment.trim() });
-      applyVerdict(sig, d);
+      applyVerdict(sig, d.verdict, now, ronde.agent);
+      sig.lastLocalTs = now;
       await dbPut('sigs', sig);
       await addHisto(ev, { type: 'Constat de suivi', ref: s.ref, cat: s.cat, desc: s.desc, plaque: s.plaque, verdict: VERDICTS[d.verdict], comment: d.comment.trim() });
       delete revueDraft[s.id];
@@ -668,7 +842,7 @@ VIEWS.revue = async () => {
   });
   refresh();
   return page(`Revue : ${siteNom(ronde.site)}`, null,
-    h('div', { class: 'banner info' }, `${open.length} signalement(s) en cours sur ce parking. Indiquez leur état aujourd’hui.`),
+    h('div', { class: 'banner info' }, `${open.length} signalement(s) en cours sur ce parking. Indiquez leur état aujourd’hui. « Résolu » clôt le signalement.`),
     ...cards, h('div', { style: 'height:70px' }),
     h('div', { class: 'sticky-bottom' }, h('div', null, btnValider)));
 };
@@ -722,7 +896,16 @@ async function finishRonde(ronde, silent) {
   await kvDel('ronde');
   Geo.stop();
   hideBusy();
-  if (!silent) { toast('Ronde terminée et enregistrée.'); go('home'); }
+  if (!silent) {
+    const auto = !!(state.cfg.relay && state.cfg.relay.url);
+    toast(auto ? 'Ronde terminée. Envoi au DPMS en cours…' : 'Ronde terminée et enregistrée.');
+    go('home');
+    if (auto) syncNow().then(r => {
+      if (r && r.sent) toast('Ronde envoyée au DPMS.');
+      else if (r && (r.offline || r.err)) toast('Pas de réseau : la ronde partira automatiquement plus tard.');
+      refreshIfHome();
+    });
+  }
 }
 
 /* ---------- Nouveau signalement ---------- */
@@ -758,10 +941,11 @@ VIEWS.signalement = async ({ cat, from, item }) => {
     if (!d.dests.length) throw new Error('Choisissez au moins un destinataire.');
     showBusy('Enregistrement…');
     const site = siteById(ronde.site);
+    const now = new Date().toISOString();
     const sig = {
       id: uuid(), ref: `${site.code}-${randCode(5)}`, site: ronde.site, cat: d.cat, desc: d.desc.trim(),
       plaque: VEHICULE_RE.test(d.cat) ? d.plaque.trim().toUpperCase() : '', dests: [...d.dests], urgent: d.urgent,
-      statut: 'ouvert', jour: localDate(), agent: ronde.agent, thumb: d.photos[0] ? d.photos[0].thumb : null, suivi: []
+      statut: 'ouvert', jour: localDate(), agent: ronde.agent, thumb: d.photos[0] ? d.photos[0].thumb : null, suivi: [], lastLocalTs: now
     };
     await savePhotos(d.photos);
     const ev = await appendEvent('signalement', ronde,
@@ -775,6 +959,7 @@ VIEWS.signalement = async ({ cat, from, item }) => {
     hideBusy();
     toast(`Signalement ${sig.ref} enregistré.`);
     go(from === 'checklist' ? 'checklist' : 'ronde');
+    if (sig.urgent) syncNow();     // un signalement urgent part sans attendre la fin de la ronde
   });
 
   return page('Nouveau signalement', { back },
@@ -793,12 +978,12 @@ VIEWS.signalement = async ({ cat, from, item }) => {
     h('div', { class: 'sticky-bottom' }, h('div', null, h('button', { class: 'ok', onclick: save }, 'Enregistrer le signalement'))));
 };
 
-/* ---------- Liste des signalements (agent) ---------- */
+/* ---------- Liste des signalements (agents) ---------- */
 VIEWS.agentSigs = async () => {
-  const sigs = (await dbAll('sigs')).filter(s => s.statut !== 'clos').sort((a, b) => (b.jour || '').localeCompare(a.jour || ''));
+  const sigs = (await dbAll('sigs')).filter(s => s.statut === 'ouvert').sort((a, b) => (b.jour || '').localeCompare(a.jour || ''));
   return page('Signalements en cours', { back: true },
     sigs.length ? sigs.map(s => h('div', { class: 'card' },
-      h('h3', null, s.cat, statutBadge(s.statut), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null),
+      h('h3', null, s.cat, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
       h('p', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${fmtJour(s.jour)}`),
       s.desc ? h('p', null, s.desc) : null,
       s.plaque ? h('p', null, h('b', null, 'Plaque : '), s.plaque) : null,
@@ -807,81 +992,26 @@ VIEWS.agentSigs = async () => {
       : h('p', { class: 'muted' }, 'Aucun signalement en cours.'));
 };
 
-/* ---------- Transmission (agent → superviseur) ---------- */
-async function agentExport() {
+/* ---------- Secours sans relais : fichiers ---------- */
+async function agentExportFichier() {
   const ack = (await kvGet('ack')) || 0;
   const events = (await dbAll('events')).filter(e => e.seq > ack).sort((a, b) => a.seq - b.seq);
   if (!events.length) { toast('Rien à transmettre.'); return; }
   showBusy('Préparation du fichier…');
-  const files = {};
-  const ids = new Set(events.flatMap(e => e.photos.map(p => p.id)));
-  for (const id of ids) {
-    const p = await dbGet('photos', id);
-    if (p) files[`photos/${id}.jpg`] = [new Uint8Array(await p.blob.arrayBuffer()), { level: 0 }];
-  }
-  const dev = await kvGet('dev');
-  const paquet = { format: FMT_PAQUET, v: 1, app: APP_VERSION, dev, cfgId: state.cfg.cfgId, cree: new Date().toISOString(), from: events[0].seq, to: events[events.length - 1].seq, events };
-  files['paquet.json'] = te.encode(JSON.stringify(paquet));
-  const zip = fflate.zipSync(files);
-  const name = `rondes_${dev}_${fileStamp()}_${paquet.from}-${paquet.to}.zip`;
-  await kvSet('lastExport', { at: new Date().toISOString(), from: paquet.from, to: paquet.to });
+  const pk = await buildPaquetSealed(events);
   hideBusy();
-  const r = await shareOrDownload(new Blob([zip], { type: 'application/zip' }), name, 'Rondes parkings');
-  if (r !== 'annule') toast('Fichier prêt. Il reste à l’envoyer au DPMS (Quick Share, courriel…).');
-  render();
+  const r = await shareOrDownload(new Blob([pk.sealed], { type: 'application/octet-stream' }), `rondes_${pk.dev}_${fileStamp()}_${pk.from}-${pk.to}.rondes`, 'Rondes parkings');
+  if (r !== 'annule') toast('Fichier chiffré prêt : à envoyer au DPMS (Quick Share, courriel…).');
 }
-
-/* ---------- Mise à jour reçue du superviseur ---------- */
-async function agentImportEtat() {
+async function agentImportFichier() {
   const f = await pickFile('.json,application/json');
   if (!f) return;
-  showBusy('Lecture de la mise à jour…');
-  const etat = JSON.parse(await f.text());
-  if (etat.format !== FMT_ETAT) throw new Error('Ce fichier n’est pas une mise à jour du DPMS.');
-  if (!validCfg(etat.cfg)) throw new Error('Configuration du fichier invalide.');
-  if (JSON.stringify(etat.cfg.pub) !== JSON.stringify(state.cfg.pub)) throw new Error('Fichier produit par un autre superviseur : refusé.');
-  const dev = await kvGet('dev');
-  const ack = Math.max((await kvGet('ack')) || 0, (etat.ack && etat.ack[dev]) || 0);
-  await kvSet('cfg', etat.cfg); state.cfg = etat.cfg;
-  await withLock(async () => {
-    // 1. Purge des saisies reçues par le DPMS
-    const events = await dbAll('events');
-    const d = await openDB();
-    const t = d.transaction(['events', 'photos', 'sigs', 'kv'], 'readwrite');
-    const keepPhotos = new Set();
-    for (const e of events) {
-      if (e.seq <= ack) t.objectStore('events').delete(e.seq);
-      else e.photos.forEach(p => keepPhotos.add(p.id));
-    }
-    // 2. État des signalements : le DPMS fait foi
-    t.objectStore('sigs').clear();
-    const sigs = new Map(etat.sigs.map(s => [s.id, s]));
-    // 3. Réapplication des saisies locales non encore reçues
-    for (const e of events.filter(e => e.seq > ack).sort((a, b) => a.seq - b.seq)) {
-      if (e.t === 'signalement' && !sigs.has(e.data.id)) {
-        const local = await dbGet('sigs', e.data.id);
-        sigs.set(e.data.id, local || { id: e.data.id, ref: e.data.ref, site: e.site, cat: e.data.cat, desc: e.data.desc, plaque: e.data.plaque, dests: e.data.dests, urgent: e.data.urgent, statut: 'ouvert', jour: e.jour, agent: e.agent, suivi: [] });
-      }
-      if (e.t === 'revue' && sigs.has(e.data.sig)) {
-        const s = sigs.get(e.data.sig);
-        if (s.statut !== 'clos') { s.suivi = s.suivi || []; s.suivi.push({ jour: e.jour, agent: e.agent, verdict: e.data.verdict, comment: e.data.comment }); applyVerdict(s, e.data); }
-      }
-    }
-    sigs.forEach(s => t.objectStore('sigs').put(s));
-    t.objectStore('kv').put(ack, 'ack');
-    t.objectStore('kv').put(new Date().toISOString(), 'lastEtatImport');
-    await txDone(t);
-    const photos = await dbAll('photos');
-    const d2 = await openDB(); const t2 = d2.transaction('photos', 'readwrite');
-    photos.forEach(p => { if (!keepPhotos.has(p.id)) t2.objectStore('photos').delete(p.id); });
-    await txDone(t2);
-  });
-  hideBusy();
-  toast('Mise à jour du DPMS appliquée.');
-  go('home');
+  showBusy('Lecture…');
+  await applyEtat(JSON.parse(await f.text()));
+  hideBusy(); toast('Mise à jour du DPMS appliquée.'); go('home');
 }
 
-/* ---------- Extrait Excel (agent) : sans horodatage précis ni position ---------- */
+/* ---------- Extrait Excel (agents) : sans horodatage précis ni position ---------- */
 async function agentExcel(jours) {
   const lim = localDate(new Date(Date.now() - jours * 86400000));
   const rows = (await dbAll('histo')).filter(r => r.jour >= lim).sort((a, b) => a.k - b.k);
@@ -889,7 +1019,7 @@ async function agentExcel(jours) {
   const aoa = [['Date', 'Parking', 'Agent', 'Type', 'Réf.', 'Catégorie', 'Description', 'Plaque', 'Destinataires', 'Urgent', 'Constat', 'Commentaire']];
   rows.forEach(r => aoa.push([fmtJour(r.jour), siteNom(r.site), r.agent || '', r.type, r.ref || '', r.cat || '', r.desc || '', r.plaque || '', r.dests || '', r.urgent || '', r.verdict || '', r.comment || '']));
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [10, 12, 12, 12, 11, 24, 50, 12, 28, 8, 16, 30].map(w => ({ wch: w }));
+  ws['!cols'] = [10, 12, 12, 16, 11, 24, 50, 12, 28, 8, 16, 30].map(w => ({ wch: w }));
   ws['!autofilter'] = { ref: ws['!ref'] };
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Rondes');
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -902,20 +1032,26 @@ VIEWS.reglages = async () => {
   try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : null; } catch (e) { }
   let est = null; try { est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null; } catch (e) { }
   const dev = await kvGet('dev');
+  const auto = !!(state.cfg && state.cfg.relay && state.cfg.relay.url);
   return page('Réglages', { back: true },
     h('div', { class: 'card' }, h('dl', { class: 'kv' },
       h('dt', null, 'Mode'), h('dd', null, state.mode === 'agent' ? 'Téléphone agents' : 'Superviseur'),
       dev ? [h('dt', null, 'Identifiant'), h('dd', null, dev)] : null,
       state.cfg ? [h('dt', null, 'Configuration'), h('dd', null, state.cfg.cfgId)] : null,
+      h('dt', null, 'Transmission'), h('dd', null, auto ? 'automatique (relais)' : 'par fichier'),
       h('dt', null, 'Stockage protégé'), h('dd', null, persisted === true ? 'Oui' : persisted === false ? 'Non (installez l’application sur l’écran d’accueil)' : 'Inconnu'),
       est ? [h('dt', null, 'Espace utilisé'), h('dd', null, (est.usage / 1048576).toFixed(1) + ' Mo')] : null,
       h('dt', null, 'Version'), h('dd', null, APP_VERSION))),
-    persisted === false ? h('button', { class: 'sec', onclick: safe(async () => { const ok = await requestPersist(); toast(ok ? 'Stockage protégé.' : 'Refusé par le navigateur.' , !ok); render(); }) }, 'Demander la protection du stockage') : null,
+    persisted === false ? h('button', { class: 'sec', onclick: safe(async () => { const ok = await requestPersist(); toast(ok ? 'Stockage protégé.' : 'Refusé par le navigateur.', !ok); render(); }) }, 'Demander la protection du stockage') : null,
     state.mode === 'agent' ? h('button', { class: 'sec', onclick: () => go('scan') }, 'Scanner une nouvelle configuration') : null,
+    state.mode === 'agent' && auto ? h('div', { class: 'card' }, h('h2', null, 'Secours sans réseau'),
+      h('p', { class: 'muted small' }, 'Uniquement si l’envoi automatique est impossible durablement.'),
+      h('button', { class: 'sec', onclick: safe(agentExportFichier) }, 'Transmettre par fichier'),
+      h('button', { class: 'sec', onclick: safe(agentImportFichier) }, 'Recevoir une mise à jour par fichier')) : null,
     h('hr'),
     h('div', { class: 'card' }, h('h2', null, 'Réinitialiser'),
       h('p', { class: 'muted small' }, state.mode === 'agent'
-        ? 'Efface toutes les données de ce téléphone, y compris les saisies non transmises.'
+        ? 'Efface toutes les données de ce téléphone, y compris les saisies non envoyées.'
         : 'Efface la clé et toutes les données. Sans sauvegarde, rien ne pourra être relu.'),
       h('button', {
         class: 'danger', onclick: safe(async () => {
@@ -944,14 +1080,10 @@ VIEWS.supInit = async () => {
         if (p1.value.length < 12) throw new Error('12 caractères minimum.');
         if (p1.value !== p2.value) throw new Error('Les deux saisies diffèrent.');
         showBusy('Création de la clé…');
-        const kp = await crypto.subtle.generateKey(EC, true, ['deriveBits']);
-        const privJwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
-        const pubFull = await crypto.subtle.exportKey('jwk', kp.publicKey);
-        const pub = { kty: pubFull.kty, crv: pubFull.crv, x: pubFull.x, y: pubFull.y };
-        const privEnc = await encryptWithPass(p1.value, privJwk);
-        const priv = await crypto.subtle.importKey('jwk', privJwk, EC, false, ['deriveBits']);
-        const cfg = defaultConfig(pub);
-        await kvSet('privKey', priv); await kvSet('privEnc', privEnc);
+        const kp = await newKeyPair();
+        const privEnc = await encryptWithPass(p1.value, kp.privJwk);
+        const cfg = defaultConfig(kp.pub);
+        await kvSet('privKey', kp.priv); await kvSet('privEnc', privEnc);
         await kvSet('cfg', cfg); await kvSet('mode', 'superviseur'); await kvSet('devs', {});
         state.mode = 'superviseur'; state.cfg = cfg;
         await requestPersist();
@@ -988,8 +1120,11 @@ VIEWS.supRestore = async () => page('Restaurer le superviseur', { back: true },
       await kvSet('privKey', priv); await kvSet('privEnc', cle.privEnc);
       const cfg = (db && db.cfg) || cle.cfg;
       await kvSet('cfg', cfg); await kvSet('mode', 'superviseur'); await kvSet('devs', (db && db.devs) || {});
+      const relaySup = (db && db.relaySup) || cle.relaySup;
+      if (relaySup) await kvSet('relaySup', relaySup);
       if (db) {
         await dbPutMany('sigs', db.sigs); await dbPutMany('sup_events', db.events); await dbPutMany('rondes', db.rondes);
+        await kvSet('decisions', db.decisions || []);
         const shaMap = {};
         db.events.forEach(e => (e.photos || []).forEach(p => shaMap[p.id] = p.sha));
         await dbPutMany('photos', Object.entries(photos).map(([id, bytes]) => ({ id, blob: new Blob([bytes], { type: 'image/jpeg' }), sha: shaMap[id] || null })));
@@ -997,55 +1132,157 @@ VIEWS.supRestore = async () => page('Restaurer le superviseur', { back: true },
       state.mode = 'superviseur'; state.cfg = cfg;
       await requestPersist();
       hideBusy(); toast('Superviseur restauré.'); go('home');
+      syncNow().then(refreshIfHome);
     })
   }, 'Choisir le fichier'));
+
+/* ---------- Relève automatique (superviseur) ---------- */
+async function supSync() {
+  const rs = await kvGet('relaySup');
+  if (!rs || !rs.url) return { skipped: true };
+  if (!navigator.onLine) return { offline: true };
+  const priv = await getPrivKey();
+  const list = await relayCall(rs.url, { op: 'list', tok: rs.supTok });
+  const rapport = nouveauRapport();
+  for (const f of list.files) {
+    const g = await relayCall(rs.url, { op: 'get', tok: rs.supTok, id: f.id }, 120000);
+    try {
+      const zipBytes = await unsealBytes(priv, b64u.dec(g.data));
+      await importPaquetZip(zipBytes, rapport);
+      await relayCall(rs.url, { op: 'del', tok: rs.supTok, id: f.id });
+      rapport.fichiers++;
+    } catch (e) {
+      rapport.alertes.push(`Envoi ${f.nom} illisible (${e.message}) : laissé sur le relais.`);
+    }
+  }
+  if (rapport.fichiers || rapport.alertes.length) await enregistrerRapport(rapport);
+  await pushEtats();
+  state.sync.err = null;
+  await kvDel('syncErr');
+  await kvSet('lastSupSync', new Date().toISOString());
+  return rapport;
+}
+async function getPrivKey() { return kvGet('privKey'); }
+function nouveauRapport() { return { at: new Date().toISOString(), fichiers: 0, importes: 0, dejaRecus: 0, nouveauxSigs: 0, revues: 0, rondes: 0, alertes: [] }; }
+async function enregistrerRapport(r) {
+  const journal = (await kvGet('journalSync')) || [];
+  journal.unshift(r);
+  await kvSet('journalSync', journal.slice(0, 100));
+  if (r.alertes.length) {
+    const al = (await kvGet('alertes')) || [];
+    r.alertes.forEach(a => al.unshift({ at: r.at, msg: a, vu: false }));
+    await kvSet('alertes', al.slice(0, 500));
+  }
+}
+
+/* Mise à jour envoyée au téléphone agents : uniquement si le superviseur est intervenu */
+function sigSnapshot(s) {
+  return { id: s.id, ref: s.ref, site: s.site, cat: s.cat, desc: s.desc, plaque: s.plaque, dests: s.dests, urgent: !!s.urgent, aggrave: !!s.aggrave, statut: s.statut, closLe: s.closLe || null, closPar: s.closPar || null, jour: s.jour, agent: s.agent, thumb: s.thumb || null, notesAgents: s.notesAgents || '', suivi: (s.suivi || []).map(v => ({ jour: v.jour, agent: v.agent, verdict: v.verdict, comment: v.comment })) };
+}
+async function buildEtat(withAck) {
+  const devs = (await kvGet('devs')) || {};
+  const lim = new Date(Date.now() - DECISIONS_JOURS * 86400000).toISOString();
+  const decisions = ((await kvGet('decisions')) || []).filter(d => d.ts >= lim);
+  const etat = { format: FMT_ETAT, v: 2, cree: new Date().toISOString(), cfg: agentCfgPayload(state.cfg), decisions };
+  if (withAck) etat.ack = Object.fromEntries(Object.entries(devs).map(([d, v]) => [d, v.seq]));
+  return etat;
+}
+async function pushEtats(force) {
+  const rs = await kvGet('relaySup');
+  if (!rs || !rs.url) return;
+  if (!force && !(await kvGet('etatDirty'))) return;
+  const devs = (await kvGet('devs')) || {};
+  const etat = await buildEtat(false);
+  const bytes = fflate.deflateSync(te.encode(JSON.stringify(etat)));
+  let n = 0;
+  for (const [dev, v] of Object.entries(devs)) {
+    if (!v.pub) continue;
+    const sealed = await sealBytesFor(await importPub(v.pub), bytes);
+    await relayCall(rs.url, { op: 'putEtat', tok: rs.supTok, dev, data: b64u.enc(sealed) }, 120000);
+    n++;
+  }
+  if (n) await kvSet('etatDirty', false);
+}
+async function marquerModifie() {
+  await kvSet('etatDirty', true);
+  syncNow();
+}
 
 async function supHome() {
   const sigs = await dbAll('sigs');
   const devs = (await kvGet('devs')) || {};
-  const lastImport = await kvGet('lastImport');
+  const rs = await kvGet('relaySup');
+  const lastSync = await kvGet('lastSupSync');
+  const syncErr = await kvGet('syncErr');
   const lastBackup = await kvGet('lastBackup');
-  const n = st => sigs.filter(s => s.statut === st).length;
-  const urg = sigs.filter(s => s.statut === 'ouvert' && s.urgent).length;
+  const alertes = ((await kvGet('alertes')) || []).filter(a => !a.vu);
+  const journal = (await kvGet('journalSync')) || [];
+  const ouverts = sigs.filter(s => s.statut === 'ouvert');
+  const urg = ouverts.filter(s => s.urgent).length;
+  const rondes = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 5);
   const backupOld = !lastBackup || (Date.now() - new Date(lastBackup).getTime()) > 7 * 86400000;
+  const derniere = journal.find(j => j.importes);
+
   return page('Rondes parkings', null,
-    backupOld ? h('div', { class: 'banner warn' }, lastBackup ? `Dernière sauvegarde le ${fmtDT(lastBackup)}. Faites-en une et versez-la sur un stockage de la Ville.` : 'Aucune sauvegarde : faites-en une et versez-la sur un stockage de la Ville.') : null,
-    h('button', { class: 'big', onclick: safe(supImport) }, 'Importer une transmission'),
-    lastImport ? h('p', { class: 'muted small' }, `Dernier import : ${fmtDT(lastImport)}.`) : null,
+    !rs ? h('div', { class: 'banner warn' }, 'Transmission automatique non configurée.', h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Configurer')) : null,
+    rs ? h('div', { class: 'card' },
+      h('div', { class: 'stat' },
+        h('span', null, state.sync.busy ? 'Relève en cours…' : lastSync ? `Relevé ${fmtQuand(lastSync)}` : 'Jamais relevé'),
+        h('button', { class: 'chip', style: 'width:auto', disabled: state.sync.busy, onclick: safe(async () => { const r = await syncNow(); toast(r && r.err ? 'Relève impossible : ' + r.err : r && r.offline ? 'Pas de réseau.' : r && r.fichiers ? `${r.rondes} ronde(s) et ${r.nouveauxSigs} signalement(s) reçus.` : 'Rien de nouveau.', !!(r && (r.err || r.offline))); render(); }) }, 'Actualiser')),
+      syncErr ? h('p', { class: 'muted small' }, 'Dernier essai : ' + syncErr.msg) : null,
+      derniere ? h('p', { class: 'muted small' }, `Dernière réception ${fmtQuand(derniere.at)} : ${derniere.rondes} ronde(s), ${derniere.nouveauxSigs} signalement(s), ${derniere.revues} constat(s).`) : null) : null,
+    alertes.length ? h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supAlertes') },
+      h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
+      h('div', { class: 'muted small' }, alertes[0].msg)) : null,
     h('div', { class: 'card' }, h('h2', null, 'Signalements'),
-      h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'ouvert' }) }, h('div', { class: 'stat' }, h('span', null, 'Ouverts', urg ? h('span', { class: 'badge b-bad' }, urg + ' urgent(s)') : null), h('b', null, n('ouvert')))),
-      h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'a_cloturer' }) }, h('div', { class: 'stat' }, h('span', null, 'Résolus selon l’agent, à clôturer'), h('b', null, n('a_cloturer')))),
-      h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'clos' }) }, h('div', { class: 'stat' }, h('span', null, 'Clos'), h('b', null, n('clos'))))),
-    h('div', { class: 'card' }, h('h2', null, 'Retour vers le téléphone des agents'),
-      h('p', { class: 'muted small' }, 'Après chaque import : envoie vos clôtures et accuse réception, ce qui libère la mémoire du téléphone.'),
-      h('button', { onclick: safe(supExportEtat) }, 'Préparer la mise à jour')),
+      h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'ouvert' }) }, h('div', { class: 'stat' }, h('span', null, 'En cours', urg ? h('span', { class: 'badge b-bad' }, urg + ' urgent(s)') : null), h('b', null, ouverts.length))),
+      h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'clos' }) }, h('div', { class: 'stat' }, h('span', null, 'Clos'), h('b', null, sigs.length - ouverts.length)))),
+    h('div', { class: 'card' }, h('h2', null, 'Dernières rondes'),
+      rondes.length ? rondes.map(rondeLigne) : h('p', { class: 'muted' }, 'Aucune ronde reçue.'),
+      rondes.length ? h('button', { class: 'sec', onclick: () => go('supRondes') }, 'Toutes les rondes') : null),
     h('div', { class: 'card' }, h('h2', null, 'Exports et sauvegarde'),
+      backupOld ? h('div', { class: 'banner warn' }, lastBackup ? `Dernière sauvegarde ${fmtQuand(lastBackup)}.` : 'Aucune sauvegarde.') : null,
       h('button', { class: 'sec', onclick: safe(supExcel) }, 'Excel complet (heures et positions)'),
       h('button', { class: 'sec', onclick: safe(supBackup) }, 'Sauvegarde complète (.zip)'),
       h('button', { class: 'sec', onclick: () => go('supCle') }, 'Clé de secours')),
     h('div', { class: 'card' }, h('h2', null, 'Paramétrage'),
+      h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Transmission automatique'),
       h('button', { class: 'sec', onclick: () => go('supQR') }, 'QR codes (parkings et configuration)'),
       h('button', { class: 'sec', onclick: () => go('supConfig') }, 'Listes et coordonnées'),
-      h('button', { class: 'sec', onclick: () => go('supRondes') }, 'Historique des rondes')),
+      h('button', { class: 'sec', onclick: () => go('supSecours') }, 'Secours : transmission par fichier')),
     Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Téléphones connus'),
-      ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', null, d), h('span', { class: 'muted small' }, `saisie n° ${v.seq} — ${fmtDT(v.at)}`)))) : null,
+      ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', null, d), h('span', { class: 'muted small' }, `saisie n° ${v.seq} — reçue ${fmtQuand(v.at)}`)))) : null,
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
+function rondeLigne(r) {
+  const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
+  const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v === 'Anomalie').map(([k]) => k) : [];
+  return h('div', { class: 'stat', style: 'display:block' },
+    h('div', null, h('b', null, `${siteNom(r.site)} — ${r.agent}`), r.qr === false ? h('span', { class: 'badge b-warn' }, 'sans QR') : null, !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null),
+    h('div', { class: 'muted small' }, `${fmtDT(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${dur != null ? ` (${dur} min)` : ''} — ${r.nbSig} signalement(s), ${r.nbRevue} constat(s)`),
+    anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null);
+}
 
-/* ---------- Import d'une transmission ---------- */
-async function supImport() {
-  const f = await pickFile('.zip,application/zip');
-  if (!f) return;
-  showBusy('Vérification et déchiffrement…');
-  const z = fflate.unzipSync(new Uint8Array(await f.arrayBuffer()));
-  if (!z['paquet.json']) throw new Error('Ce fichier n’est pas une transmission de rondes.');
+VIEWS.supAlertes = async () => {
+  const al = (await kvGet('alertes')) || [];
+  const node = page('Points d’attention', { back: true },
+    h('p', { class: 'muted small' }, 'Contrôles automatiques à la réception : intégrité des saisies, démarrages sans QR, photos anciennes, absence de position.'),
+    al.length ? al.slice(0, 200).map(a => h('div', { class: 'card', style: a.vu ? '' : 'border-color:var(--warn)' }, h('div', { class: 'muted small' }, fmtDT(a.at)), h('div', null, a.msg)))
+      : h('p', { class: 'muted' }, 'Aucun.'));
+  if (al.some(a => !a.vu)) { al.forEach(a => a.vu = true); await kvSet('alertes', al); }
+  return node;
+};
+
+/* ---------- Import d'un paquet (relais ou fichier) ---------- */
+async function importPaquetZip(zipBytes, rapport) {
+  const z = fflate.unzipSync(zipBytes);
+  if (!z['paquet.json']) throw new Error('paquet sans journal');
   const paquet = JSON.parse(td.decode(z['paquet.json']));
-  if (paquet.format !== FMT_PAQUET) throw new Error('Format de transmission inconnu.');
+  if (paquet.format !== FMT_PAQUET) throw new Error('format de paquet inconnu');
   const priv = await getPrivKey();
   const devs = (await kvGet('devs')) || {};
   const dv = devs[paquet.dev] || { seq: 0, hash: '0'.repeat(64) };
-  const rapport = { importes: 0, dejaRecus: 0, nouveauxSigs: 0, revues: 0, rondes: 0, alertes: [] };
   const evs = [...paquet.events].sort((a, b) => a.seq - b.seq);
   let expSeq = dv.seq + 1, expPrev = dv.hash;
   const sigsMap = new Map((await dbAll('sigs')).map(s => [s.id, s]));
@@ -1077,19 +1314,20 @@ async function supImport() {
     if (dec) {
       if (dec.qr === false) integ.push('ronde démarrée sans QR code');
       (dec.photoAges || []).forEach(a => { if (a.ageMin != null && a.ageMin > 15) integ.push(`photo ${a.id.slice(0, 8)} prise ${a.ageMin} min avant la saisie`); });
-      if (dec.geo && dec.geo.err) integ.push('position : ' + dec.geo.err);
+      if (dec.geo && dec.geo.err && ev.t === 'ronde_debut') integ.push('position : ' + dec.geo.err);
     }
-    integ.forEach(m => rapport.alertes.push(`n° ${ev.seq} (${ev.t}) : ${m}`));
+    const lieu = `${siteNom(ev.site)}, ${ev.agent || '?'}, ${fmtJour(ev.jour)}`;
+    integ.forEach(m => rapport.alertes.push(`${lieu} — saisie n° ${ev.seq} : ${m}`));
     toStore.push({ k, ...ev, dec, integ });
     rapport.importes++;
+    const ts = dec && dec.ts;
 
-    // Reconstitution des signalements et des rondes
     if (ev.t === 'signalement') {
       if (!sigsMap.has(ev.data.id)) {
         sigsMap.set(ev.data.id, {
           id: ev.data.id, ref: ev.data.ref, site: ev.site, cat: ev.data.cat, desc: ev.data.desc, plaque: ev.data.plaque,
           dests: ev.data.dests, urgent: ev.data.urgent, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
-          photos: (ev.photos || []).map(p => p.id), ts: dec && dec.ts, geo: dec && dec.geo, dev: paquet.dev, seq: ev.seq,
+          photos: (ev.photos || []).map(p => p.id), ts, geo: dec && dec.geo, dev: paquet.dev, seq: ev.seq,
           suivi: [], journalDPMS: [], notes: '', notesAgents: ''
         });
         rapport.nouveauxSigs++;
@@ -1098,15 +1336,16 @@ async function supImport() {
       const s = sigsMap.get(ev.data.sig);
       if (s) {
         s.suivi = s.suivi || [];
-        s.suivi.push({ jour: ev.jour, ts: dec && dec.ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => p.id), geo: dec && dec.geo });
-        if (s.statut !== 'clos') applyVerdict(s, ev.data);
+        s.suivi.push({ jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => p.id), geo: dec && dec.geo });
+        // une intervention du DPMS postérieure au constat prévaut
+        if (!(s.lastSupTs && ts && ts < s.lastSupTs)) applyVerdict(s, ev.data.verdict, ts, ev.agent);
         rapport.revues++;
-      } else rapport.alertes.push(`n° ${ev.seq} : revue d’un signalement inconnu (${ev.data.ref})`);
+      } else rapport.alertes.push(`${lieu} — constat sur un signalement inconnu (${ev.data.ref})`);
     }
     if (ev.rid) {
       const r = rondesMap.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: paquet.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, alertes: [] };
-      if (ev.t === 'ronde_debut') { r.debut = dec && dec.ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; rapport.rondes++; }
-      if (ev.t === 'ronde_fin') { r.fin = dec && dec.ts; }
+      if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; rapport.rondes++; }
+      if (ev.t === 'ronde_fin') { r.fin = ts; }
       if (ev.t === 'checklist') r.checklist = ev.data.items;
       if (ev.t === 'signalement') r.nbSig++;
       if (ev.t === 'revue') r.nbRevue++;
@@ -1114,37 +1353,88 @@ async function supImport() {
       rondesMap.set(ev.rid, r);
     }
   }
-  // Enregistrement
   await dbPutMany('photos', photosToStore);
   await dbPutMany('sup_events', toStore);
   await dbPutMany('sigs', [...sigsMap.values()]);
   await dbPutMany('rondes', [...rondesMap.values()]);
   const last = toStore.filter(e => e.seq > dv.seq).pop();
-  if (last) devs[paquet.dev] = { seq: last.seq, hash: last.hash, at: new Date().toISOString() };
+  const nd = { ...dv, pub: paquet.devPub || dv.pub || null, at: new Date().toISOString() };
+  if (last) { nd.seq = last.seq; nd.hash = last.hash; }
+  const nouveau = !devs[paquet.dev] || (!devs[paquet.dev].pub && nd.pub);
+  devs[paquet.dev] = nd;
   await kvSet('devs', devs);
-  await kvSet('lastImport', new Date().toISOString());
-  hideBusy();
-  go('supRapport', { rapport, nom: f.name });
+  if (nouveau && nd.pub) await kvSet('etatDirty', true);   // premier contact : lui envoyer la configuration à jour
 }
-VIEWS.supRapport = async ({ rapport, nom }) => page('Import', { back: true },
-  h('div', { class: 'banner ' + (rapport.alertes.length ? 'warn' : 'ok') },
-    rapport.alertes.length ? `${rapport.alertes.length} point(s) d’attention.` : 'Transmission intègre : chaînage, empreintes et photos vérifiés.'),
-  h('div', { class: 'card' }, h('h2', null, nom),
-    h('div', { class: 'stat' }, h('span', null, 'Saisies importées'), h('b', null, rapport.importes)),
-    h('div', { class: 'stat' }, h('span', null, 'Déjà reçues (ignorées)'), h('b', null, rapport.dejaRecus)),
-    h('div', { class: 'stat' }, h('span', null, 'Rondes'), h('b', null, rapport.rondes)),
-    h('div', { class: 'stat' }, h('span', null, 'Nouveaux signalements'), h('b', null, rapport.nouveauxSigs)),
-    h('div', { class: 'stat' }, h('span', null, 'Constats de suivi'), h('b', null, rapport.revues))),
-  rapport.alertes.length ? h('div', { class: 'card' }, h('h2', null, 'Points d’attention'), ...rapport.alertes.map(a => h('p', { class: 'small' }, '• ' + a))) : null,
-  h('button', { onclick: safe(supExportEtat) }, 'Préparer la mise à jour du téléphone agents'),
-  h('button', { class: 'sec', onclick: () => go('supSigs', { f: 'ouvert' }) }, 'Voir les signalements'));
+
+/* ---------- Secours par fichier ---------- */
+VIEWS.supSecours = async () => page('Secours par fichier', { back: true },
+  h('p', { class: 'muted' }, 'À utiliser seulement si le relais est indisponible.'),
+  h('button', {
+    onclick: safe(async () => {
+      const f = await pickFile('.rondes,.zip,application/octet-stream,application/zip');
+      if (!f) return;
+      showBusy('Vérification et déchiffrement…');
+      let bytes = new Uint8Array(await f.arrayBuffer());
+      if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) bytes = await unsealBytes(await getPrivKey(), bytes);
+      const rapport = nouveauRapport(); rapport.fichiers = 1;
+      await importPaquetZip(bytes, rapport);
+      await enregistrerRapport(rapport);
+      hideBusy();
+      toast(`${rapport.importes} saisie(s) importée(s)${rapport.alertes.length ? `, ${rapport.alertes.length} point(s) d’attention` : ''}.`);
+      go('home');
+    })
+  }, 'Importer un fichier des agents'),
+  h('button', {
+    class: 'sec', onclick: safe(async () => {
+      const etat = await buildEtat(true);
+      await shareOrDownload(new Blob([JSON.stringify(etat)], { type: 'application/json' }), `maj_rondes_${fileStamp()}.json`, 'Mise à jour rondes');
+    })
+  }, 'Préparer une mise à jour par fichier'));
+
+/* ---------- Transmission automatique : paramétrage ---------- */
+VIEWS.supRelais = async () => {
+  let rs = await kvGet('relaySup');
+  const url = h('input', { type: 'text', value: (rs && rs.url) || '', placeholder: 'https://script.google.com/macros/s/…/exec' });
+  const actif = !!(rs && rs.url);
+  return page('Transmission automatique', { back: true },
+    actif ? h('div', { class: 'banner ok' }, 'Relais actif.') : null,
+    h('div', { class: 'card' }, h('h2', null, 'Installation (une fois)'),
+      h('p', { class: 'small' }, '1. Avec un compte Google dédié au service, ouvrez script.google.com, créez un projet et collez le contenu du fichier relais.gs (fourni avec l’application).'),
+      h('p', { class: 'small' }, '2. Déployer → Nouveau déploiement → Application web. Exécuter en tant que : moi. Accès : tout le monde. Autorisez l’accès à Drive.'),
+      h('p', { class: 'small' }, '3. Copiez l’adresse de l’application web ci-dessous puis « Tester et activer ».'),
+      h('label', { class: 'f' }, 'Adresse du relais'), url,
+      h('button', {
+        class: 'ok', onclick: safe(async () => {
+          const u = url.value.trim();
+          if (!/^https:\/\/\S+$/.test(u) && !/^http:\/\/localhost[:/]/.test(u)) throw new Error('Adresse invalide.');
+          showBusy('Test du relais…');
+          rs = (await kvGet('relaySup')) || {};
+          const supTok = rs.supTok || randCode(32), agentTok = rs.agentTok || randCode(32);
+          await relayCall(u, { op: 'init', supTok, agentTok });
+          await relayCall(u, { op: 'ping', tok: supTok });
+          await kvSet('relaySup', { url: u, supTok, agentTok });
+          state.cfg.relay = { url: u, agentTok };
+          state.cfg.cfgId = randCode(8);
+          await kvSet('cfg', state.cfg);
+          await kvSet('etatDirty', true);
+          hideBusy();
+          toast('Relais activé.');
+          go('supRelaisOk');
+        })
+      }, 'Tester et activer')),
+    h('p', { class: 'muted small' }, 'Le relais ne reçoit que des données chiffrées, qu’il ne peut pas lire. Il les supprime dès que votre téléphone les a relevées.'));
+};
+VIEWS.supRelaisOk = async () => page('Relais activé', { back: true },
+  h('div', { class: 'banner ok' }, 'Dernière étape : le téléphone des agents doit connaître le relais.'),
+  h('p', null, 'Sur le téléphone des agents, scannez une dernière fois le QR de configuration. Ensuite, les rondes arrivent seules.'),
+  h('button', { onclick: () => go('supQR') }, 'Afficher le QR de configuration'));
 
 /* ---------- Liste et fiche des signalements ---------- */
 VIEWS.supSigs = async ({ f = 'ouvert', site = '' }) => {
   const all = await dbAll('sigs');
   const list = all.filter(s => (f === 'tous' || s.statut === f) && (!site || s.site === site))
     .sort((a, b) => (b.urgent - a.urgent) || (b.ts || b.jour || '').localeCompare(a.ts || a.jour || ''));
-  const fchips = [['ouvert', 'Ouverts'], ['a_cloturer', 'À clôturer'], ['clos', 'Clos'], ['tous', 'Tous']].map(([k, l]) =>
+  const fchips = [['ouvert', 'En cours'], ['clos', 'Clos'], ['tous', 'Tous']].map(([k, l]) =>
     h('button', { class: 'chip' + (f === k ? ' on' : ''), onclick: () => go('supSigs', { f: k, site }, { noPush: true }) }, l));
   const schips = [['', 'Tous parkings'], ...state.cfg.sites.map(s => [s.id, s.nom])].map(([k, l]) =>
     h('button', { class: 'chip' + (site === k ? ' on' : ''), onclick: () => go('supSigs', { f, site: k }, { noPush: true }) }, l));
@@ -1169,22 +1459,55 @@ async function photoImgs(ids) {
   }
   return out;
 }
-VIEWS.supSig = async ({ id }) => {
+/* Intervention ponctuelle du superviseur : enregistrée et renvoyée aux agents */
+async function supDecision(s, action) {
+  const ts = new Date().toISOString();
+  if (!s.thumb && s.photos && s.photos[0]) { const p = await dbGet('photos', s.photos[0]); if (p) s.thumb = await thumbFromBlob(p.blob); }
+  s.lastSupTs = ts;
+  s.journalDPMS = s.journalDPMS || [];
+  s.journalDPMS.push({ ts, action });
+  await dbPut('sigs', s);
+  const decs = (await kvGet('decisions')) || [];
+  decs.push({ id: uuid(), ts, action, sig: sigSnapshot(s) });
+  const lim = new Date(Date.now() - DECISIONS_JOURS * 86400000).toISOString();
+  await kvSet('decisions', decs.filter(d => d.ts >= lim));
+  await marquerModifie();
+}
+VIEWS.supSig = async ({ id, edit }) => {
   const s = await dbGet('sigs', id);
   if (!s) return page('Signalement', { back: true }, h('p', null, 'Introuvable.'));
-  const notes = h('textarea', { value: s.notes || '', placeholder: 'Suites données, transmissions, interventions (interne DPMS)' });
-  const notesAg = h('input', { type: 'text', value: s.notesAgents || '', placeholder: 'Ex. : intervention Ateliers prévue mardi' });
-  const saveWith = async (statut, action) => {
-    s.notes = notes.value; s.notesAgents = notesAg.value;
-    if (statut) s.statut = statut;
-    s.journalDPMS = s.journalDPMS || [];
-    s.journalDPMS.push({ ts: new Date().toISOString(), action, note: notes.value });
-    if (statut === 'clos') s.closLe = new Date().toISOString();
-    if (statut === 'ouvert') { s.closLe = null; }
-    await dbPut('sigs', s);
-    toast('Enregistré.');
-    render();
-  };
+  const back = () => go('supSigs', { f: s.statut });
+  const notes = h('textarea', { value: s.notes || '', placeholder: 'Notes internes DPMS (non transmises aux agents)' });
+  const done = (msg) => { toast(msg); go('supSig', { id }, { noPush: true, keepScroll: true }); };
+
+  if (edit) {
+    const cat = h('select', null, ...state.cfg.cats.map(c => h('option', { value: c, selected: c === s.cat ? true : null }, c)));
+    const desc = h('textarea', { value: s.desc || '' });
+    const plaque = h('input', { type: 'text', value: s.plaque || '' });
+    const dests = [...(s.dests || [])];
+    const destChips = h('div', { class: 'chips' }, ...state.cfg.dests.map(x => h('button', {
+      class: 'chip' + (dests.includes(x) ? ' on' : ''),
+      onclick: e => { const i = dests.indexOf(x); if (i >= 0) dests.splice(i, 1); else dests.push(x); e.target.classList.toggle('on'); }
+    }, x)));
+    let urgent = !!s.urgent;
+    const urg = h('button', { class: 'chip' + (urgent ? ' on-bad' : ''), onclick: e => { urgent = !urgent; e.target.className = 'chip' + (urgent ? ' on-bad' : ''); } }, 'Urgent');
+    const msg = h('input', { type: 'text', value: s.notesAgents || '', placeholder: 'Ex. : intervention Ateliers prévue mardi' });
+    return page(`Modifier ${s.ref}`, { back: () => go('supSig', { id }, { noPush: true }) },
+      h('label', { class: 'f' }, 'Catégorie'), cat,
+      h('label', { class: 'f' }, 'Description'), desc,
+      h('label', { class: 'f' }, 'Plaque'), plaque,
+      h('label', { class: 'f' }, 'À signaler à'), destChips,
+      h('label', { class: 'f' }, 'Priorité'), h('div', { class: 'chips' }, urg),
+      h('label', { class: 'f' }, 'Message affiché aux agents'), msg,
+      h('button', {
+        class: 'ok', onclick: safe(async () => {
+          Object.assign(s, { cat: cat.value, desc: desc.value.trim(), plaque: plaque.value.trim().toUpperCase(), dests: [...dests], urgent, notesAgents: msg.value.trim() });
+          await supDecision(s, 'modification');
+          done('Modifié. Transmis au téléphone des agents.');
+        })
+      }, 'Enregistrer et transmettre aux agents'));
+  }
+
   const suivi = [];
   for (const v of s.suivi || []) {
     suivi.push(h('div', { class: 'card' },
@@ -1193,7 +1516,7 @@ VIEWS.supSig = async ({ id }) => {
       h('div', { class: 'small' }, 'Position : ', geoLink(v.geo)),
       ...(await photoImgs(v.photos))));
   }
-  return page(`Signalement ${s.ref}`, { back: () => go('supSigs', { f: s.statut }) },
+  return page(`Signalement ${s.ref}`, { back },
     h('div', { class: 'card' },
       h('h3', null, s.cat, statutBadge(s.statut), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
       h('dl', { class: 'kv' },
@@ -1202,56 +1525,31 @@ VIEWS.supSig = async ({ id }) => {
         h('dt', null, 'Position'), h('dd', null, geoLink(s.geo)),
         h('dt', null, 'À signaler à'), h('dd', null, (s.dests || []).join(', ')),
         s.plaque ? [h('dt', null, 'Plaque'), h('dd', null, s.plaque)] : null,
-        s.closLe ? [h('dt', null, 'Clos le'), h('dd', null, fmtDT(s.closLe))] : null),
+        s.statut === 'clos' ? [h('dt', null, 'Clos'), h('dd', null, `${fmtDT(s.closLe)}${s.closPar ? ' par ' + s.closPar : ''}`)] : null,
+        s.notesAgents ? [h('dt', null, 'Message aux agents'), h('dd', null, s.notesAgents)] : null),
       s.desc ? h('p', null, s.desc) : null,
       ...(await photoImgs(s.photos))),
-    suivi.length ? h('h2', { style: 'font-size:16px;color:var(--navy)' }, 'Constats de suivi') : null, ...suivi,
-    h('div', { class: 'card' }, h('h2', null, 'Suites DPMS'),
-      h('label', { class: 'f' }, 'Notes internes'), notes,
-      h('label', { class: 'f' }, 'Message affiché aux agents'), notesAg,
-      h('button', { class: 'sec', onclick: safe(() => saveWith(null, 'note')) }, 'Enregistrer les notes'),
-      s.statut !== 'clos' ? h('button', { class: 'ok', onclick: safe(() => saveWith('clos', 'clôture')) }, 'Clôturer') : null,
-      s.statut !== 'ouvert' ? h('button', { class: 'sec', onclick: safe(() => saveWith('ouvert', 'réouverture')) }, 'Remettre en cours') : null,
-      s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { s.plaque = ''; await dbPut('sigs', s); toast('Plaque effacée.'); render(); } }) }, 'Effacer la plaque (dossier traité)') : null),
-    (s.journalDPMS || []).length ? h('div', { class: 'card' }, h('h2', null, 'Historique DPMS'),
+    suivi.length ? h('h2', { style: 'font-size:16px;color:var(--navy)' }, 'Constats des agents') : null, ...suivi,
+    h('div', { class: 'card' }, h('h2', null, 'Intervenir (facultatif)'),
+      h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement au téléphone des agents.'),
+      s.statut !== 'clos'
+        ? h('button', { class: 'ok', onclick: safe(async () => { if (!confirm('Clôturer ce signalement ?')) return; s.statut = 'clos'; s.closLe = new Date().toISOString(); s.closPar = 'DPMS'; await supDecision(s, 'clôture'); done('Clos. Transmis aux agents.'); }) }, 'Clôturer')
+        : h('button', { class: 'sec', onclick: safe(async () => { s.statut = 'ouvert'; s.closLe = null; s.closPar = null; await supDecision(s, 'réouverture'); done('Rouvert. Transmis aux agents.'); }) }, 'Rouvrir'),
+      h('button', { class: 'sec', onclick: () => go('supSig', { id, edit: true }, { noPush: true }) }, 'Modifier ou écrire aux agents'),
+      s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { s.plaque = ''; await supDecision(s, 'effacement de la plaque'); done('Plaque effacée.'); } }) }, 'Effacer la plaque (dossier traité)') : null),
+    h('div', { class: 'card' }, h('h2', null, 'Notes internes'), notes,
+      h('button', { class: 'sec', onclick: safe(async () => { s.notes = notes.value; await dbPut('sigs', s); toast('Notes enregistrées.'); }) }, 'Enregistrer les notes')),
+    (s.journalDPMS || []).length ? h('div', { class: 'card' }, h('h2', null, 'Interventions DPMS'),
       ...s.journalDPMS.map(j => h('p', { class: 'small' }, `${fmtDT(j.ts)} — ${j.action}`))) : null);
 };
 
 /* ---------- Historique des rondes ---------- */
 VIEWS.supRondes = async () => {
-  const rs = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 200);
+  const rs = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 300);
   return page('Rondes', { back: true },
-    rs.length ? rs.map(r => {
-      const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
-      const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v === 'Anomalie').map(([k]) => k) : [];
-      return h('div', { class: 'card' },
-        h('div', { class: 'l1' }, h('b', null, `${siteNom(r.site)} — ${r.agent}`), r.qr === false ? h('span', { class: 'badge b-warn' }, 'sans QR') : null, !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null),
-        h('div', { class: 'muted small' }, `${fmtDT(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${dur != null ? ` (${dur} min)` : ''} — ${r.nbSig} signalement(s), ${r.nbRevue} constat(s)`),
-        anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null,
-        h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut)));
-    }) : h('p', { class: 'muted' }, 'Aucune ronde importée.'));
+    rs.length ? rs.map(r => h('div', { class: 'card' }, rondeLigne(r), h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut))))
+      : h('p', { class: 'muted' }, 'Aucune ronde reçue.'));
 };
-
-/* ---------- Mise à jour pour le téléphone agents ---------- */
-async function supExportEtat() {
-  showBusy('Préparation…');
-  const sigs = (await dbAll('sigs')).filter(s => s.statut !== 'clos');
-  const out = [];
-  for (const s of sigs) {
-    let thumb = s.thumb || null;
-    if (!thumb && s.photos && s.photos[0]) {
-      const p = await dbGet('photos', s.photos[0]);
-      if (p) { thumb = await thumbFromBlob(p.blob); s.thumb = thumb; await dbPut('sigs', s); }
-    }
-    out.push({ id: s.id, ref: s.ref, site: s.site, cat: s.cat, desc: s.desc, plaque: s.plaque, dests: s.dests, urgent: s.urgent, aggrave: !!s.aggrave, statut: s.statut, jour: s.jour, agent: s.agent, thumb, notesAgents: s.notesAgents || '', suivi: (s.suivi || []).map(v => ({ jour: v.jour, agent: v.agent, verdict: v.verdict, comment: v.comment })) });
-  }
-  const devs = (await kvGet('devs')) || {};
-  const ack = Object.fromEntries(Object.entries(devs).map(([d, v]) => [d, v.seq]));
-  const etat = { format: FMT_ETAT, v: 1, cree: new Date().toISOString(), cfg: agentCfgPayload(state.cfg), ack, sigs: out };
-  hideBusy();
-  await shareOrDownload(new Blob([JSON.stringify(etat)], { type: 'application/json' }), `maj_rondes_${fileStamp()}.json`, 'Mise à jour rondes');
-  toast('À ouvrir sur le téléphone agents : « Recevoir la mise à jour du DPMS ».');
-}
 
 /* ---------- Excel complet (superviseur) ---------- */
 async function supExcel() {
@@ -1260,11 +1558,11 @@ async function supExcel() {
   const rondes = (await dbAll('rondes')).sort((a, b) => (a.debut || '').localeCompare(b.debut || ''));
   const evs = (await dbAll('sup_events')).sort((a, b) => a.k.localeCompare(b.k));
   const g = (geo, k) => geo && !geo.err && geo[k] != null ? geo[k] : '';
-  const A1 = [['Réf.', 'Parking', 'Catégorie', 'Description', 'Plaque', 'Destinataires', 'Urgent', 'Aggravé', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Message aux agents', 'Notes DPMS', 'Clos le']];
+  const A1 = [['Réf.', 'Parking', 'Catégorie', 'Description', 'Plaque', 'Destinataires', 'Urgent', 'Aggravé', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Message aux agents', 'Notes DPMS']];
   sigs.forEach(s => {
     const last = (s.suivi || []).slice(-1)[0];
-    A1.push([s.ref, siteNom(s.site), s.cat, s.desc, s.plaque || '', (s.dests || []).join(', '), s.urgent ? 'Oui' : '', s.aggrave ? 'Oui' : '', STATUTS[s.statut], s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent || '',
-      g(s.geo, 'lat'), g(s.geo, 'lon'), g(s.geo, 'acc'), (s.photos || []).length, last ? VERDICTS[last.verdict] : '', last ? (last.ts ? fmtDT(last.ts) : fmtJour(last.jour)) : '', s.notesAgents || '', s.notes || '', s.closLe ? fmtDT(s.closLe) : '']);
+    A1.push([s.ref, siteNom(s.site), s.cat, s.desc, s.plaque || '', (s.dests || []).join(', '), s.urgent ? 'Oui' : '', s.aggrave ? 'Oui' : '', STATUTS[s.statut] || s.statut, s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent || '',
+      g(s.geo, 'lat'), g(s.geo, 'lon'), g(s.geo, 'acc'), (s.photos || []).length, last ? VERDICTS[last.verdict] : '', last ? (last.ts ? fmtDT(last.ts) : fmtJour(last.jour)) : '', s.closLe ? fmtDT(s.closLe) : '', s.closPar || '', s.notesAgents || '', s.notes || '']);
   });
   const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Démarrage par QR', 'Anomalies check-list', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
   rondes.forEach(r => {
@@ -1286,7 +1584,7 @@ async function supExcel() {
   });
   const wb = XLSX.utils.book_new();
   const add = (aoa, name, widths) => { const ws = XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = widths.map(w => ({ wch: w })); ws['!autofilter'] = { ref: ws['!ref'] }; XLSX.utils.book_append_sheet(wb, ws, name); };
-  add(A1, 'Signalements', [11, 12, 24, 50, 12, 28, 8, 8, 22, 16, 12, 11, 11, 10, 7, 16, 16, 30, 40, 16]);
+  add(A1, 'Signalements', [11, 12, 24, 50, 12, 28, 8, 8, 10, 16, 12, 11, 11, 10, 7, 16, 16, 16, 12, 30, 40]);
   add(A2, 'Rondes', [12, 12, 16, 16, 10, 10, 30, 12, 10, 11, 11, 10, 40, 10]);
   add(A3, 'Journal', [10, 6, 16, 11, 16, 12, 12, 50, 11, 11, 10, 10, 40]);
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -1298,8 +1596,9 @@ async function supExcel() {
 async function supBackup() {
   showBusy('Sauvegarde…');
   const dump = {
-    format: FMT_SAUVEGARDE, v: 1, app: APP_VERSION, cree: new Date().toISOString(),
-    cfg: state.cfg, devs: (await kvGet('devs')) || {},
+    format: FMT_SAUVEGARDE, v: 2, app: APP_VERSION, cree: new Date().toISOString(),
+    cfg: state.cfg, devs: (await kvGet('devs')) || {}, relaySup: (await kvGet('relaySup')) || null,
+    decisions: (await kvGet('decisions')) || [],
     cle: { format: FMT_CLE, privEnc: await kvGet('privEnc') },
     sigs: await dbAll('sigs'), events: await dbAll('sup_events'), rondes: await dbAll('rondes')
   };
@@ -1318,11 +1617,11 @@ VIEWS.supCle = async ({ first } = {}) => page('Clé de secours', { back: true },
     h('p', { class: 'muted' }, 'Le fichier est chiffré par votre phrase de passe. Conservez-le sur un stockage de la Ville et remettez la phrase de passe sous pli fermé à la DGS.'),
     h('button', {
       onclick: safe(async () => {
-        const cle = { format: FMT_CLE, v: 1, cree: new Date().toISOString(), privEnc: await kvGet('privEnc'), cfg: state.cfg };
+        const cle = { format: FMT_CLE, v: 1, cree: new Date().toISOString(), privEnc: await kvGet('privEnc'), cfg: state.cfg, relaySup: (await kvGet('relaySup')) || null };
         await shareOrDownload(new Blob([JSON.stringify(cle)], { type: 'application/json' }), 'cle_secours_rondes.json', 'Clé de secours rondes');
       })
     }, 'Télécharger la clé de secours')),
-  first ? h('button', { class: 'sec', onclick: () => go('supQR') }, 'Continuer : QR codes') : null);
+  first ? h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Continuer : transmission automatique') : null);
 
 /* ---------- QR codes ---------- */
 function qrSvg(text, ecc = 'M') {
@@ -1334,7 +1633,7 @@ VIEWS.supQR = async () => {
   const show = h('div', { class: 'qr' });
   return page('QR codes', { back: true },
     h('div', { class: 'card' }, h('h2', null, 'Configuration du téléphone agents'),
-      h('p', { class: 'muted small' }, 'À scanner avec l’appareil photo du téléphone agents, ou depuis son écran de configuration. À refaire après chaque modification des listes, ou envoyez une mise à jour.'),
+      h('p', { class: 'muted small' }, 'À scanner avec l’appareil photo du téléphone agents. Nécessaire à l’installation et après l’activation du relais ; ensuite, les modifications de listes lui parviennent seules.'),
       h('button', { onclick: () => { show.innerHTML = qrSvg(cfgURL, 'L'); } }, 'Afficher le QR de configuration'), show),
     h('div', { class: 'card' }, h('h2', null, 'Parkings'),
       h('p', { class: 'muted small' }, 'Un QR par parking, à afficher à l’entrée, plastifié, hors de portée. Scanné à l’arrivée, il démarre la ronde.'),
@@ -1344,7 +1643,8 @@ VIEWS.supQR = async () => {
         class: 'link', onclick: safe(async () => {
           if (!confirm('Générer de nouveaux codes ? Les QR affichés dans les parkings ne fonctionneront plus.')) return;
           state.cfg.sites.forEach(s => s.token = randCode(10)); state.cfg.cfgId = randCode(8);
-          await kvSet('cfg', state.cfg); toast('Nouveaux codes générés : réimprimez et mettez à jour le téléphone agents.'); render();
+          await kvSet('cfg', state.cfg); await marquerModifie();
+          toast('Nouveaux codes générés : réimprimez les QR.'); render();
         })
       }, 'Régénérer les codes (QR perdu ou copié)')));
 };
@@ -1372,7 +1672,7 @@ VIEWS.supConfig = async () => {
   const mail = h('input', { type: 'email', value: c.urgenceMail || '', placeholder: 'prenom.nom@ville-cachan.fr' });
   const lines = t => t.value.split('\n').map(x => x.trim()).filter(Boolean);
   return page('Listes et coordonnées', { back: true },
-    h('div', { class: 'banner info' }, 'Après modification : renvoyez une mise à jour au téléphone agents.'),
+    h('div', { class: 'banner info' }, 'Les modifications sont transmises automatiquement au téléphone des agents.'),
     h('label', { class: 'f' }, 'Noms des parkings'), ...sitesInputs,
     h('label', { class: 'f' }, 'Agents (un par ligne)'), tAgents,
     h('label', { class: 'f' }, 'Destinataires (un par ligne)'), tDests,
@@ -1388,14 +1688,15 @@ VIEWS.supConfig = async () => {
         sitesInputs.forEach((i, k) => { if (i.value.trim()) c.sites[k].nom = i.value.trim(); });
         Object.assign(c, { agents: lines(tAgents), dests: lines(tDests), cats, checklist: chk, urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
         await kvSet('cfg', c);
-        toast('Enregistré. Pensez à mettre à jour le téléphone agents.');
+        await marquerModifie();
+        toast('Enregistré. Transmis au téléphone des agents.');
         go('home');
       })
     }, 'Enregistrer'));
 };
 
 /* ====================================================================== */
-/* Démarrage                                                              */
+/* Démarrage et synchronisation périodique                                */
 /* ====================================================================== */
 async function boot() {
   if (!window.isSecureContext || !crypto.subtle) {
@@ -1412,12 +1713,14 @@ async function boot() {
     history.replaceState(null, '', location.pathname + location.search);
     await handleLink(hash, false);
     if (state.view === 'home') render();
-    return;
-  }
-  render();
+  } else render();
+  if (state.mode) syncNow().then(refreshIfHome);
 }
 window.addEventListener('hashchange', () => {
   const hash = location.hash;
   if (hash && /^#(cfg|site)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
 });
+window.addEventListener('online', () => { if (state.mode) syncNow().then(refreshIfHome); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); });
+setInterval(() => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); }, SYNC_PERIODE_MS);
 boot();
