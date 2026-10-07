@@ -1,6 +1,6 @@
-# Rondes parkings — Ville de Cachan (DPMS)
+# Rondes parkings
 
-Application web hors ligne pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase).
+Application web hors ligne pour les rondes des agents de surveillance des parkings municipaux.
 
 **Ce dépôt ne contient que le programme. Aucune donnée de ronde n'y transite.** Les saisies restent sur le téléphone des agents jusqu'à leur transmission, par fichier, au téléphone superviseur. L'heure et la position de chaque saisie sont chiffrées dès la saisie : seul le téléphone superviseur peut les lire.
 
@@ -41,27 +41,7 @@ Application web hors ligne pour les rondes des agents de surveillance des parkin
 
 Urgences : bouton d'appel et de courriel sur l'accueil du téléphone agents. La transmission hebdomadaire ne convient pas aux urgences.
 
-## 5. Ce que l'application garantit et ne garantit pas
 
-- **Chiffrement** : heure exacte, position et âge des photos sont chiffrés (ECDH P-256, HKDF-SHA-256, AES-256-GCM) avec la clé publique du superviseur. Le téléphone agents ne peut pas les relire.
-- **Intégrité** : chaque saisie contient l'empreinte SHA-256 de la précédente, et chaque photo son empreinte. Une suppression, une modification ou un trou dans la série est signalé à l'import.
-- **Limites** :
-  - L'heure est celle du téléphone. Verrouiller le réglage automatique de l'heure si la DSI gère la flotte.
-  - Une personne compétente en informatique, ayant le téléphone en main, peut fabriquer des saisies cohérentes tant qu'elles n'ont pas été transmises. Plus la collecte est fréquente, plus cette fenêtre est courte.
-  - Le QR code peut être photographié et rejoué.
-  - Dans un parking souterrain, la position est souvent absente ou imprécise. Elle est enregistrée avec sa précision.
-- **Fragilité** : effacer les données de Chrome efface les saisies non transmises. Consigne : ne jamais vider les données du navigateur sur ce téléphone.
-
-## 6. Mise à jour du programme
-
-Modifier les fichiers dans le dépôt, puis changer le numéro de version dans `sw.js` (`CACHE = 'rondes-cachan-x.y.z'`) pour que les téléphones prennent la nouvelle version à l'ouverture suivante, avec réseau.
-
-## 7. Préalables à la mise en service (à ne pas sauter)
-
-- Inscription du traitement au registre des activités de traitement de la Ville (art. 30 RGPD), après avis du délégué à la protection des données.
-- Information écrite des agents : finalités, données collectées dont la position au moment des saisies, durées de conservation, droits (art. 13 RGPD).
-- Consultation du comité social territorial (art. 54 du décret n° 2021-571 du 10 mai 2021).
-- Finalité affichée : traçabilité des rondes et des constats, suivi des anomalies. Pas le contrôle du temps de travail (CE, 15 décembre 2017, n° 403776).
 
 ## Bibliothèques incluses (licences libres)
 
