@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -621,17 +621,29 @@ async function fold() {
   if (sup) ((await kvGet('decQueue')) || []).forEach((q, i) => items.push({ ord: 2 * ORD_LOCAL + i, e: { kind: q.kind === 'n' ? 'note' : 'dec', dec: q.d, local: true } }));
   items.sort((a, b) => a.ord - b.ord);
 
+  // Suppressions décidées par un superviseur (annulables depuis la corbeille)
+  const suppr = new Map(), annul = new Set();
+  for (const { e } of items) if (e.kind === 'dec') {
+    if (e.dec.type === 'suppr') suppr.set(e.dec.id, e.dec);
+    if (e.dec.type === 'annul_suppr') annul.add(e.dec.cible);
+  }
+  const del = { sigs: new Set(), rids: new Set() };
+  for (const [id, d] of suppr) if (!annul.has(id)) { (d.sigs || []).forEach(x => del.sigs.add(x)); (d.rids || []).forEach(x => del.rids.add(x)); }
+  const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
+
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {};
   let cfg = null;
   const alertes = [];
   for (const { e } of items) {
     if (e.kind === 'ev') {
       const ev = e.ev, dec = e.dec || null, ts = dec && dec.ts;
+      e.supprime = evSupprime(ev);
       if (sup) {
         (chains[ev.dev] = chains[ev.dev] || []).push(e);
         const dv = devs[ev.dev] = devs[ev.dev] || { seq: 0, at: null, role: ev.role || 'agent' };
         if (ev.seq > dv.seq) { dv.seq = ev.seq; dv.at = e.at; }
       }
+      if (e.supprime) continue;
       if (ev.t === 'signalement') {
         if (!sigs.has(ev.data.id)) sigs.set(ev.data.id, {
           id: ev.data.id, ref: ev.data.ref, site: ev.site, cat: ev.data.cat, sub: ev.data.sub || '', desc: ev.data.desc,
@@ -667,7 +679,7 @@ async function fold() {
         if (d.action === 'fermee' && !b.fermee) b.fermee = rec;
         if (b.ouverte) barr.set(d.bid, b);
       }
-      if (sup && ev.rid) {
+      if (sup && ev.rid && !del.rids.has(ev.rid)) {
         const r = rondes.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: ev.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, compte: null, alertes: [] };
         if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; }
         if (ev.t === 'ronde_fin') { r.fin = ts; if (r.compte == null && ev.data.compte != null) r.compte = ev.data.compte; }
@@ -702,6 +714,7 @@ async function fold() {
       for (const e of list) {
         const ev = e.ev, lieu = `${siteNom(ev.site) || '—'}, ${ev.agent || '?'}, ${fmtJour(ev.jour)}`;
         const add = (m) => {
+          if (e.supprime || (ev.rid && del.rids.has(ev.rid))) return;
           alertes.push({ key: `${dev}:${ev.seq}:${m}`, at: e.at, msg: `${lieu} — saisie n° ${ev.seq} (${dev}) : ${m}` });
           if (ev.rid && rondes.has(ev.rid)) rondes.get(ev.rid).alertes.push(m);
         };
@@ -724,6 +737,8 @@ async function fold() {
   }
   await dbReplaceAll('sigs', [...sigs.values()]);
   await kvSet('barrieres', [...barr.values()]);
+  await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
+  if (sup) await kvSet('corbeille', [...suppr.values()].map(d => ({ ...d, annule: annul.has(d.id) })).sort((a, b) => b.ts.localeCompare(a.ts)));
   if (cfg && JSON.stringify(cfg) !== JSON.stringify(state.cfg)) { state.cfg = cfg; await kvSet('cfg', cfg); }
 }
 
@@ -1588,6 +1603,12 @@ VIEWS.suiviSig = async ({ id }) => {
 
 /* ---------- Journal lisible (agents, PM) ---------- */
 async function journalEquipe() {
+  const sp = (await kvGet('supprimes')) || { sigs: [], rids: [] };
+  const ds = new Set(sp.sigs), dr = new Set(sp.rids);
+  const garde = ev => !((ev.t === 'signalement' && ds.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && ds.has(ev.data.sig)) || (ev.rid && dr.has(ev.rid) && !['signalement', 'revue'].includes(ev.t)));
+  return (await journalEquipeBrut()).filter(garde);
+}
+async function journalEquipeBrut() {
   return [...(await dbAll('entries')).filter(e => e.kind === 'ev').map(e => ({ ord: e.n * 100000 + e.idx, ev: e.ev })),
   ...(await dbAll('events')).map(ev => ({ ord: ORD_LOCAL + ev.seq, ev }))].sort((a, b) => a.ord - b.ord).map(x => x.ev);
 }
@@ -1913,7 +1934,8 @@ async function supHome() {
     h('div', { class: 'card' }, h('h2', null, 'Paramétrage'),
       h('button', { class: 'sec', onclick: () => go('supQR') }, 'Configurer les appareils (QR et liens)'),
       h('button', { class: 'sec', onclick: () => go('supConfig') }, 'Listes, catégories et coordonnées'),
-      h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Relais et appareils')),
+      h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Relais et appareils'),
+      h('button', { class: 'sec', onclick: () => go('supCorbeille') }, 'Corbeille (éléments supprimés)')),
     Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Appareils de l’équipe'),
       ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', { style: 'white-space:nowrap;margin-right:8px' }, d + (v.role === 'pm' ? ' (PM)' : '')), h('span', { class: 'muted small', style: 'text-align:right' }, `${v.seq} saisies — dernier envoi ${fmtQuand(v.at)}`)))) : null,
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
@@ -1986,7 +2008,12 @@ VIEWS.supSigs = async ({ f = 'ouvert', site = '', cat = '', q = '', sel = null }
     h('div', { class: 'filtres' },
       h('select', { onchange: e => nav({ site: e.target.value, sel: null }) }, h('option', { value: '' }, 'Tous les parkings'), ...state.cfg.sites.map(s => h('option', { value: s.id, selected: s.id === site ? true : null }, s.nom))),
       h('select', { onchange: e => nav({ cat: e.target.value, sel: null }) }, h('option', { value: '' }, 'Toutes les catégories'), ...[...state.cfg.cats.map(c => c.nom), CAT_AUTRE].map(c => h('option', { value: c, selected: c === cat ? true : null }, c))),
-      h('input', { type: 'search', value: q, placeholder: 'Rechercher (plaque, réf., texte…)', onchange: e => nav({ q: e.target.value, sel: null }) })));
+      h('input', { type: 'search', value: q, placeholder: 'Rechercher (plaque, réf., texte…)', onchange: e => nav({ q: e.target.value, sel: null }) })),
+    list.length ? h('button', { class: 'link', style: 'color:var(--bad)', onclick: safe(async () => {
+      if (prompt(`Supprimer les ${list.length} signalement(s) affiché(s) par ces filtres ?\nIls disparaîtront de tous les appareils, des statistiques et des exports (annulable depuis la corbeille).\nTapez SUPPRIMER pour confirmer.`) !== 'SUPPRIMER') return;
+      await supprimer({ sigs: list.map(x => x.id), quoi: `${list.length} signalement(s) (filtre : ${{ ouvert: 'en cours', a_transmettre: 'à transmettre', clos: 'clos', vehicules: 'véhicules', tous: 'tous' }[f]}${site ? ', ' + siteNom(site) : ''}${cat ? ', ' + cat : ''}${q ? ', « ' + q + ' »' : ''})` });
+      toast(`${list.length} signalement(s) supprimé(s).`); nav({ sel: null });
+    }) }, `Supprimer les ${list.length} signalement(s) affiché(s)…`) : null);
   const items = [];
   for (const s of list) {
     const th = await thumbOf(s);
@@ -2076,6 +2103,12 @@ async function supSigDetail(s, recharger) {
       h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement aux agents, à la PM et aux autres superviseurs.'),
       s.statut === 'clos' ? h('button', { class: 'sec', onclick: safe(async () => { await supDecision(s, 'réouverture', { statut: 'ouvert', closLe: null, closPar: null }); done('Rouvert.'); }) }, 'Rouvrir') : null,
       h('button', { class: 'sec', onclick: () => { state.retour = { view: state.view, params: { ...state.params } }; go('supSig', { id: s.id, edit: true }); } }, 'Modifier ou écrire aux agents'),
+      h('button', { class: 'danger', onclick: safe(async () => {
+        if (!confirm(`Supprimer le signalement ${s.ref} (${sigTitre(s)}) ?\nIl disparaîtra de tous les appareils, des statistiques et des exports. Annulable depuis la corbeille.`)) return;
+        await supprimer({ sigs: [s.id], quoi: `Signalement ${s.ref} — ${sigTitre(s)} (${siteNom(s.site)}, ${fmtJour(s.jour)})` });
+        toast('Signalement supprimé.');
+        if (state.view === 'supSigs') go('supSigs', { ...state.params, sel: null }, { noPush: true }); else go('supSigs', { f: 'ouvert' }, { noPush: true });
+      }) }, 'Supprimer ce signalement'),
       s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { await supDecision(s, 'effacement de la plaque', { plaque: '' }); done('Plaque effacée.'); } }) }, 'Effacer la plaque (dossier traité)') : null),
     h('div', { class: 'card' }, h('h2', null, 'Notes internes'), notes,
       h('button', { class: 'sec', onclick: safe(async () => { await queueDec('n', { type: 'note', ts: new Date().toISOString(), sig: s.id, text: notes.value }); await fold(); syncNow(); toast('Notes enregistrées.'); }) }, 'Enregistrer les notes')),
@@ -2325,11 +2358,42 @@ VIEWS.supStats = async (p = {}) => {
 
 /* ---------- Historique des rondes ---------- */
 VIEWS.supRondes = async () => {
-  const rs = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 300);
+  const toutes = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || ''));
+  const rs = toutes.slice(0, 300);
+  const recharger = () => go('supRondes', {}, { noPush: true, keepScroll: true });
   return page('Rondes', { back: true },
+    toutes.length ? h('div', { class: 'card' },
+      h('p', { class: 'muted small' }, 'Supprimer une ronde efface ses horaires, son comptage et ses contrôles. Les signalements faits pendant la ronde sont conservés (ils se suppriment à part). Annulable depuis la corbeille.'),
+      h('button', { class: 'danger', onclick: safe(async () => {
+        if (prompt(`Supprimer les ${toutes.length} ronde(s) ?\nTapez SUPPRIMER pour confirmer.`) !== 'SUPPRIMER') return;
+        await supprimer({ rids: toutes.map(r => r.rid), quoi: `Toutes les rondes (${toutes.length})` });
+        toast('Rondes supprimées.'); recharger();
+      }) }, `Supprimer toutes les rondes (${toutes.length})`)) : null,
     rs.length ? rs.map(r => h('div', { class: 'card' }, rondeLigne(r), aGeo(r.geoDebut) ? h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut)) : null,
-      r.alertes && r.alertes.length ? h('div', { class: 'small', style: 'color:var(--warn)' }, [...new Set(r.alertes)].join(' ; ')) : null))
+      r.alertes && r.alertes.length ? h('div', { class: 'small', style: 'color:var(--warn)' }, [...new Set(r.alertes)].join(' ; ')) : null,
+      h('button', { class: 'link', style: 'color:var(--bad);text-align:left;justify-content:flex-start', onclick: safe(async () => {
+        if (!confirm(`Supprimer la ronde de ${r.agent} à ${siteNom(r.site)} du ${fmtDT(r.debut)} ?`)) return;
+        await supprimer({ rids: [r.rid], quoi: `Ronde ${siteNom(r.site)} — ${r.agent} — ${fmtDT(r.debut)}` });
+        toast('Ronde supprimée.'); recharger();
+      }) }, 'Supprimer cette ronde')))
       : h('p', { class: 'muted' }, 'Aucune ronde reçue.'));
+};
+async function supprimer({ sigs = [], rids = [], quoi }) {
+  await queueDec('d', { type: 'suppr', id: uuid(), ts: new Date().toISOString(), sigs, rids, quoi });
+  await fold();
+  syncNow();
+}
+VIEWS.supCorbeille = async () => {
+  const l = (await kvGet('corbeille')) || [];
+  return page('Corbeille', { back: true },
+    h('p', { class: 'muted small' }, 'Éléments supprimés, du plus récent au plus ancien. « Restaurer » les fait réapparaître sur tous les appareils.'),
+    l.length ? l.map(d => h('div', { class: 'card', style: d.annule ? 'opacity:.6' : '' },
+      h('div', null, h('b', null, d.quoi || 'Suppression'), d.annule ? h('span', { class: 'badge b-ok' }, 'restauré') : null),
+      h('div', { class: 'muted small' }, `Supprimé le ${fmtDT(d.ts)}`),
+      d.annule ? null : h('button', { class: 'sec', onclick: safe(async () => {
+        await queueDec('d', { type: 'annul_suppr', id: uuid(), ts: new Date().toISOString(), cible: d.id });
+        await fold(); syncNow(); toast('Restauré.'); go('supCorbeille', {}, { noPush: true });
+      }) }, 'Restaurer'))) : h('p', { class: 'muted' }, 'La corbeille est vide.'));
 };
 
 /* ---------- Excel complet ---------- */
@@ -2338,7 +2402,9 @@ async function supExcel() {
   const sigs = (await dbAll('sigs')).sort((a, b) => (a.ts || a.jour || '').localeCompare(b.ts || b.jour || ''));
   const rondes = (await dbAll('rondes')).sort((a, b) => (a.debut || '').localeCompare(b.debut || ''));
   const barr = ((await kvGet('barrieres')) || []).sort((a, b) => a.ouverte.quand.localeCompare(b.ouverte.quand));
-  const evs = (await dbAll('entries')).filter(e => e.kind === 'ev').sort((a, b) => a.k.localeCompare(b.k));
+  const sp = (await kvGet('supprimes')) || { sigs: [], rids: [] };
+  const ds = new Set(sp.sigs), dr = new Set(sp.rids);
+  const evs = (await dbAll('entries')).filter(e => e.kind === 'ev').filter(({ ev }) => !((ev.t === 'signalement' && ds.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && ds.has(ev.data.sig)) || (ev.rid && dr.has(ev.rid) && !['signalement', 'revue'].includes(ev.t)))).sort((a, b) => a.k.localeCompare(b.k));
   const g = (geo, k) => geo && !geo.err && geo[k] != null ? geo[k] : '';
   const A1 = [['Réf.', 'Parking', 'Catégorie', 'Sous-catégorie', 'Description', 'Plaque', 'Emplacement', 'Véhicule', 'Destinataires', 'Urgent', 'Aggravé', 'Hors ronde', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Traitement', 'Actions', 'Suivi PM', 'Observations PM', 'Message aux agents', 'Notes DPMS']];
   sigs.forEach(s => {
