@@ -34,7 +34,7 @@ button,.btn{display:flex;align-items:center;justify-content:center;gap:8px;width
   padding:10px 14px;margin:8px 0 0;cursor:pointer;text-decoration:none;text-align:center}
 button:active{transform:translateY(1px)}
 button.big{min-height:76px;font-size:20px}
-button.sec{background:#e8edf4;color:var(--navy)}
+button.sec,.btn.sec{background:#e8edf4;color:var(--navy)}
 button.accent{background:var(--accent)}
 button.ok{background:var(--ok)}
 button.danger{background:var(--bad)}
@@ -49,7 +49,7 @@ button:disabled{opacity:.45}
 .chip.on-warn{background:var(--warn);color:#fff}
 .chip.on-bad{background:var(--bad);color:#fff}
 label.f{display:block;font-weight:600;margin:14px 0 4px}
-input[type=text],input[type=password],input[type=tel],input[type=email],input[type=datetime-local],input[type=number],textarea,select{
+input[type=text],input[type=password],input[type=tel],input[type=email],input[type=datetime-local],input[type=number],input[type=search],input[type=date],textarea,select{
   width:100%;font:inherit;padding:12px;border:1px solid #b9c2cf;border-radius:10px;background:#fff;color:var(--ink)}
 textarea{min-height:96px;resize:vertical}
 .badge{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;vertical-align:middle;margin-left:4px}
@@ -99,6 +99,39 @@ button.plus1{min-height:110px;font-size:26px;background:var(--navy);border-radiu
 .chk .lbl .badge{margin-left:0;margin-top:2px}
 .chk button{white-space:nowrap}
 .sticky-bottom button{margin-top:6px}
+/* PC (superviseur) : pleine largeur */
+body.large main{max-width:1320px}
+.filtres{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
+.filtres select,.filtres input{width:auto;flex:1 1 200px;min-width:0}
+.filtres input[type=date]{flex:0 1 170px}
+.vignette{width:64px;height:64px;object-fit:cover;border-radius:8px;flex:none;background:#e8edf4}
+.list-item.sel{border:2px solid var(--navy);background:#eef3fa}
+.list-item .badge{margin:2px 4px 2px 0}
+@media (min-width:1000px){
+  .split{display:grid;grid-template-columns:420px 1fr;gap:16px;align-items:start}
+  .pane-list{max-height:calc(100vh - 110px);overflow:auto;position:sticky;top:68px;padding-right:4px}
+  .pane-list .list-item{margin-top:6px}
+}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:10px}
+.gallery img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;cursor:zoom-in;border:1px solid var(--line)}
+.lightbox{position:fixed;inset:0;background:rgba(8,12,20,.94);z-index:70;display:flex;align-items:center;justify-content:center}
+.lightbox img{max-width:94vw;max-height:88vh;border-radius:6px}
+.lightbox button{position:absolute;width:52px;min-height:52px;height:52px;border-radius:99px;background:rgba(255,255,255,.14);font-size:30px;padding:0;margin:0}
+.lb-close{top:14px;right:14px}.lb-prev{left:14px;top:50%}.lb-next{right:14px;top:50%}
+.lb-cpt{position:absolute;bottom:16px;left:0;right:0;text-align:center;color:#fff;font-size:15px}
+.btn.mini,button.mini{width:auto;min-height:40px;padding:6px 12px;margin:0;font-size:15px}
+button.link.mini{min-height:34px;padding:2px 6px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:0 0 12px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.kpi b{display:block;font-size:28px;line-height:1.15;color:var(--ink);font-variant-numeric:tabular-nums}
+.kpi span{display:block;color:var(--muted);font-size:14px}
+.kpi small{color:var(--muted);font-size:12px}
+.charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(520px,100%),1fr));gap:12px}
+.chart-card h3{font-size:16px;margin:0 0 10px}
+.chart-actions{display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap;margin-top:6px}
+table.tableau{width:100%;border-collapse:collapse;font-size:14px}
+table.tableau th,table.tableau td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
+table.tableau td+td,table.tableau th+th{text-align:right;font-variant-numeric:tabular-nums}
 #print-area{display:none}
 @media print{
   body > *:not(#print-area){display:none !important}
@@ -118,6 +151,7 @@ button.plus1{min-height:110px;font-size:26px;background:var(--navy);border-radiu
 <script src="lib/qrcode.js"></script>
 <script src="lib/jsQR.js"></script>
 <script src="lib/xlsx.mini.min.js"></script>
+<script src="lib/chart.umd.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

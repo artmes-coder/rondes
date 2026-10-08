@@ -5,9 +5,9 @@
  * - À l'installation d'une nouvelle version, les pages ouvertes sont rechargées automatiquement.
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
  */
-const CACHE = 'rondes-cachan-1.3.1';
+const CACHE = 'rondes-cachan-1.4.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
-const STATIC = ['./icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js'];
+const STATIC = ['./icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js'];
 const NET_TIMEOUT = 4000;
 
 self.addEventListener('install', e => {

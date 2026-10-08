@@ -1,4 +1,4 @@
-/* Rondes parkings — Ville de Cachan, DPMS — version 1.3
+/* Rondes parkings — Ville de Cachan, DPMS — version 1.4
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : rondes, comptage des véhicules, signalements (catégories et
  *   sous-catégories, plusieurs par catégorie, en ronde ou hors ronde), barrières laissées ouvertes.
@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.4.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -413,6 +413,8 @@ function normalizeCfg(c) {
   delete n.checklist;
   n.sites = (n.sites || []).map(s => ({ ...s, barrieres: Array.isArray(s.barrieres) && s.barrieres.length ? s.barrieres : ['Entrée', 'Sortie'] }));
   if (!Array.isArray(n.motifs) || !n.motifs.length) n.motifs = MOTIFS_DEFAUT.slice();
+  n.gps = n.gps === true;
+  n.contacts = n.contacts && typeof n.contacts === 'object' ? n.contacts : {};
   n.v = 3;
   return n;
 }
@@ -432,7 +434,7 @@ function unpackJoin(s) { return JSON.parse(td.decode(fflate.inflateSync(b64u.dec
 const Geo = {
   watchId: null, last: null, err: null,
   start() {
-    if (this.watchId !== null || !('geolocation' in navigator)) return;
+    if (!(state.cfg && state.cfg.gps) || this.watchId !== null || !('geolocation' in navigator)) return;
     this.err = null;
     this.watchId = navigator.geolocation.watchPosition(
       p => { this.last = { lat: +p.coords.latitude.toFixed(6), lon: +p.coords.longitude.toFixed(6), acc: Math.round(p.coords.accuracy), ts: p.timestamp }; this.err = null; },
@@ -440,8 +442,9 @@ const Geo = {
       { enableHighAccuracy: true, maximumAge: 30000, timeout: 30000 });
   },
   stop() { if (this.watchId !== null) navigator.geolocation.clearWatch(this.watchId); this.watchId = null; this.last = null; },
-  async waitFirst(ms) { const t0 = Date.now(); while (!this.last && !this.err && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 200)); },
+  async waitFirst(ms) { const t0 = Date.now(); while (this.watchId !== null && !this.last && !this.err && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 200)); },
   snap() {
+    if (!(state.cfg && state.cfg.gps)) return { off: true };
     if (!('geolocation' in navigator)) return { err: 'non prise en charge' };
     if (this.last) return { ...this.last, age: Math.round((Date.now() - this.last.ts) / 1000) };
     return { err: this.err || 'pas de position' };
@@ -495,6 +498,7 @@ function header(title, opts) {
 function page(title, opts, ...content) { return h('div', null, header(title, opts), h('main', null, ...content)); }
 function go(view, params = {}, opts = {}) {
   if (state.cleanup) { try { state.cleanup(); } catch (e) { } state.cleanup = null; }
+  if (view !== 'reglages' && view !== 'scan') state.reglagesOk = false;
   state.view = view; state.params = params;
   if (!opts.noPush && view !== 'home') history.pushState({ v: view }, '');
   render();
@@ -505,6 +509,7 @@ async function render() {
   const root = document.getElementById('app');
   const fn = VIEWS[state.view] || VIEWS.home;
   const my = ++_renderSeq;
+  document.body.classList.toggle('large', state.mode === 'superviseur');
   try {
     const node = await fn(state.params);
     if (my !== _renderSeq) return;
@@ -634,7 +639,7 @@ async function fold() {
           dests: ev.data.dests, urgent: ev.data.urgent, horsRonde: !!ev.data.horsRonde, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
           thumb: e.local && typeof ev.data.thumb === 'string' ? ev.data.thumb : null,
           photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), ts, geo: dec && dec.geo, dev: ev.dev, seq: ev.seq,
-          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null
+          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: []
         });
       } else if (ev.t === 'revue') {
         const s = sigs.get(ev.data.sig);
@@ -642,6 +647,9 @@ async function fold() {
           s.suivi.push({ jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), geo: dec && dec.geo });
           applyVerdict(s, ev.data.verdict, ts || ev.jour, ev.agent);
         } else if (sup) alertes.push({ key: `orph:${ev.dev}:${ev.seq}`, at: e.at, msg: `${siteNom(ev.site)}, ${ev.agent}, ${fmtJour(ev.jour)} — constat sur un signalement inconnu (${ev.data.ref})` });
+      } else if (ev.t === 'action') {
+        const s = sigs.get(ev.data.sig);
+        if (s) s.actions.push({ type: ev.data.type, dest: ev.data.dest, texte: ev.data.texte, prevu: ev.data.prevu, quand: ev.data.quand || null, jour: ev.jour, par: ev.agent });
       } else if (ev.t === 'pm') {
         const s = sigs.get(ev.data.sig);
         if (s) {
@@ -672,6 +680,10 @@ async function fold() {
     } else if (e.kind === 'dec') {
       const d = e.dec;
       if (d.type === 'cfg') { if (validCfg(normalizeCfg(d.cfg))) cfg = normalizeCfg(d.cfg); }
+      else if (d.type === 'action') {
+        const s = sigs.get(d.action.sig);
+        if (s) s.actions.push({ ...d.action, quand: d.action.quand || d.ts, jour: (d.ts || '').slice(0, 10), par: d.par || 'DPMS' });
+      }
       else if (d.type === 'sig') {
         const s = sigs.get(d.sig);
         if (s) { Object.assign(s, d.patch); s.journalDPMS.push({ ts: d.ts, action: d.action, par: d.par || 'DPMS' }); }
@@ -699,7 +711,6 @@ async function fold() {
         else if (ev.prev !== prev.ev.hash) add('chaînage rompu avec la saisie précédente');
         if (!e.dec) add('horodatage et position illisibles');
         else {
-          if (e.dec.qr === false) add('ronde démarrée sans QR code');
           (e.dec.photoAges || []).forEach(a => { if (a.ageMin != null && a.ageMin > 15) add(`photo prise ${a.ageMin} min avant la saisie`); });
           if (ev.t === 'ronde_debut' && e.dec.geo && e.dec.geo.err) add('position : ' + e.dec.geo.err);
         }
@@ -868,7 +879,7 @@ async function viewSetup() {
     migre ? h('div', { class: 'banner info' }, 'Application mise à jour : cet appareil doit être configuré à nouveau. Les données déjà envoyées au relais seront retrouvées.') : null,
     h('div', { class: 'card' },
       h('h3', null, 'Téléphone des agents ou police municipale'),
-      h('p', { class: 'muted' }, 'Sur un appareil superviseur, ouvrez « QR codes » puis scannez le QR correspondant avec cet appareil.'),
+      h('p', { class: 'muted' }, 'Sur un appareil superviseur, ouvrez « Configurer les appareils » puis scannez le QR correspondant avec cet appareil (ou ouvrez le lien copié).'),
       h('button', { class: 'big', onclick: () => go('scan') }, 'Scanner un QR de configuration')),
     h('div', { class: 'card' },
       h('h3', null, 'Appareil superviseur (DPMS)'),
@@ -912,8 +923,7 @@ VIEWS.scan = async () => {
   const wrap = h('div', { class: 'scanner' }, video, h('div', { class: 'frame' }));
   let stream = null, stop = false, timer = null;
   state.cleanup = () => { stop = true; clearTimeout(timer); if (stream) stream.getTracks().forEach(t => t.stop()); };
-  const node = page('Scanner', { back: true }, wrap, msg,
-    state.mode === 'agent' ? h('button', { class: 'link', onclick: () => go('siteManuel') }, 'QR code illisible ? Démarrer sans QR') : null);
+  const node = page('Scanner', { back: true }, wrap, msg);
   (async () => {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
@@ -963,14 +973,7 @@ async function handleLink(text, fromScan) {
     if (estEquipe()) { if (confirm('Reconfigurer cet appareil avec ce QR ?')) await safe(setupEquipe)(j); else go('home'); return; }
     state.pendingJoin = j; go('home'); return;
   }
-  if (l.kind === 'site') {
-    if (state.mode !== 'agent') { toast('QR de parking : à scanner avec un téléphone des agents.', true); go('home'); return; }
-    if (!state.cfg) { toast('Configuration non encore reçue : connectez le téléphone au réseau.', true); go('home'); return; }
-    const [id, token] = l.val.split('.');
-    const site = siteById(id);
-    if (!site || site.token !== token) { toast('QR code de parking inconnu ou périmé.', true); go('home'); return; }
-    return startRondeFlow(site.id, true);
-  }
+  if (l.kind === 'site') { toast('Les QR de parking ne sont plus utilisés : appuyez sur « Commencer ma ronde ».'); go('home'); return; }
 }
 
 /* ====================================================================== */
@@ -1006,24 +1009,27 @@ async function agentHome() {
   const sigs = await dbAll('sigs');
   const ouvertes = await barrieresOuvertes();
   const cfg = state.cfg;
+  const enCours = sigs.filter(s => s.statut === 'ouvert');
   const perSite = cfg.sites.map(s => {
-    const o = sigs.filter(x => x.site === s.id && x.statut === 'ouvert').length;
-    return h('div', { class: 'stat' }, h('span', null, s.nom), h('span', null, h('b', null, o), h('span', { class: 'muted small' }, o > 1 ? ' ouverts' : ' ouvert')));
+    const o = enCours.filter(x => x.site === s.id).length;
+    return h('div', { class: 'stat' }, h('span', null, s.nom), h('span', null, h('b', null, o), h('span', { class: 'muted small' }, o > 1 ? ' en cours' : ' en cours')));
   });
+  const parSuivi = SUIVIS.map(e => [e, enCours.filter(s => suiviEtat(s) === e).length]).filter(([, n]) => n);
   return page('Rondes parkings', null,
     ronde ? h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
       h('h3', null, `Ronde en cours : ${siteNom(ronde.site)}`),
       h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
       h('button', { class: 'accent big', onclick: () => resumeRonde(ronde) }, 'Reprendre la ronde'))
-      : h('div', null,
-        h('button', { class: 'big', onclick: () => go('scan') }, 'Scanner le QR du parking'),
-        h('button', { class: 'link', onclick: () => go('siteManuel') }, 'QR code illisible ? Démarrer sans QR')),
+      : h('button', { class: 'big', onclick: () => go('choixParking') }, 'Commencer ma ronde'),
     h('div', { class: 'row' },
       h('button', { class: 'sec', onclick: () => go('signalement', { from: 'hr' }) }, 'Signalement hors ronde'),
       h('button', { class: 'sec', onclick: () => go('barriere', {}) }, 'Barrière ouverte')),
     ouvertes.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
-    h('div', { class: 'card' }, h('h2', null, 'Signalements en cours'), ...perSite,
-      h('button', { class: 'sec', onclick: () => go('agentSigs') }, 'Voir les signalements')),
+    h('div', { class: 'card' }, h('h2', null, 'Traitement des signalements'),
+      parSuivi.length ? parSuivi.map(([e, n]) => h('button', { class: 'list-item', onclick: () => go('suivi', { f: e }) }, h('div', { class: 'stat' }, h('span', null, e), h('b', null, n))))
+        : h('p', { class: 'muted' }, 'Aucun signalement en cours.'),
+      h('button', { class: 'sec', onclick: () => go('suivi', { f: 'tous' }) }, 'Tous les signalements en cours')),
+    h('div', { class: 'card' }, h('h2', null, 'Par parking'), ...perSite),
     syncCard(enAttente, lastSync, syncErr),
     h('div', { class: 'card' }, h('h2', null, 'Extrait Excel'),
       h('div', { class: 'row' },
@@ -1038,29 +1044,29 @@ async function agentHome() {
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
 
-VIEWS.siteManuel = async () => page('Choisir le parking', { back: true },
-  h('div', { class: 'banner warn' }, 'Le démarrage sans QR code est signalé au DPMS. Signalez le QR abîmé dans la ronde.'),
-  ...(state.cfg ? state.cfg.sites : []).map(s => h('button', { class: 'big sec', onclick: () => startRondeFlow(s.id, false) }, s.nom)));
+VIEWS.choixParking = async () => page('Commencer ma ronde', { back: true },
+  h('p', null, 'Quel parking ?'),
+  ...(state.cfg ? state.cfg.sites : []).map(s => h('button', { class: 'big sec', onclick: () => startRondeFlow(s.id) }, s.nom)));
 
-async function startRondeFlow(siteId, qr) {
+async function startRondeFlow(siteId) {
   const cur = await kvGet('ronde');
   if (cur) {
     if (cur.site === siteId) { resumeRonde(cur); return; }
     if (!confirm(`Une ronde est en cours à ${siteNom(cur.site)}. La terminer et démarrer à ${siteNom(siteId)} ?`)) { go('home'); return; }
     await finishRonde(cur, true);
   }
-  go('choixAgent', { site: siteId, qr });
+  go('choixAgent', { site: siteId });
 }
-VIEWS.choixAgent = async ({ site, qr }) => page(`Ronde : ${siteNom(site)}`, { back: true },
+VIEWS.choixAgent = async ({ site }) => page(`Ronde : ${siteNom(site)}`, { back: true },
   h('p', null, 'Qui fait la ronde ?'),
-  ...state.cfg.agents.map(a => h('button', { class: 'big sec', onclick: safe(() => beginRonde(site, a, qr)) }, a)));
+  ...state.cfg.agents.map(a => h('button', { class: 'big sec', onclick: safe(() => beginRonde(site, a)) }, a)));
 
-async function beginRonde(site, agent, qr) {
+async function beginRonde(site, agent) {
   showBusy('Démarrage de la ronde…');
   Geo.start();
   await Geo.waitFirst(4000);
-  const ronde = { rid: uuid(), site, agent, qr, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [], compte: 0 };
-  await appendEvent('ronde_debut', ronde, { qr }, { qr });
+  const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [], compte: 0, compteValide: false };
+  await appendEvent('ronde_debut', ronde, {});
   await kvSet('ronde', ronde);
   await kvSet('dernierAgent', { nom: agent, at: Date.now() });
   hideBusy();
@@ -1127,7 +1133,7 @@ VIEWS.revue = async () => {
     h('div', { class: 'sticky-bottom' }, h('div', null, btnValider)));
 };
 
-/* ---------- Ronde : compteur, check-list par catégorie, signalements ---------- */
+/* ---------- Ronde : comptage, contrôles par catégorie, signalements ---------- */
 VIEWS.ronde = async () => {
   const ronde = await kvGet('ronde');
   if (!ronde) return agentHome();
@@ -1136,19 +1142,35 @@ VIEWS.ronde = async () => {
   const sigs = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
   const parCat = {};
   sigs.forEach(s => { (parCat[s.cat] = parCat[s.cat] || []).push(s); });
+  const rafraichir = () => go('ronde', {}, { noPush: true, keepScroll: true });
 
-  // Compteur de véhicules
-  const nb = h('div', { class: 'compteur' }, String(ronde.compte));
-  const majCompte = async (v) => { ronde.compte = Math.max(0, v); nb.textContent = ronde.compte; await kvSet('ronde', ronde); };
-  const compteur = h('div', { class: 'card' },
-    h('h2', null, 'Véhicules comptés'),
-    nb,
-    h('button', { class: 'plus1', onclick: safe(async () => { await majCompte(ronde.compte + 1); if (navigator.vibrate) navigator.vibrate(30); }) }, '+1 véhicule'),
-    h('div', { class: 'row' },
-      h('button', { class: 'sec', onclick: safe(() => majCompte(ronde.compte - 1)) }, '−1'),
-      h('button', { class: 'sec', onclick: safe(async () => { const v = prompt('Nombre de véhicules :', ronde.compte); if (v !== null && /^\d+$/.test(v.trim())) await majCompte(parseInt(v, 10)); }) }, 'Corriger')));
+  // Comptage des véhicules : à valider ; une fois validé, il se replie
+  let compteur;
+  if (ronde.compteValide) {
+    compteur = h('div', { class: 'card', style: 'display:flex;align-items:center;justify-content:space-between;gap:8px' },
+      h('span', null, h('b', null, `${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''} compté${ronde.compte > 1 ? 's' : ''}`), ' ', h('span', { class: 'badge b-ok' }, 'validé')),
+      h('button', { class: 'link', style: 'width:auto;margin:0;min-height:40px', onclick: safe(async () => { ronde.compteValide = false; await kvSet('ronde', ronde); rafraichir(); }) }, 'modifier'));
+  } else {
+    const nb = h('div', { class: 'compteur' }, String(ronde.compte));
+    const majCompte = async (v) => { ronde.compte = Math.max(0, v); nb.textContent = ronde.compte; await kvSet('ronde', ronde); };
+    compteur = h('div', { class: 'card' },
+      h('h2', null, 'Comptage des véhicules'),
+      nb,
+      h('button', { class: 'plus1', onclick: safe(async () => { await majCompte(ronde.compte + 1); if (navigator.vibrate) navigator.vibrate(30); }) }, '+1 véhicule'),
+      h('div', { class: 'row' },
+        h('button', { class: 'sec', onclick: safe(() => majCompte(ronde.compte - 1)) }, '−1'),
+        h('button', { class: 'sec', onclick: safe(async () => { const v = prompt('Nombre de véhicules :', ronde.compte); if (v !== null && /^\d+$/.test(v.trim())) await majCompte(parseInt(v, 10)); }) }, 'Corriger')),
+      h('button', {
+        class: 'ok', onclick: safe(async () => {
+          if (!confirm(`Valider le comptage : ${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''} ?`)) return;
+          ronde.compteValide = true; await kvSet('ronde', ronde);
+          await appendEvent('comptage', ronde, { total: ronde.compte });
+          rafraichir();
+        })
+      }, 'Valider le comptage'));
+  }
 
-  // Check-list : une ligne par catégorie
+  // Contrôles : une ligne par catégorie
   const rows = cfg.cats.map(c => {
     const list = parCat[c.nom] || [];
     const ras = ronde.checklist[c.nom] === 'RAS' && !list.length;
@@ -1158,7 +1180,7 @@ VIEWS.ronde = async () => {
       list.length ? null : h('button', {
         class: ras ? 'sel-ras' : '', onclick: safe(async () => {
           if (ras) delete ronde.checklist[c.nom]; else ronde.checklist[c.nom] = 'RAS';
-          await kvSet('ronde', ronde); go('ronde', {}, { noPush: true, keepScroll: true });
+          await kvSet('ronde', ronde); rafraichir();
         })
       }, 'RAS'),
       h('button', { class: list.length ? 'sel-ano' : '', onclick: () => go('signalement', { from: 'ronde', cat: c.nom }) }, '+ Signaler'));
@@ -1177,8 +1199,9 @@ VIEWS.ronde = async () => {
       h('button', { class: 'sec', onclick: () => go('barriere', { site: ronde.site, from: 'ronde' }) }, 'Barrière ouverte')),
     h('button', {
       class: 'ok big', onclick: safe(async () => {
+        if (!ronde.compteValide) { toast('Validez d’abord le comptage des véhicules.', true); return; }
         if (restant) { toast(`Encore ${restant} contrôle(s) à faire : « RAS » ou « + Signaler ».`, true); return; }
-        if (!confirm(`Terminer la ronde ?\nVéhicules comptés : ${ronde.compte}${ronde.compte === 0 ? ' (aucun)' : ''}`)) return;
+        if (!confirm('Terminer la ronde ?')) return;
         await finishRonde(ronde);
       })
     }, 'Terminer la ronde'));
@@ -1189,7 +1212,7 @@ async function finishRonde(ronde, silent) {
   const sigs = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
   for (const c of state.cfg.cats) items[c.nom] = sigs.some(s => s.cat === c.nom) ? 'Anomalie' : (ronde.checklist[c.nom] || 'Non contrôlé');
   await appendEvent('checklist', ronde, { items });
-  await appendEvent('comptage', ronde, { total: ronde.compte || 0 });
+  if (!ronde.compteValide) await appendEvent('comptage', ronde, { total: ronde.compte || 0, nonValide: true });
   await appendEvent('ronde_fin', ronde, { nbSig: ronde.sigsCrees.length, compte: ronde.compte || 0 });
   await kvDel('ronde');
   Geo.stop();
@@ -1382,22 +1405,185 @@ VIEWS.barriere = async ({ site, bid, from }) => {
     h('button', { class: b ? 'ok big' : 'danger big', onclick: save }, b ? 'Enregistrer la fermeture' : 'Enregistrer l’ouverture'));
 };
 
-/* ---------- Liste des signalements (agents) ---------- */
-VIEWS.agentSigs = async () => {
-  const sigs = (await dbAll('sigs')).filter(s => s.statut === 'ouvert').sort((a, b) => (b.jour || '').localeCompare(a.jour || ''));
-  const cards = [];
-  for (const s of sigs) {
-    const th = await thumbOf(s);
-    cards.push(h('div', { class: 'card' },
-      h('h3', null, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
-      h('p', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${fmtJour(s.jour)}${s.agent ? ' — ' + s.agent : ''}${s.horsRonde ? ' — hors ronde' : ''}`),
-      s.desc ? h('p', null, s.desc) : null,
-      s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('b', null, 'Plaque : '), s.plaque, ' '] : null, s.emplacement ? [h('b', null, 'Emplacement : '), s.emplacement] : null) : null,
-      th ? h('div', { class: 'thumbs' }, h('img', { src: th, alt: '' })) : null,
-      s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
-      pmBanner(s)));
+/* ====================================================================== */
+/* TRAITEMENT DES SIGNALEMENTS (dispatch vers les services et prestataires) */
+/* ====================================================================== */
+const ACTIONS = {
+  tel: 'Appel ou message téléphonique', mail: 'Courriel envoyé', autre: 'Transmis autrement', relance: 'Relance',
+  reponse: 'Réponse reçue', prevue: 'Intervention prévue', faite: 'Intervention réalisée', note: 'Note'
+};
+const SUIVIS = ['À transmettre', 'En attente de réponse', 'Réponse reçue', 'Intervention prévue', 'Intervention réalisée'];
+function suiviEtat(s) {
+  const a = (s.actions || []).filter(x => x.type !== 'note');
+  if (!a.length) return 'À transmettre';
+  return { reponse: 'Réponse reçue', prevue: 'Intervention prévue', faite: 'Intervention réalisée' }[a[a.length - 1].type] || 'En attente de réponse';
+}
+function suiviBadge(s) {
+  if (s.statut === 'clos') return h('span', { class: 'badge b-ok' }, 'Clos');
+  const e = suiviEtat(s);
+  const cls = e === 'À transmettre' ? 'b-bad' : e === 'Intervention réalisée' ? 'b-ok' : e === 'Intervention prévue' ? 'b-info' : 'b-warn';
+  const p = (s.actions || []).filter(x => x.type === 'prevue').pop();
+  return h('span', { class: 'badge ' + cls }, e + (e === 'Intervention prévue' && p && p.prevu ? ' le ' + fmtDT(p.prevu) : ''));
+}
+function texteSignalement(s) {
+  return [`Signalement ${s.ref} — parking ${siteNom(s.site)}`, sigTitre(s), s.desc ? 'Détail : ' + s.desc : null,
+    s.plaque ? 'Plaque : ' + s.plaque : null, s.emplacement ? 'Emplacement : ' + s.emplacement : null, s.vehicule ? 'Véhicule : ' + s.vehicule : null,
+    `Signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}.`, '', 'Ville de Cachan — surveillance des parkings'].filter(x => x !== null).join('\n');
+}
+/* Photos d'une liste (téléchargées depuis le relais au besoin) */
+async function photosDe(list) {
+  const miss = new Set();
+  for (const p of list || []) if (p.n && !(await dbGet('photos', p.id))) miss.add(p.n);
+  const erreurs = [];
+  for (const n of miss) { try { await fetchMedia(n); } catch (e) { erreurs.push(e.message); } }
+  const out = [];
+  for (const p of list || []) { const c = await dbGet('photos', p.id); if (c) out.push({ ...c, attendu: p.sha }); }
+  return { photos: out, erreurs };
+}
+async function partagerSig(s) {
+  const txt = texteSignalement(s);
+  const { photos } = await photosDe([...(s.photos || [])]);
+  const files = photos.map((p, i) => new File([p.blob], `${s.ref}-${i + 1}.jpg`, { type: 'image/jpeg' }));
+  const data = files.length ? { title: `Signalement ${s.ref}`, text: txt, files } : { title: `Signalement ${s.ref}`, text: txt };
+  if (navigator.share && (!navigator.canShare || navigator.canShare(data))) {
+    try { await navigator.share(data); return; } catch (e) { if (e.name === 'AbortError') return; }
   }
-  return page('Signalements en cours', { back: true }, cards.length ? cards : h('p', { class: 'muted' }, 'Aucun signalement en cours.'));
+  try { await navigator.clipboard.writeText(txt); } catch (e) { }
+  files.forEach(f => download(f, f.name));
+  toast('Texte copié' + (files.length ? ' et photos téléchargées' : '') + ' : collez-les dans votre message.');
+}
+function journalActions(s) {
+  const a = s.actions || [];
+  if (!a.length) return [h('p', { class: 'muted' }, 'Aucune action enregistrée.')];
+  return a.slice().reverse().map(x => h('div', { class: 'stat', style: 'display:block' },
+    h('div', null, h('b', null, ACTIONS[x.type] || x.type), x.dest ? ' — ' + x.dest : '', x.type === 'prevue' && x.prevu ? ` — le ${fmtDT(x.prevu)}` : ''),
+    x.texte ? h('div', { class: 'small' }, x.texte) : null,
+    h('div', { class: 'muted small' }, `${x.quand ? fmtDT(x.quand) : fmtJour(x.jour)}${x.par ? ' — ' + x.par : ''}`)));
+}
+function contactsBloc(s, form) {
+  const dests = s.dests || [];
+  const sujet = `[Parking ${siteNom(s.site)}] ${sigTitre(s)} — ${s.ref}`;
+  return h('div', { class: 'card' }, h('h2', null, 'Transmettre'),
+    ...dests.map(dn => {
+      const c = (state.cfg.contacts || {})[dn] || {};
+      return h('div', { class: 'stat', style: 'gap:8px;flex-wrap:wrap' }, h('b', null, dn),
+        h('span', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
+          c.tel ? h('a', { class: 'btn sec mini', href: 'tel:' + c.tel.replace(/\s/g, ''), onclick: () => form.preset('tel', dn) }, 'Appeler ' + c.tel) : null,
+          c.mail ? h('a', { class: 'btn sec mini', href: `mailto:${c.mail}?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(texteSignalement(s))}`, onclick: () => form.preset('mail', dn) }, 'Courriel') : null,
+          !c.tel && !c.mail ? h('span', { class: 'muted small' }, 'coordonnées non renseignées') : null));
+    }),
+    h('button', { class: 'sec', onclick: safe(async () => { await partagerSig(s); form.preset('autre', dests[0] || null); }) }, 'Partager avec les photos (WhatsApp, courriel…)'),
+    h('p', { class: 'muted small' }, 'Après l’envoi, complétez et enregistrez l’action ci-dessous.'));
+}
+/* Formulaire d'action ; agents = liste des noms (équipe) ou null (superviseur) */
+function actionForm(s, { onSave, onClore, agents, parDefaut }) {
+  const d = { type: null, dest: (s.dests || [])[0] || null, texte: '', prevu: localDT(new Date(Date.now() + 86400000)), par: parDefaut || null };
+  const prevuBox = h('div', { style: 'display:none' }, h('label', { class: 'f' }, 'Prévue le'),
+    h('input', { type: 'datetime-local', value: d.prevu, oninput: e => d.prevu = e.target.value }));
+  const destsOpts = [...new Set([...(s.dests || []), ...state.cfg.dests])];
+  const typeBox = chips(Object.entries(ACTIONS).map(([val, lbl]) => ({ val, lbl })), d.type, v => { d.type = v; prevuBox.style.display = v === 'prevue' ? '' : 'none'; });
+  const destBox = chips(destsOpts, d.dest, v => d.dest = v);
+  const texte = h('textarea', { placeholder: 'Ex. : demande envoyée à M. X (ticket 1234) ; réponse : passage jeudi matin', oninput: e => d.texte = e.target.value });
+  const box = h('div', { class: 'card' }, h('h2', null, 'Ajouter une action'),
+    h('label', { class: 'f' }, 'Action'), typeBox,
+    h('label', { class: 'f' }, 'Auprès de'), destBox,
+    prevuBox,
+    h('label', { class: 'f' }, 'Détail'), texte,
+    agents ? [h('label', { class: 'f' }, 'Par'), chips(agents, d.par, v => d.par = v)] : null,
+    h('button', {
+      class: 'ok', onclick: safe(async () => {
+        if (!d.type) throw new Error('Choisissez l’action.');
+        if (d.type !== 'note' && !d.dest) throw new Error('Indiquez auprès de qui.');
+        if (d.type === 'note' && !d.texte.trim()) throw new Error('Saisissez la note.');
+        if (agents && !d.par) throw new Error('Indiquez qui enregistre l’action.');
+        const prevu = d.type === 'prevue' ? new Date(d.prevu) : null;
+        if (prevu && isNaN(prevu)) throw new Error('Date d’intervention invalide.');
+        await onSave({ sig: s.id, ref: s.ref, type: d.type, dest: d.type === 'note' ? '' : d.dest, texte: d.texte.trim(), prevu: prevu ? prevu.toISOString() : null, quand: new Date().toISOString() }, d.par);
+      })
+    }, 'Enregistrer l’action'),
+    s.statut === 'ouvert' && onClore ? h('button', {
+      class: 'link', onclick: safe(async () => {
+        if (agents && !d.par) throw new Error('Indiquez d’abord qui clôt (« Par »).');
+        if (!confirm('Le problème est résolu : clore le signalement ?')) return;
+        await onClore(d.par, d.texte.trim());
+      })
+    }, 'Problème résolu : clore le signalement') : null);
+  box.preset = (type, dest) => { d.type = type; typeBox.set(type); if (dest) { d.dest = dest; destBox.set(dest); } prevuBox.style.display = type === 'prevue' ? '' : 'none'; setTimeout(() => { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300); };
+  return box;
+}
+function galerie(photos) {
+  if (!photos.length) return null;
+  const urls = photos.map(p => URL.createObjectURL(p.blob));
+  return h('div', null,
+    photos.some(p => p.attendu && p.sha !== p.attendu) ? h('div', { class: 'banner bad' }, 'Une photo a été modifiée après la saisie (empreinte différente).') : null,
+    h('div', { class: 'gallery' }, ...urls.map((u, i) => h('img', { src: u, alt: 'Photo', onclick: () => lightbox(urls, i) }))));
+}
+function lightbox(urls, i) {
+  const img = h('img', { alt: 'Photo' });
+  const cpt = h('div', { class: 'lb-cpt' });
+  const show = k => { i = (k + urls.length) % urls.length; img.src = urls[i]; cpt.textContent = urls.length > 1 ? `${i + 1} / ${urls.length}` : ''; };
+  const key = e => { if (e.key === 'Escape') close(); if (e.key === 'ArrowRight') show(i + 1); if (e.key === 'ArrowLeft') show(i - 1); };
+  const close = () => { box.remove(); document.removeEventListener('keydown', key); };
+  const box = h('div', { class: 'lightbox', onclick: e => { if (e.target === box) close(); } }, img, cpt,
+    urls.length > 1 ? [h('button', { class: 'lb-nav lb-prev', onclick: () => show(i - 1), 'aria-label': 'Précédente' }, '‹'), h('button', { class: 'lb-nav lb-next', onclick: () => show(i + 1), 'aria-label': 'Suivante' }, '›')] : null,
+    h('button', { class: 'lb-close', onclick: close, 'aria-label': 'Fermer' }, '×'));
+  document.addEventListener('keydown', key);
+  document.body.append(box);
+  show(i);
+}
+
+/* ---------- Vues de traitement (équipe : téléphone agents ou PC de la loge) ---------- */
+VIEWS.suivi = async ({ f = 'À transmettre' }) => {
+  const enCours = (await dbAll('sigs')).filter(s => s.statut === 'ouvert');
+  const list = enCours.filter(s => f === 'tous' || suiviEtat(s) === f).sort((a, b) => (b.urgent - a.urgent) || (a.jour || '').localeCompare(b.jour || ''));
+  const cards = [];
+  for (const s of list) {
+    const th = await thumbOf(s);
+    cards.push(h('button', { class: 'list-item', onclick: () => go('suiviSig', { id: s.id }) },
+      h('div', { style: 'display:flex;gap:10px;align-items:flex-start' },
+        th ? h('img', { src: th, alt: '', class: 'vignette' }) : null,
+        h('div', { style: 'flex:1;min-width:0' },
+          h('div', { class: 'l1' }, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null),
+          h('div', { class: 'small' }, suiviBadge(s), ' ', (s.dests || []).join(', ')),
+          h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${depuisJours(s.jour)}${s.plaque ? ' — ' + s.plaque : ''}`)))));
+  }
+  return page('Traitement', { back: true },
+    h('div', { class: 'chips', style: 'margin-bottom:12px' }, ...[...SUIVIS, 'tous'].map(k =>
+      h('button', { class: 'chip' + (f === k ? ' on' : ''), onclick: () => go('suivi', { f: k }, { noPush: true }) }, `${k === 'tous' ? 'Tous' : k} (${enCours.filter(s => k === 'tous' || suiviEtat(s) === k).length})`))),
+    cards.length ? cards : h('p', { class: 'muted' }, 'Aucun signalement.'));
+};
+VIEWS.suiviSig = async ({ id }) => {
+  const s = await dbGet('sigs', id);
+  if (!s) return page('Signalement', { back: true }, h('p', null, 'Introuvable.'));
+  const recharger = () => go('suiviSig', { id }, { noPush: true });
+  const form = actionForm(s, {
+    agents: state.cfg.agents, parDefaut: await agentPrefere(),
+    onSave: async (a, par) => {
+      await appendEvent('action', { site: s.site, agent: par }, a);
+      await kvSet('dernierAgent', { nom: par, at: Date.now() });
+      await fold(); syncNow(); toast('Action enregistrée.'); recharger();
+    },
+    onClore: async (par, texte) => {
+      await appendEvent('revue', { site: s.site, agent: par }, { sig: s.id, ref: s.ref, verdict: 'resolu', comment: texte || 'Clos depuis le traitement' });
+      await fold(); syncNow(); toast('Signalement clos.'); go('suivi', { f: 'tous' }, { noPush: true });
+    }
+  });
+  const { photos, erreurs } = await photosDe([...(s.photos || []), ...(s.suivi || []).flatMap(v => v.photos || [])]);
+  return page(s.ref, { back: () => go('suivi', { f: 'tous' }, { noPush: true }) },
+    h('div', { class: 'card' },
+      h('h3', null, sigTitre(s), ' ', suiviBadge(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null),
+      h('p', { class: 'muted small' }, `${siteNom(s.site)} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}${s.horsRonde ? ' (hors ronde)' : ''} — à signaler à : ${(s.dests || []).join(', ')}`),
+      s.desc ? h('p', null, s.desc) : null,
+      s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('span', { class: 'plaque' }, s.plaque), ' '] : null, s.emplacement || '') : null,
+      galerie(photos),
+      erreurs.length ? h('p', { class: 'muted small' }, 'Photos indisponibles : ' + erreurs[0]) : null,
+      s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
+      pmBanner(s),
+      (s.suivi || []).length ? h('div', null, h('p', { class: 'small', style: 'font-weight:600;margin:10px 0 2px' }, 'Constats en ronde'),
+        ...s.suivi.map(v => h('p', { class: 'small', style: 'margin:2px 0' }, `${fmtJour(v.jour)} — ${v.agent || ''} : ${VERDICTS[v.verdict]}${v.comment ? ' — ' + v.comment : ''}`))) : null),
+    contactsBloc(s, form),
+    h('div', { class: 'card' }, h('h2', null, 'Actions entreprises'), ...journalActions(s)),
+    form);
 };
 
 /* ---------- Journal lisible (agents, PM) ---------- */
@@ -1420,6 +1606,7 @@ async function agentExcel(jours) {
     else if (ev.t === 'checklist') { const an = Object.entries(ev.data.items || {}).filter(([, v]) => v !== 'RAS').map(([k, v]) => `${k} : ${v}`); aoa.push([...base, 'Contrôles', '', '', '', an.length ? an.join(' ; ') : 'Tout RAS', '', '', '', '', '', '']); }
     else if (ev.t === 'comptage') aoa.push([...base, 'Comptage des véhicules', '', '', '', '', '', '', '', '', ev.data.total, '']);
     else if (ev.t === 'barriere') aoa.push([...base, ev.data.action === 'ouverte' ? 'Barrière ouverte' : 'Barrière refermée', '', '', ev.data.barriere, ev.data.motif || '', '', '', '', '', fmtDT(ev.data.quand), ev.data.comment || '']);
+    else if (ev.t === 'action') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Traitement : ' + ACTIONS[ev.data.type], ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', ev.data.dest || '', '', ev.data.prevu ? 'prévue le ' + fmtDT(ev.data.prevu) : '', ev.data.texte || '']); }
     else if (ev.t === 'pm') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Police municipale', ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', '', '', PM_STATUTS[ev.data.statut], ev.data.obs || '']); }
   }
   if (aoa.length === 1) { toast('Aucune saisie sur la période.'); return; }
@@ -1508,7 +1695,38 @@ async function pmExcel() {
 }
 
 /* ---------- Réglages (commun) ---------- */
+async function hashMdp(mdp, sel) {
+  const k = await crypto.subtle.importKey('raw', te.encode(mdp), 'PBKDF2', false, ['deriveBits']);
+  return b64u.enc(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: b64u.dec(sel), iterations: 150000 }, k, 256));
+}
+async function reglagesVerrou() {
+  const reg = await kvGet('mdpReglages');
+  const p1 = h('input', { type: 'password', autocomplete: 'new-password' });
+  const p2 = h('input', { type: 'password', autocomplete: 'new-password' });
+  if (!reg) {
+    const definir = safe(async () => {
+      if (p1.value.length < 4) throw new Error('4 caractères minimum.');
+      if (p1.value !== p2.value) throw new Error('Les deux saisies diffèrent.');
+      const sel = b64u.enc(crypto.getRandomValues(new Uint8Array(16)));
+      await kvSet('mdpReglages', { sel, hash: await hashMdp(p1.value, sel) });
+      state.reglagesOk = true; toast('Mot de passe enregistré.'); render();
+    });
+    p2.onkeydown = e => { if (e.key === 'Enter') definir(); };
+    return page('Réglages', { back: true },
+      h('div', { class: 'banner info' }, 'Première ouverture : choisissez le mot de passe qui protégera les réglages de cet appareil.'),
+      h('label', { class: 'f' }, 'Mot de passe'), p1, h('label', { class: 'f' }, 'Confirmation'), p2,
+      h('button', { class: 'ok', onclick: definir }, 'Définir le mot de passe'));
+  }
+  const ouvrir = safe(async () => {
+    if ((await hashMdp(p1.value, reg.sel)) !== reg.hash) { p1.value = ''; throw new Error('Mot de passe incorrect.'); }
+    state.reglagesOk = true; render();
+  });
+  p1.onkeydown = e => { if (e.key === 'Enter') ouvrir(); };
+  setTimeout(() => p1.focus(), 50);
+  return page('Réglages', { back: true }, h('label', { class: 'f' }, 'Mot de passe des réglages'), p1, h('button', { class: 'ok', onclick: ouvrir }, 'Ouvrir'));
+}
 VIEWS.reglages = async () => {
+  if (estEquipe() && !state.reglagesOk) return reglagesVerrou();
   let persisted = null;
   try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : null; } catch (e) { }
   let est = null; try { est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null; } catch (e) { }
@@ -1678,8 +1896,10 @@ async function supHome() {
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
     barrOuv.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...barrOuv.map(b => barriereLigne(b, false))) : null,
+    h('button', { class: 'big', onclick: () => go('supStats') }, 'Statistiques et graphiques'),
     h('div', { class: 'card' }, h('h2', null, 'Signalements'),
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'ouvert' }) }, h('div', { class: 'stat' }, h('span', null, 'En cours', urg ? h('span', { class: 'badge b-bad' }, urg + ' urgent(s)') : null), h('b', null, ouverts.length))),
+      h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'a_transmettre' }) }, h('div', { class: 'stat' }, h('span', null, 'À transmettre aux services'), h('b', null, ouverts.filter(s => suiviEtat(s) === 'À transmettre').length))),
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'clos' }) }, h('div', { class: 'stat' }, h('span', null, 'Clos'), h('b', null, sigs.length - ouverts.length))),
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'vehicules' }) }, h('div', { class: 'stat' }, h('span', null, 'Véhicules en attente de la PM'), h('b', null, vehPM)))),
     h('div', { class: 'card' }, h('h2', null, 'Dernières rondes'),
@@ -1691,7 +1911,7 @@ async function supHome() {
       h('button', { class: 'sec', onclick: safe(supExcel) }, 'Excel complet (heures et positions)'),
       h('button', { class: 'sec', onclick: safe(supArchive) }, 'Archive complète avec photos (.zip)')),
     h('div', { class: 'card' }, h('h2', null, 'Paramétrage'),
-      h('button', { class: 'sec', onclick: () => go('supQR') }, 'QR codes (parkings, agents, police municipale)'),
+      h('button', { class: 'sec', onclick: () => go('supQR') }, 'Configurer les appareils (QR et liens)'),
       h('button', { class: 'sec', onclick: () => go('supConfig') }, 'Listes, catégories et coordonnées'),
       h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Relais et appareils')),
     Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Appareils de l’équipe'),
@@ -1703,7 +1923,7 @@ function rondeLigne(r) {
   const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
   const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => v === 'Anomalie' ? k : `${k} (${v.toLowerCase()})`) : [];
   return h('div', { class: 'stat', style: 'display:block' },
-    h('div', null, h('b', null, `${siteNom(r.site)} — ${r.agent}`), r.qr === false ? h('span', { class: 'badge b-warn' }, 'sans QR') : null, !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null),
+    h('div', null, h('b', null, `${siteNom(r.site)} — ${r.agent}`), !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null),
     h('div', { class: 'muted small' }, `${fmtDT(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${dur != null ? ` (${dur} min)` : ''} — ${r.compte != null ? r.compte + ' véhicule(s), ' : ''}${r.nbSig} signalement(s), ${r.nbRevue} constat(s)`),
     anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null);
 }
@@ -1749,30 +1969,50 @@ VIEWS.supRelais = async () => page('Relais et appareils', { back: true },
   h('div', { class: 'card' }, h('h2', null, 'Repartir de zéro'),
     h('p', { class: 'small' }, 'Dans l’éditeur Apps Script du relais : choisir la fonction « reinitialiserRelais » dans la barre d’outils, cliquer sur « Exécuter ». Tout le contenu du relais est mis à la corbeille du compte Google. Réinitialiser ensuite chaque appareil (Réglages), puis activer un relais neuf.')));
 
-/* ---------- Liste et fiche des signalements ---------- */
-VIEWS.supSigs = async ({ f = 'ouvert', site = '' }) => {
+/* ---------- Liste et fiche des signalements (sur PC : liste et fiche côte à côte) ---------- */
+const ecranLarge = () => window.innerWidth >= 1000;
+VIEWS.supSigs = async ({ f = 'ouvert', site = '', cat = '', q = '', sel = null }) => {
   const all = await dbAll('sigs');
-  const test = { ouvert: s => s.statut === 'ouvert', clos: s => s.statut === 'clos', vehicules: s => isVehicule(s.cat), tous: () => true }[f];
-  const list = all.filter(s => test(s) && (!site || s.site === site))
+  const tests = { ouvert: s => s.statut === 'ouvert', a_transmettre: s => s.statut === 'ouvert' && suiviEtat(s) === 'À transmettre', clos: s => s.statut === 'clos', vehicules: s => isVehicule(s.cat), tous: () => true };
+  const qq = (q || '').toLowerCase();
+  const list = all.filter(s => tests[f](s) && (!site || s.site === site) && (!cat || s.cat === cat)
+    && (!qq || [s.ref, s.cat, s.sub, s.desc, s.plaque, s.emplacement, s.agent, s.vehicule].join(' ').toLowerCase().includes(qq)))
     .sort((a, b) => (b.urgent - a.urgent) || (b.ts || b.jour || '').localeCompare(a.ts || a.jour || ''));
-  const fchips = [['ouvert', 'En cours'], ['clos', 'Clos'], ['vehicules', 'Véhicules'], ['tous', 'Tous']].map(([k, l]) =>
-    h('button', { class: 'chip' + (f === k ? ' on' : ''), onclick: () => go('supSigs', { f: k, site }, { noPush: true }) }, l));
-  const schips = [['', 'Tous parkings'], ...state.cfg.sites.map(s => [s.id, s.nom])].map(([k, l]) =>
-    h('button', { class: 'chip' + (site === k ? ' on' : ''), onclick: () => go('supSigs', { f, site: k }, { noPush: true }) }, l));
-  return page('Signalements', { back: true },
-    h('div', { class: 'chips' }, ...fchips), h('div', { class: 'chips', style: 'margin-bottom:12px' }, ...schips),
-    list.length ? list.map(s => h('button', { class: 'list-item', onclick: () => go('supSig', { id: s.id }) },
-      h('div', { class: 'l1' }, `${s.ref} · ${sigTitre(s)}`, statutBadge(s.statut), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null, isVehicule(s.cat) ? pmBadge(s) : null),
-      h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ts ? fmtDT(s.ts) : fmtJour(s.jour)} — ${s.agent || ''}${s.horsRonde ? ' (hors ronde)' : ''} — ${(s.dests || []).join(', ')}`),
-      s.plaque ? h('div', { class: 'small' }, h('span', { class: 'plaque' }, s.plaque), s.emplacement ? ' — ' + s.emplacement : '') : null,
-      s.desc ? h('div', { class: 'small' }, s.desc.length > 120 ? s.desc.slice(0, 120) + '…' : s.desc) : null))
-      : h('p', { class: 'muted' }, 'Aucun signalement.'));
+  const nav = p => go('supSigs', { f, site, cat, q, sel, ...p }, { noPush: true, keepScroll: true });
+  const large = ecranLarge();
+  const filtres = h('div', { class: 'card' },
+    h('div', { class: 'chips' }, ...[['ouvert', 'En cours'], ['a_transmettre', 'À transmettre'], ['clos', 'Clos'], ['vehicules', 'Véhicules'], ['tous', 'Tous']].map(([k, l]) =>
+      h('button', { class: 'chip' + (f === k ? ' on' : ''), onclick: () => nav({ f: k, sel: null }) }, `${l} (${all.filter(tests[k]).length})`))),
+    h('div', { class: 'filtres' },
+      h('select', { onchange: e => nav({ site: e.target.value, sel: null }) }, h('option', { value: '' }, 'Tous les parkings'), ...state.cfg.sites.map(s => h('option', { value: s.id, selected: s.id === site ? true : null }, s.nom))),
+      h('select', { onchange: e => nav({ cat: e.target.value, sel: null }) }, h('option', { value: '' }, 'Toutes les catégories'), ...[...state.cfg.cats.map(c => c.nom), CAT_AUTRE].map(c => h('option', { value: c, selected: c === cat ? true : null }, c))),
+      h('input', { type: 'search', value: q, placeholder: 'Rechercher (plaque, réf., texte…)', onchange: e => nav({ q: e.target.value, sel: null }) })));
+  const items = [];
+  for (const s of list) {
+    const th = await thumbOf(s);
+    items.push(h('button', { class: 'list-item' + (sel === s.id ? ' sel' : ''), onclick: () => large ? nav({ sel: s.id }) : go('supSig', { id: s.id }) },
+      h('div', { style: 'display:flex;gap:10px;align-items:flex-start' },
+        th ? h('img', { src: th, alt: '', class: 'vignette' }) : h('div', { class: 'vignette vide' }),
+        h('div', { style: 'flex:1;min-width:0' },
+          h('div', { class: 'l1' }, sigTitre(s)),
+          h('div', { class: 'small' }, statutBadge(s.statut), s.statut === 'ouvert' ? suiviBadge(s) : null, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, isVehicule(s.cat) ? pmBadge(s) : null),
+          h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ts ? fmtDT(s.ts) : fmtJour(s.jour)} — ${s.agent || ''}${s.horsRonde ? ' (hors ronde)' : ''}`),
+          s.plaque ? h('div', { class: 'small' }, h('span', { class: 'plaque' }, s.plaque), s.emplacement ? ' ' + s.emplacement : '') : null))));
+  }
+  const vide = h('p', { class: 'muted' }, 'Aucun signalement.');
+  if (!large) return page('Signalements', { back: true }, filtres, items.length ? items : vide);
+  const choisi = sel ? await dbGet('sigs', sel) : null;
+  return page('Signalements', { back: true }, filtres,
+    h('div', { class: 'split' },
+      h('div', { class: 'pane-list' }, items.length ? items : vide),
+      h('div', { class: 'pane-detail' }, choisi ? await supSigDetail(choisi, () => nav({})) : h('div', { class: 'card muted' }, 'Sélectionnez un signalement dans la liste.'))));
 };
 function geoLink(geo) {
   if (!geo || geo.err || geo.lat == null) return h('span', { class: 'muted' }, geo && geo.err ? 'position ' + geo.err : '—');
   return h('a', { href: `https://www.openstreetmap.org/?mlat=${geo.lat}&mlon=${geo.lon}#map=19/${geo.lat}/${geo.lon}`, target: '_blank', rel: 'noopener' },
     `${geo.lat}, ${geo.lon} (± ${geo.acc} m)`);
 }
+const aGeo = g => g && !g.err && g.lat != null;
 /* Photos : téléchargées à la demande depuis le relais, vérifiées, conservées sur l'appareil */
 async function fetchMedia(n) {
   let r;
@@ -1785,28 +2025,66 @@ async function fetchMedia(n) {
   return out;
 }
 async function photoBlocks(list) {
-  const out = [];
-  const missing = new Map();
-  for (const p of list || []) { const c = await dbGet('photos', p.id); if (!c && p.n) missing.set(p.n, true); }
-  for (const n of missing.keys()) { try { await fetchMedia(n); } catch (e) { out.push(h('p', { class: 'muted small' }, 'Photos indisponibles : ' + e.message)); } }
-  for (const p of list || []) {
-    const c = await dbGet('photos', p.id);
-    if (!c) continue;
-    if (p.sha && c.sha !== p.sha) out.push(h('div', { class: 'banner bad' }, 'Photo modifiée après la saisie (empreinte différente).'));
-    out.push(h('img', { class: 'photo-full', src: URL.createObjectURL(c.blob), alt: 'Photo' }));
-  }
-  return out;
+  const { photos, erreurs } = await photosDe(list);
+  return [galerie(photos), erreurs.length ? h('p', { class: 'muted small' }, 'Photos indisponibles : ' + erreurs[0]) : null];
 }
 async function supDecision(s, action, patch) {
   await queueDec('d', { type: 'sig', id: uuid(), ts: new Date().toISOString(), par: 'DPMS', action, sig: s.id, patch });
   await fold();
   syncNow();
 }
+/* Contenu de la fiche (pleine page sur téléphone, panneau de droite sur PC) */
+async function supSigDetail(s, recharger) {
+  const done = (msg) => { toast(msg); recharger(); };
+  const notes = h('textarea', { value: s.notes || '', placeholder: 'Notes internes DPMS (lisibles par les seuls superviseurs)' });
+  const suivi = [];
+  for (const v of s.suivi || []) {
+    suivi.push(h('div', { class: 'stat', style: 'display:block' },
+      h('div', null, h('b', null, VERDICTS[v.verdict] || v.verdict), ` — ${v.ts ? fmtDT(v.ts) : fmtJour(v.jour)} — ${v.agent || ''}`),
+      v.comment ? h('div', { class: 'small' }, v.comment) : null,
+      aGeo(v.geo) ? h('div', { class: 'small' }, 'Position : ', geoLink(v.geo)) : null,
+      ...(await photoBlocks(v.photos))));
+  }
+  const form = actionForm(s, {
+    agents: null,
+    onSave: async (a) => { await queueDec('d', { type: 'action', id: uuid(), ts: new Date().toISOString(), par: 'DPMS', action: a }); await fold(); syncNow(); done('Action enregistrée.'); },
+    onClore: async () => { await supDecision(s, 'clôture', { statut: 'clos', closLe: new Date().toISOString(), closPar: 'DPMS' }); done('Clos.'); }
+  });
+  return h('div', null,
+    h('div', { class: 'card' },
+      h('h3', null, sigTitre(s), ' ', statutBadge(s.statut), s.statut === 'ouvert' ? suiviBadge(s) : null, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
+      h('dl', { class: 'kv' },
+        h('dt', null, 'Référence'), h('dd', null, s.ref),
+        h('dt', null, 'Parking'), h('dd', null, siteNom(s.site)),
+        h('dt', null, 'Signalé'), h('dd', null, s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent ? ' par ' + s.agent : '', s.horsRonde ? ' (hors ronde)' : ''),
+        aGeo(s.geo) ? [h('dt', null, 'Position'), h('dd', null, geoLink(s.geo))] : null,
+        h('dt', null, 'À signaler à'), h('dd', null, (s.dests || []).join(', ')),
+        s.plaque ? [h('dt', null, 'Plaque'), h('dd', null, h('span', { class: 'plaque' }, s.plaque))] : null,
+        s.emplacement ? [h('dt', null, 'Emplacement'), h('dd', null, s.emplacement)] : null,
+        s.vehicule ? [h('dt', null, 'Véhicule'), h('dd', null, s.vehicule)] : null,
+        s.statut === 'clos' ? [h('dt', null, 'Clos'), h('dd', null, `${s.closLe && s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)}${s.closPar ? ' par ' + s.closPar : ''}`)] : null,
+        s.notesAgents ? [h('dt', null, 'Message aux agents'), h('dd', null, s.notesAgents)] : null),
+      s.desc ? h('p', null, s.desc) : null,
+      ...(await photoBlocks(s.photos))),
+    h('div', { class: 'card' }, h('h2', null, 'Traitement'), ...journalActions(s)),
+    s.pm && s.pm.hist.length ? h('div', { class: 'card' }, h('h2', null, 'Police municipale'),
+      ...s.pm.hist.map(x => h('p', { class: 'small' }, h('b', null, `${x.ts ? fmtDT(x.ts) : fmtJour(x.jour)} — ${PM_STATUTS[x.statut]}`), x.obs ? ' : ' + x.obs : ''))) : null,
+    suivi.length ? h('div', { class: 'card' }, h('h2', null, 'Constats des agents'), ...suivi) : null,
+    s.statut === 'ouvert' ? contactsBloc(s, form) : null,
+    form,
+    h('div', { class: 'card' }, h('h2', null, 'Intervenir'),
+      h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement aux agents, à la PM et aux autres superviseurs.'),
+      s.statut === 'clos' ? h('button', { class: 'sec', onclick: safe(async () => { await supDecision(s, 'réouverture', { statut: 'ouvert', closLe: null, closPar: null }); done('Rouvert.'); }) }, 'Rouvrir') : null,
+      h('button', { class: 'sec', onclick: () => { state.retour = { view: state.view, params: { ...state.params } }; go('supSig', { id: s.id, edit: true }); } }, 'Modifier ou écrire aux agents'),
+      s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { await supDecision(s, 'effacement de la plaque', { plaque: '' }); done('Plaque effacée.'); } }) }, 'Effacer la plaque (dossier traité)') : null),
+    h('div', { class: 'card' }, h('h2', null, 'Notes internes'), notes,
+      h('button', { class: 'sec', onclick: safe(async () => { await queueDec('n', { type: 'note', ts: new Date().toISOString(), sig: s.id, text: notes.value }); await fold(); syncNow(); toast('Notes enregistrées.'); }) }, 'Enregistrer les notes')),
+    (s.journalDPMS || []).length ? h('div', { class: 'card' }, h('h2', null, 'Interventions DPMS'),
+      ...s.journalDPMS.map(j => h('p', { class: 'small' }, `${fmtDT(j.ts)} — ${j.action}`))) : null);
+}
 VIEWS.supSig = async ({ id, edit }) => {
   const s = await dbGet('sigs', id);
   if (!s) return page('Signalement', { back: true }, h('p', null, 'Introuvable.'));
-  const back = () => go('supSigs', { f: s.statut });
-  const done = (msg) => { toast(msg); go('supSig', { id }, { noPush: true, keepScroll: true }); };
   if (edit) {
     const catSel = h('select', null, ...[...state.cfg.cats.map(c => c.nom), CAT_AUTRE].map(c => h('option', { value: c, selected: c === s.cat ? true : null }, c)));
     const sub = h('input', { type: 'text', value: s.sub || '' });
@@ -1817,7 +2095,8 @@ VIEWS.supSig = async ({ id, edit }) => {
     let urgent = !!s.urgent;
     const urg = h('button', { class: 'chip' + (urgent ? ' on-bad' : ''), onclick: e => { urgent = !urgent; e.target.className = 'chip' + (urgent ? ' on-bad' : ''); } }, 'Urgent');
     const msg = h('input', { type: 'text', value: s.notesAgents || '', placeholder: 'Ex. : intervention Ateliers prévue mardi' });
-    return page(`Modifier ${s.ref}`, { back: () => go('supSig', { id }, { noPush: true }) },
+    const retour = () => { const r = state.retour || { view: 'supSig', params: { id } }; state.retour = null; go(r.view, r.params, { noPush: true }); };
+    return page(`Modifier ${s.ref}`, { back: retour },
       h('label', { class: 'f' }, 'Catégorie'), catSel,
       h('label', { class: 'f' }, 'Sous-catégorie'), sub,
       h('label', { class: 'f' }, 'Description'), desc,
@@ -1829,55 +2108,226 @@ VIEWS.supSig = async ({ id, edit }) => {
       h('button', {
         class: 'ok', onclick: safe(async () => {
           await supDecision(s, 'modification', { cat: catSel.value, sub: sub.value.trim(), desc: desc.value.trim(), plaque: plaque.value.trim().toUpperCase(), emplacement: empl.value.trim(), dests: [...dests], urgent, notesAgents: msg.value.trim() });
-          done('Modifié. Transmis aux agents.');
+          toast('Modifié. Transmis aux agents.'); retour();
         })
       }, 'Enregistrer et transmettre aux agents'));
   }
-  const notes = h('textarea', { value: s.notes || '', placeholder: 'Notes internes DPMS (lisibles par les seuls superviseurs)' });
-  const suivi = [];
-  for (const v of s.suivi || []) {
-    suivi.push(h('div', { class: 'card' },
-      h('div', null, h('b', null, VERDICTS[v.verdict] || v.verdict), ` — ${v.ts ? fmtDT(v.ts) : fmtJour(v.jour)} — ${v.agent || ''}`),
-      v.comment ? h('p', null, v.comment) : null,
-      h('div', { class: 'small' }, 'Position : ', geoLink(v.geo)),
-      ...(await photoBlocks(v.photos))));
+  return page(`Signalement ${s.ref}`, { back: true }, await supSigDetail(s, () => go('supSig', { id }, { noPush: true, keepScroll: true })));
+};
+
+/* ====================================================================== */
+/* STATISTIQUES ET GRAPHIQUES (superviseur)                               */
+/* Palette catégorielle validée (ordre fixe) : bleu, orange, aqua.        */
+/* ====================================================================== */
+const SERIES = ['#2a78d6', '#eb6834', '#1baf7a'];
+const INDICS = {
+  sig_n: { lbl: 'Nombre de signalements', src: 'sig' },
+  sig_statut: { lbl: 'Signalements en cours / clos', src: 'sig' },
+  sig_delai: { lbl: 'Délai moyen de clôture (jours)', src: 'sig' },
+  act_n: { lbl: 'Actions de traitement', src: 'act' },
+  ronde_n: { lbl: 'Nombre de rondes', src: 'ronde' },
+  ronde_veh: { lbl: 'Véhicules comptés (moyenne par ronde)', src: 'ronde' },
+  barr_n: { lbl: 'Ouvertures de barrière', src: 'barr' },
+  barr_h: { lbl: 'Durée d’ouverture des barrières (heures)', src: 'barr' }
+};
+const AXES = {
+  cat: { lbl: 'Catégorie', src: ['sig', 'act'], key: r => r.cat },
+  sub: { lbl: 'Sous-catégorie', src: ['sig'], key: r => r.sub ? `${r.sub}` : `${r.cat} (sans précision)` },
+  agent: { lbl: 'Agent', src: ['sig', 'act', 'ronde', 'barr'], key: r => r.agent || '?' },
+  site: { lbl: 'Parking', src: ['sig', 'act', 'ronde', 'barr'], key: r => siteNom(r.site) },
+  dest: { lbl: 'Destinataire', src: ['sig', 'act'], key: r => r.dests && r.dests.length ? r.dests : ['(aucun)'] },
+  type: { lbl: 'Type d’action', src: ['act'], key: r => ACTIONS[r.type] || r.type },
+  barriere: { lbl: 'Barrière', src: ['barr'], key: r => `${siteNom(r.site)} — ${r.barriere}` },
+  motif: { lbl: 'Motif d’ouverture', src: ['barr'], key: r => r.motif || '?' },
+  jour: { lbl: 'Jour', src: ['sig', 'act', 'ronde', 'barr'], temps: 'jour' },
+  semaine: { lbl: 'Semaine', src: ['sig', 'act', 'ronde', 'barr'], temps: 'semaine' },
+  mois: { lbl: 'Mois', src: ['sig', 'act', 'ronde', 'barr'], temps: 'mois' }
+};
+const TABLEAU_DEFAUT = [
+  { i: 'sig_statut', a: 'cat' }, { i: 'sig_n', a: 'agent' }, { i: 'sig_n', a: 'semaine' },
+  { i: 'sig_delai', a: 'cat' }, { i: 'barr_h', a: 'barriere' }, { i: 'ronde_veh', a: 'site' }
+];
+const MOIS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+function dSig(s) { return new Date(s.ts || ((s.jour || '').slice(0, 10) + 'T12:00:00')); }
+function dClos(s) { return s.closLe ? new Date(s.closLe.length > 10 ? s.closLe : s.closLe + 'T12:00:00') : null; }
+function cleTemps(d, mode) {
+  if (mode === 'mois') return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  if (mode === 'semaine') { const l = new Date(d); l.setHours(12, 0, 0, 0); l.setDate(l.getDate() - ((l.getDay() + 6) % 7)); return localDate(l); }
+  return localDate(d);
+}
+function lblTemps(k, mode) {
+  if (mode === 'mois') { const [y, m] = k.split('-'); return `${MOIS[+m - 1]} ${y}`; }
+  const [y, m, d] = k.split('-'); return mode === 'semaine' ? `sem. du ${d}/${m}` : `${d}/${m}`;
+}
+function suiteTemps(min, max, mode) {
+  const out = []; const d = new Date(min); d.setHours(12, 0, 0, 0);
+  if (mode === 'mois') d.setDate(1);
+  if (mode === 'semaine') d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  for (let g = 0; d <= max && g < 800; g++) {
+    out.push(cleTemps(d, mode));
+    if (mode === 'mois') d.setMonth(d.getMonth() + 1); else d.setDate(d.getDate() + (mode === 'semaine' ? 7 : 1));
   }
-  return page(`Signalement ${s.ref}`, { back },
+  return [...new Set(out)];
+}
+async function donneesStats({ du, au, site }) {
+  const dans = d => d && !isNaN(d) && (!du || d >= du) && (!au || d <= au);
+  const okSite = r => !site || r.site === site;
+  const sigs = (await dbAll('sigs')).filter(okSite);
+  const sig = sigs.map(s => {
+    const c = dClos(s), o = dSig(s);
+    return { date: o, cat: s.cat, sub: s.sub, agent: s.agent, site: s.site, dests: s.dests, statut: s.statut, delai: s.statut === 'clos' && c ? Math.max(0, (c - o) / 86400000) : null };
+  }).filter(r => dans(r.date));
+  const act = sigs.flatMap(s => (s.actions || []).map(a => ({ date: new Date(a.quand || a.jour + 'T12:00:00'), type: a.type, dests: a.dest ? [a.dest] : [], agent: a.par, site: s.site, cat: s.cat }))).filter(r => dans(r.date));
+  const ronde = (await dbAll('rondes')).filter(okSite).map(r => ({ date: new Date(r.debut || r.jour + 'T12:00:00'), agent: r.agent, site: r.site, compte: r.compte })).filter(r => dans(r.date));
+  const barr = ((await kvGet('barrieres')) || []).filter(okSite).map(b => {
+    const o = new Date(b.ouverte.quand), f = b.fermee ? new Date(b.fermee.quand) : new Date();
+    return { date: o, site: b.site, barriere: b.barriere, agent: b.ouverte.agent, motif: b.ouverte.motif, heures: Math.max(0, (f - o) / 3600000), enCours: !b.fermee };
+  }).filter(r => dans(r.date));
+  return { sig, act, ronde, barr };
+}
+const moyenne = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+const arrondi = (v, n = 1) => v == null ? null : Math.round(v * 10 ** n) / 10 ** n;
+function agreger(spec, D) {
+  const ind = INDICS[spec.i], ax = AXES[spec.a];
+  const recs = D[ind.src];
+  const groupes = new Map();
+  for (const r of recs) {
+    let ks = ax.temps ? cleTemps(r.date, ax.temps) : ax.key(r);
+    if (!Array.isArray(ks)) ks = [ks];
+    for (const k of ks) { if (!groupes.has(k)) groupes.set(k, []); groupes.get(k).push(r); }
+  }
+  let cles = [...groupes.keys()];
+  if (ax.temps && recs.length) {
+    const ds = recs.map(r => r.date.getTime());
+    cles = suiteTemps(new Date(Math.min(...ds)), new Date(Math.max(...ds)), ax.temps);
+  }
+  const val = (rs) => {
+    rs = rs || [];
+    switch (spec.i) {
+      case 'sig_statut': return [rs.filter(r => r.statut === 'ouvert').length, rs.filter(r => r.statut === 'clos').length];
+      case 'sig_delai': return [arrondi(moyenne(rs.map(r => r.delai).filter(x => x != null)))];
+      case 'ronde_veh': return [arrondi(moyenne(rs.map(r => r.compte).filter(x => x != null)))];
+      case 'barr_h': return [arrondi(rs.reduce((s, r) => s + r.heures, 0))];
+      default: return [rs.length];
+    }
+  };
+  let lignes = cles.map(k => ({ k, lbl: ax.temps ? lblTemps(k, ax.temps) : k, v: val(groupes.get(k)) }));
+  let note = '';
+  if (!ax.temps) {
+    lignes = lignes.filter(l => l.v.some(x => x != null && x !== 0));
+    lignes.sort((a, b) => b.v.reduce((s, x) => s + (x || 0), 0) - a.v.reduce((s, x) => s + (x || 0), 0));
+    if (lignes.length > 15) { note = `${lignes.length - 15} autres valeurs non affichées`; lignes = lignes.slice(0, 15); }
+  }
+  const series = spec.i === 'sig_statut' ? ['En cours', 'Clos'] : [ind.lbl];
+  return { lignes, series, note, temps: !!ax.temps, titre: `${ind.lbl} par ${ax.lbl.toLowerCase()}`, axe: ax.lbl, unite: spec.i === 'sig_delai' ? ' j' : spec.i === 'barr_h' ? ' h' : '' };
+}
+let _charts = [];
+function detruireCharts() { _charts.forEach(c => { try { c.destroy(); } catch (e) { } }); _charts = []; }
+function carteGraphique(spec, D, onRetirer) {
+  const g = agreger(spec, D);
+  const carte = h('div', { class: 'card chart-card' }, h('h3', null, g.titre));
+  if (!g.lignes.length) { carte.append(h('p', { class: 'muted' }, 'Aucune donnée sur la période.')); }
+  else {
+    const empile = g.series.length > 1;
+    const ligne = g.temps && g.lignes.length > 12 && !empile;
+    const horizontal = !g.temps;
+    const hauteur = horizontal ? Math.max(160, 44 + g.lignes.length * (empile ? 30 : 26)) : 260;
+    const canvas = h('canvas');
+    const zone = h('div', { style: `position:relative;height:${hauteur}px` }, canvas);
+    const table = h('table', { class: 'tableau', style: 'display:none' },
+      h('thead', null, h('tr', null, h('th', null, g.axe), ...g.series.map(s => h('th', null, s)))),
+      h('tbody', null, ...g.lignes.map(l => h('tr', null, h('td', null, l.lbl), ...l.v.map(x => h('td', null, x == null ? '—' : String(x).replace('.', ',') + g.unite))))));
+    carte.append(zone, table);
+    const datasets = g.series.map((nom, j) => ({
+      label: nom, data: g.lignes.map(l => l.v[j]), backgroundColor: SERIES[j], borderColor: ligne ? SERIES[j] : '#ffffff',
+      borderWidth: ligne ? 2 : (empile ? { top: 0, bottom: 0, left: 0, right: 2 } : 0), borderRadius: empile ? 0 : 4, borderSkipped: 'start',
+      maxBarThickness: 22, pointRadius: 4, pointBackgroundColor: SERIES[j], pointBorderColor: '#ffffff', pointBorderWidth: 2, tension: 0, spanGaps: true
+    }));
+    const grille = { color: '#e8ebf0', drawTicks: false }, ticks = { color: '#5d6b7c', padding: 6, font: { size: 12 } };
+    const entier = ['sig_n', 'sig_statut', 'act_n', 'ronde_n', 'barr_n'].includes(spec.i);
+    const ticksValeur = { ...ticks, precision: entier ? 0 : undefined, callback: v => String(v).replace('.', ',') };
+    const chart = new Chart(canvas, {
+      type: ligne ? 'line' : 'bar',
+      data: { labels: g.lignes.map(l => l.lbl), datasets },
+      options: {
+        indexAxis: horizontal ? 'y' : 'x', responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: horizontal ? 'y' : 'index', intersect: false },
+        plugins: {
+          legend: { display: g.series.length > 1, position: 'top', align: 'start', labels: { boxWidth: 12, boxHeight: 12, color: '#1b2430' } },
+          tooltip: { callbacks: { label: c => `${c.dataset.label} : ${c.parsed[horizontal ? 'x' : 'y'] == null ? '—' : String(c.parsed[horizontal ? 'x' : 'y']).replace('.', ',') + g.unite}` } }
+        },
+        scales: {
+          x: { stacked: empile, grid: horizontal ? grille : { display: false }, border: { color: '#cfd5de' }, ticks: horizontal ? ticksValeur : { ...ticks, maxRotation: 0, autoSkip: true }, beginAtZero: true },
+          y: { stacked: empile, grid: horizontal ? { display: false } : grille, border: { color: '#cfd5de' }, ticks: horizontal ? { ...ticks, autoSkip: false } : ticksValeur, beginAtZero: true }
+        }
+      }
+    });
+    _charts.push(chart);
+    carte.append(h('div', { class: 'chart-actions' },
+      g.note ? h('span', { class: 'muted small' }, g.note) : null,
+      h('button', { class: 'link mini', onclick: e => { const vis = table.style.display !== 'none'; table.style.display = vis ? 'none' : ''; zone.style.display = vis ? '' : 'none'; e.target.textContent = vis ? 'Tableau' : 'Graphique'; } }, 'Tableau'),
+      h('button', { class: 'link mini', onclick: () => { const a = document.createElement('a'); a.href = chart.toBase64Image('image/png', 1); a.download = g.titre.replace(/[^\wÀ-ÿ]+/g, '_') + '.png'; a.click(); } }, 'Image'),
+      h('button', { class: 'link mini', onclick: safe(() => shareOrDownload(xlsxBlob([['Données', [[g.axe, ...g.series], ...g.lignes.map(l => [l.lbl, ...l.v])], [30, ...g.series.map(() => 16)]]]), g.titre.replace(/[^\wÀ-ÿ]+/g, '_') + '.xlsx', g.titre)) }, 'Excel'),
+      onRetirer ? h('button', { class: 'link mini', onclick: onRetirer }, 'Retirer') : null));
+  }
+  return carte;
+}
+VIEWS.supStats = async (p = {}) => {
+  detruireCharts();
+  state.cleanup = detruireCharts;
+  const per = p.per || '30';
+  const maintenant = new Date();
+  let du = null, au = null;
+  if (per === 'perso') { du = p.du ? new Date(p.du + 'T00:00:00') : null; au = p.au ? new Date(p.au + 'T23:59:59') : null; }
+  else if (per !== 'tout') { du = new Date(maintenant.getTime() - (+per) * 86400000); }
+  const D = await donneesStats({ du, au, site: p.site || '' });
+  const nav = q => go('supStats', { ...p, ...q }, { noPush: true, keepScroll: true });
+  const clos = D.sig.filter(r => r.statut === 'clos');
+  const delai = moyenne(clos.map(r => r.delai).filter(x => x != null));
+  const veh = moyenne(D.ronde.map(r => r.compte).filter(x => x != null));
+  const hBarr = D.barr.reduce((s, r) => s + r.heures, 0);
+  const tuile = (v, l, sous) => h('div', { class: 'kpi' }, h('b', null, v), h('span', null, l), sous ? h('small', null, sous) : null);
+  const perso = (await kvGet('statsPerso')) || [];
+
+  // Constructeur de graphique
+  const choix = { i: 'sig_n', a: 'cat' };
+  const selAxe = h('select');
+  const majAxes = () => { const src = INDICS[choix.i].src; const ok = Object.entries(AXES).filter(([, a]) => a.src.includes(src)); if (!ok.some(([k]) => k === choix.a)) choix.a = ok[0][0]; selAxe.replaceChildren(...ok.map(([k, a]) => h('option', { value: k, selected: k === choix.a ? true : null }, a.lbl))); };
+  selAxe.onchange = e => choix.a = e.target.value;
+  const selInd = h('select', { onchange: e => { choix.i = e.target.value; majAxes(); } }, ...Object.entries(INDICS).map(([k, x]) => h('option', { value: k }, x.lbl)));
+  majAxes();
+
+  const grille = h('div', { class: 'charts' });
+  const node = page('Statistiques', { back: true },
     h('div', { class: 'card' },
-      h('h3', null, sigTitre(s), statutBadge(s.statut), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
-      h('dl', { class: 'kv' },
-        h('dt', null, 'Parking'), h('dd', null, siteNom(s.site)),
-        h('dt', null, 'Signalé'), h('dd', null, s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent ? ' par ' + s.agent : '', s.horsRonde ? ' (hors ronde)' : ''),
-        h('dt', null, 'Position'), h('dd', null, geoLink(s.geo)),
-        h('dt', null, 'À signaler à'), h('dd', null, (s.dests || []).join(', ')),
-        s.plaque ? [h('dt', null, 'Plaque'), h('dd', null, h('span', { class: 'plaque' }, s.plaque))] : null,
-        s.emplacement ? [h('dt', null, 'Emplacement'), h('dd', null, s.emplacement)] : null,
-        s.vehicule ? [h('dt', null, 'Véhicule'), h('dd', null, s.vehicule)] : null,
-        s.statut === 'clos' ? [h('dt', null, 'Clos'), h('dd', null, `${s.closLe && s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)}${s.closPar ? ' par ' + s.closPar : ''}`)] : null,
-        s.notesAgents ? [h('dt', null, 'Message aux agents'), h('dd', null, s.notesAgents)] : null),
-      s.desc ? h('p', null, s.desc) : null,
-      ...(await photoBlocks(s.photos))),
-    s.pm && s.pm.hist.length ? h('div', { class: 'card' }, h('h2', null, 'Police municipale'),
-      ...s.pm.hist.map(x => h('p', { class: 'small' }, h('b', null, `${x.ts ? fmtDT(x.ts) : fmtJour(x.jour)} — ${PM_STATUTS[x.statut]}`), x.obs ? ' : ' + x.obs : ''))) : null,
-    suivi.length ? h('h2', { style: 'font-size:16px;color:var(--navy)' }, 'Constats des agents') : null, ...suivi,
-    h('div', { class: 'card' }, h('h2', null, 'Intervenir (facultatif)'),
-      h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement aux agents, à la PM et aux autres superviseurs.'),
-      s.statut !== 'clos'
-        ? h('button', { class: 'ok', onclick: safe(async () => { if (!confirm('Clôturer ce signalement ?')) return; await supDecision(s, 'clôture', { statut: 'clos', closLe: new Date().toISOString(), closPar: 'DPMS' }); done('Clos. Transmis aux agents.'); }) }, 'Clôturer')
-        : h('button', { class: 'sec', onclick: safe(async () => { await supDecision(s, 'réouverture', { statut: 'ouvert', closLe: null, closPar: null }); done('Rouvert. Transmis aux agents.'); }) }, 'Rouvrir'),
-      h('button', { class: 'sec', onclick: () => go('supSig', { id, edit: true }, { noPush: true }) }, 'Modifier ou écrire aux agents'),
-      s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { await supDecision(s, 'effacement de la plaque', { plaque: '' }); done('Plaque effacée.'); } }) }, 'Effacer la plaque (dossier traité)') : null),
-    h('div', { class: 'card' }, h('h2', null, 'Notes internes'), notes,
-      h('button', { class: 'sec', onclick: safe(async () => { await queueDec('n', { type: 'note', ts: new Date().toISOString(), sig: s.id, text: notes.value }); await fold(); syncNow(); toast('Notes enregistrées.'); }) }, 'Enregistrer les notes')),
-    (s.journalDPMS || []).length ? h('div', { class: 'card' }, h('h2', null, 'Interventions DPMS'),
-      ...s.journalDPMS.map(j => h('p', { class: 'small' }, `${fmtDT(j.ts)} — ${j.action}`))) : null);
+      h('div', { class: 'chips' }, ...[['7', '7 jours'], ['30', '30 jours'], ['90', '3 mois'], ['365', '12 mois'], ['tout', 'Tout'], ['perso', 'Dates…']].map(([k, l]) =>
+        h('button', { class: 'chip' + (per === k ? ' on' : ''), onclick: () => nav({ per: k }) }, l))),
+      h('div', { class: 'filtres' },
+        per === 'perso' ? [h('input', { type: 'date', value: p.du || '', onchange: e => nav({ du: e.target.value }) }), h('input', { type: 'date', value: p.au || '', onchange: e => nav({ au: e.target.value }) })] : null,
+        h('select', { onchange: e => nav({ site: e.target.value }) }, h('option', { value: '' }, 'Tous les parkings'), ...state.cfg.sites.map(s => h('option', { value: s.id, selected: s.id === p.site ? true : null }, s.nom))))),
+    h('div', { class: 'kpis' },
+      tuile(D.sig.length, 'signalements'),
+      tuile(D.sig.length - clos.length, 'en cours'),
+      tuile(clos.length, 'clos', D.sig.length ? `${Math.round(clos.length / D.sig.length * 100)} %` : null),
+      tuile(delai == null ? '—' : String(arrondi(delai)).replace('.', ',') + ' j', 'délai moyen de clôture'),
+      tuile(D.ronde.length, 'rondes'),
+      tuile(veh == null ? '—' : String(arrondi(veh)).replace('.', ','), 'véhicules par ronde (moy.)'),
+      tuile(D.barr.length, 'ouvertures de barrière', D.barr.some(r => r.enCours) ? 'dont en cours' : null),
+      tuile(String(arrondi(hBarr)).replace('.', ',') + ' h', 'barrières ouvertes (cumul)')),
+    h('div', { class: 'card' }, h('h2', null, 'Créer un graphique'),
+      h('div', { class: 'filtres' }, selInd, h('span', { class: 'muted' }, 'par'), selAxe,
+        h('button', { class: 'ok', style: 'width:auto;margin:0', onclick: safe(async () => { const l = (await kvGet('statsPerso')) || []; l.unshift({ ...choix }); await kvSet('statsPerso', l.slice(0, 30)); nav({}); }) }, 'Ajouter'))),
+    grille);
+  perso.forEach((spec, k) => grille.append(carteGraphique(spec, D, safe(async () => { const l = (await kvGet('statsPerso')) || []; l.splice(k, 1); await kvSet('statsPerso', l); nav({}); }))));
+  TABLEAU_DEFAUT.forEach(spec => grille.append(carteGraphique(spec, D, null)));
+  return node;
 };
 
 /* ---------- Historique des rondes ---------- */
 VIEWS.supRondes = async () => {
   const rs = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 300);
   return page('Rondes', { back: true },
-    rs.length ? rs.map(r => h('div', { class: 'card' }, rondeLigne(r), h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut)),
+    rs.length ? rs.map(r => h('div', { class: 'card' }, rondeLigne(r), aGeo(r.geoDebut) ? h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut)) : null,
       r.alertes && r.alertes.length ? h('div', { class: 'small', style: 'color:var(--warn)' }, [...new Set(r.alertes)].join(' ; ')) : null))
       : h('p', { class: 'muted' }, 'Aucune ronde reçue.'));
 };
@@ -1890,26 +2340,27 @@ async function supExcel() {
   const barr = ((await kvGet('barrieres')) || []).sort((a, b) => a.ouverte.quand.localeCompare(b.ouverte.quand));
   const evs = (await dbAll('entries')).filter(e => e.kind === 'ev').sort((a, b) => a.k.localeCompare(b.k));
   const g = (geo, k) => geo && !geo.err && geo[k] != null ? geo[k] : '';
-  const A1 = [['Réf.', 'Parking', 'Catégorie', 'Sous-catégorie', 'Description', 'Plaque', 'Emplacement', 'Véhicule', 'Destinataires', 'Urgent', 'Aggravé', 'Hors ronde', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Suivi PM', 'Observations PM', 'Message aux agents', 'Notes DPMS']];
+  const A1 = [['Réf.', 'Parking', 'Catégorie', 'Sous-catégorie', 'Description', 'Plaque', 'Emplacement', 'Véhicule', 'Destinataires', 'Urgent', 'Aggravé', 'Hors ronde', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Traitement', 'Actions', 'Suivi PM', 'Observations PM', 'Message aux agents', 'Notes DPMS']];
   sigs.forEach(s => {
     const last = (s.suivi || []).slice(-1)[0];
     A1.push([s.ref, siteNom(s.site), s.cat, s.sub || '', s.desc, s.plaque || '', s.emplacement || '', s.vehicule || '', (s.dests || []).join(', '), s.urgent ? 'Oui' : '', s.aggrave ? 'Oui' : '', s.horsRonde ? 'Oui' : '', STATUTS[s.statut] || s.statut, s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent || '',
       g(s.geo, 'lat'), g(s.geo, 'lon'), g(s.geo, 'acc'), (s.photos || []).length, last ? VERDICTS[last.verdict] : '', last ? (last.ts ? fmtDT(last.ts) : fmtJour(last.jour)) : '',
       s.closLe ? (s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)) : '', s.closPar || '',
+      s.statut === 'clos' ? 'Clos' : suiviEtat(s), (s.actions || []).map(a => `${a.quand ? fmtDT(a.quand) : fmtJour(a.jour)} ${ACTIONS[a.type]}${a.dest ? ' — ' + a.dest : ''}${a.texte ? ' : ' + a.texte : ''}`).join(' | '),
       isVehicule(s.cat) || s.pm ? pmEtat(s) : '', s.pm ? s.pm.hist.map(x => `${fmtJour(x.jour)} ${PM_STATUTS[x.statut]}${x.obs ? ' : ' + x.obs : ''}`).join(' | ') : '', s.notesAgents || '', s.notes || '']);
   });
-  const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Véhicules comptés', 'Démarrage par QR', 'Contrôles non RAS', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
+  const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Véhicules comptés', 'Contrôles non RAS', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
   rondes.forEach(r => {
     const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : '';
     const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => `${k} (${v})`).join(', ') : '';
-    A2.push([siteNom(r.site), r.agent, fmtDT(r.debut), fmtDT(r.fin), dur, r.compte != null ? r.compte : '', r.qr === false ? 'Non' : 'Oui', anos, r.nbSig, r.nbRevue, g(r.geoDebut, 'lat'), g(r.geoDebut, 'lon'), g(r.geoDebut, 'acc'), [...new Set(r.alertes || [])].join(' ; '), r.dev]);
+    A2.push([siteNom(r.site), r.agent, fmtDT(r.debut), fmtDT(r.fin), dur, r.compte != null ? r.compte : '', anos, r.nbSig, r.nbRevue, g(r.geoDebut, 'lat'), g(r.geoDebut, 'lon'), g(r.geoDebut, 'acc'), [...new Set(r.alertes || [])].join(' ; '), r.dev]);
   });
   const A3 = [['Parking', 'Barrière', 'Ouverte le', 'Par', 'Motif', 'Commentaire', 'Saisie de l’ouverture', 'Refermée le', 'Par', 'Commentaire', 'Saisie de la fermeture', 'Durée (min)', 'En cours']];
   barr.forEach(b => {
     const fin = b.fermee ? new Date(b.fermee.quand) : new Date();
     A3.push([siteNom(b.site), b.barriere, fmtDT(b.ouverte.quand), b.ouverte.agent || '', b.ouverte.motif || '', b.ouverte.comment || '', fmtDT(b.ouverte.ts), b.fermee ? fmtDT(b.fermee.quand) : '', b.fermee ? b.fermee.agent || '' : '', b.fermee ? b.fermee.comment || '' : '', b.fermee ? fmtDT(b.fermee.ts) : '', Math.round((fin - new Date(b.ouverte.quand)) / 60000), b.fermee ? '' : 'Oui']);
   });
-  const TYPES = { ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
+  const TYPES = { action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
   const A4 = [['Appareil', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Reçu par le relais', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Empreinte']];
   evs.forEach(e => {
     const ev = e.ev; let det = '';
@@ -1917,7 +2368,7 @@ async function supExcel() {
     if (ev.t === 'revue') det = `${ev.data.ref} : ${VERDICTS[ev.data.verdict]}${ev.data.comment ? ' — ' + ev.data.comment : ''}`;
     if (ev.t === 'checklist') det = Object.entries(ev.data.items || {}).map(([k, v]) => `${k} : ${v}`).join(' ; ');
     if (ev.t === 'comptage') det = `${ev.data.total} véhicule(s)`;
-    if (ev.t === 'ronde_debut') det = ev.data.qr ? 'QR scanné' : 'sans QR';
+    if (ev.t === 'action') det = `${ev.data.ref} : ${ACTIONS[ev.data.type]}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''}`;
     if (ev.t === 'ronde_fin') det = `${ev.data.nbSig} signalement(s)`;
     if (ev.t === 'barriere') det = `${ev.data.barriere} ${ev.data.action} — déclaré ${fmtDT(ev.data.quand)}${ev.data.motif ? ' — ' + ev.data.motif : ''}`;
     if (ev.t === 'pm') det = `${ev.data.ref} : ${PM_STATUTS[ev.data.statut]}${ev.data.obs ? ' — ' + ev.data.obs : ''}`;
@@ -1926,8 +2377,11 @@ async function supExcel() {
   });
   hideBusy();
   await shareOrDownload(xlsxBlob([
-    ['Signalements', A1, [11, 12, 22, 30, 45, 12, 16, 20, 24, 7, 7, 8, 8, 16, 12, 11, 11, 9, 7, 16, 16, 16, 14, 11, 40, 30, 40]],
-    ['Rondes', A2, [12, 12, 16, 16, 10, 10, 10, 40, 12, 10, 11, 11, 10, 40, 10]],
+    ['Signalements', A1, [11, 12, 22, 30, 45, 12, 16, 20, 24, 7, 7, 8, 8, 16, 12, 11, 11, 9, 7, 16, 16, 16, 14, 20, 60, 11, 40, 30, 40]],
+    ['Rondes', A2, [12, 12, 16, 16, 10, 10, 40, 12, 10, 11, 11, 10, 40, 10]],
+    ['Traitement', [['Réf.', 'Parking', 'Signalement', 'Date', 'Action', 'Auprès de', 'Détail', 'Intervention prévue le', 'Par'],
+      ...sigs.flatMap(s => (s.actions || []).map(a => [s.ref, siteNom(s.site), sigTitre(s), a.quand ? fmtDT(a.quand) : fmtJour(a.jour), ACTIONS[a.type], a.dest || '', a.texte || '', a.prevu ? fmtDT(a.prevu) : '', a.par || '']))],
+      [11, 12, 40, 16, 26, 16, 50, 18, 12]],
     ['Barrières', A3, [12, 12, 16, 12, 22, 25, 16, 16, 12, 25, 16, 10, 8]],
     ['Journal', A4, [10, 6, 16, 11, 16, 16, 12, 12, 55, 11, 11, 10, 10, 10]]
   ]), `rondes_parkings_complet_${fileStamp()}.xlsx`, 'Rondes parkings');
@@ -1952,48 +2406,27 @@ async function supArchive() {
   toast('Archive en clair : à verser uniquement sur un stockage de la Ville.');
 }
 
-/* ---------- QR codes ---------- */
+/* ---------- QR et liens de configuration ---------- */
 function qrSvg(text, ecc = 'M') {
   const q = qrcode(0, ecc); q.addData(text, 'Byte'); q.make();
   return q.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
 }
 VIEWS.supQR = async ({ first } = {}) => {
-  const qrBloc = (titre, texte, role) => {
+  const bloc = (titre, texte, role) => {
+    const lien = appBaseURL() + '#join=' + packJoin(state.conn, role);
     const show = h('div', { class: 'qr' });
     return h('div', { class: 'card' }, h('h2', null, titre), h('p', { class: 'muted small' }, texte),
-      h('button', { onclick: () => { show.innerHTML = qrSvg(appBaseURL() + '#join=' + packJoin(state.conn, role), 'L'); } }, 'Afficher le QR'), show,
-      h('p', { class: 'muted small' }, 'Ce QR donne accès aux signalements de l’équipe : ne le diffusez pas.'));
+      h('div', { class: 'row' },
+        h('button', { onclick: () => { show.innerHTML = qrSvg(lien, 'L'); } }, 'Afficher le QR'),
+        h('button', { class: 'sec', onclick: safe(async () => { try { await navigator.clipboard.writeText(lien); toast('Lien copié : ouvrez-le dans le navigateur de l’appareil à configurer.'); } catch (e) { prompt('Copiez ce lien :', lien); } }) }, 'Copier le lien (PC)')),
+      show,
+      h('p', { class: 'muted small' }, 'Ce QR et ce lien donnent accès aux signalements de l’équipe : ne les diffusez pas.'));
   };
-  return page('QR codes', { back: true },
-    first ? h('div', { class: 'banner ok' }, 'Relais activé. Étapes suivantes : saisir les prénoms des agents (Listes, catégories et coordonnées), imprimer les QR des parkings, configurer les téléphones.') : null,
-    qrBloc('Téléphones des agents', 'À scanner une fois avec l’appareil photo de chaque téléphone agents. Les modifications de listes leur parviennent ensuite seules.', 'agent'),
-    qrBloc('Police municipale', 'À scanner avec l’appareil du chef de service PM : accès aux signalements de véhicules (plaques, emplacements, photos), observations, traité / non traité.', 'pm'),
-    h('div', { class: 'card' }, h('h2', null, 'Parkings'),
-      h('p', { class: 'muted small' }, 'Un QR par parking, à afficher à l’entrée, plastifié, hors de portée. Scanné à l’arrivée, il démarre la ronde.'),
-      ...state.cfg.sites.map(s => h('div', { class: 'stat' }, h('span', null, s.nom), h('span', { class: 'muted small' }, 'code ' + s.token.slice(0, 4) + '…'))),
-      h('button', { class: 'accent', onclick: () => printSiteQR() }, 'Imprimer les QR des parkings'),
-      h('button', {
-        class: 'link', onclick: safe(async () => {
-          if (!confirm('Générer de nouveaux codes ? Les QR affichés dans les parkings ne fonctionneront plus.')) return;
-          const cfg = JSON.parse(JSON.stringify(state.cfg));
-          cfg.sites.forEach(s => s.token = randCode(10)); cfg.cfgId = randCode(8);
-          await publishCfg(cfg);
-          toast('Nouveaux codes générés : réimprimez les QR.'); render();
-        })
-      }, 'Régénérer les codes (QR perdu ou copié)')));
+  return page('Configurer les appareils', { back: true },
+    first ? h('div', { class: 'banner ok' }, 'Relais activé. Étapes suivantes : saisir les prénoms des agents et les coordonnées des destinataires (Listes, catégories et coordonnées), puis configurer les téléphones.') : null,
+    bloc('Téléphones des agents et PC de la loge', 'Téléphone : scanner le QR avec l’appareil photo. PC sans caméra : copier le lien et l’ouvrir dans le navigateur du PC. Les modifications de listes parviennent ensuite seules.', 'agent'),
+    bloc('Police municipale', 'Appareil du chef de service PM : signalements de véhicules (plaques, emplacements, photos), observations, traité / non traité.', 'pm'));
 };
-function printSiteQR() {
-  const area = document.getElementById('print-area');
-  area.replaceChildren(...state.cfg.sites.map(s => {
-    const url = appBaseURL() + `#site=${s.id}.${s.token}`;
-    return h('div', { class: 'print-page' },
-      h('p', null, 'VILLE DE CACHAN — Rondes de surveillance'),
-      h('h1', null, 'Parking ' + s.nom),
-      h('div', { html: qrSvg(url, 'M') }),
-      h('p', null, 'Agents : scannez ce code à votre arrivée pour démarrer la ronde.'));
-  }));
-  setTimeout(() => window.print(), 100);
-}
 async function publishCfg(cfg) {
   cfg = normalizeCfg(cfg);
   state.cfg = cfg; await kvSet('cfg', cfg);
@@ -2005,7 +2438,8 @@ async function publishCfg(cfg) {
 VIEWS.supConfig = async () => {
   const c = JSON.parse(JSON.stringify(state.cfg));
   const ta = (lines, hmin = 140) => h('textarea', { value: lines.join('\n'), style: `min-height:${hmin}px` });
-  const tAgents = ta(c.agents), tDests = ta(c.dests), tMotifs = ta(c.motifs);
+  const tAgents = ta(c.agents), tMotifs = ta(c.motifs);
+  const tDests = ta(c.dests.map(d => { const k = c.contacts[d] || {}; return [d, k.tel || '', k.mail || ''].join(' | ').replace(/( \| )+$/, ''); }), 170);
   const tTaxo = h('textarea', { value: taxoToText(c.cats), style: 'min-height:420px;font-size:15px' });
   const sitesInputs = c.sites.map(s => ({ nom: h('input', { type: 'text', value: s.nom }), barr: h('input', { type: 'text', value: s.barrieres.join(', ') }) }));
   const tel = h('input', { type: 'tel', value: c.urgenceTel || '', placeholder: '01 …' });
@@ -2016,20 +2450,26 @@ VIEWS.supConfig = async () => {
     h('div', { class: 'card' }, h('h2', null, 'Parkings et barrières'),
       ...sitesInputs.map(si => h('div', { style: 'margin-bottom:10px' }, si.nom, h('label', { class: 'f small' }, 'Barrières (séparées par des virgules)'), si.barr))),
     h('label', { class: 'f' }, 'Agents (un par ligne)'), tAgents,
-    h('label', { class: 'f' }, 'Destinataires (un par ligne)'), tDests,
+    h('label', { class: 'f' }, 'Destinataires et coordonnées'),
+    h('p', { class: 'muted small' }, 'Une ligne par destinataire : nom | téléphone | courriel. Les coordonnées servent aux boutons « Appeler » et « Courriel » du traitement.'),
+    tDests,
     h('label', { class: 'f' }, 'Catégories et sous-catégories'),
-    h('p', { class: 'muted small' }, 'Une catégorie par ligne, suivie si besoin de « | » et des destinataires proposés par défaut. Puis ses sous-catégories, une par ligne commençant par « - ». Un « ! » en fin de ligne marque une sous-catégorie urgente par défaut. Chaque catégorie est une ligne de la check-list de ronde. « Autre (préciser) » est ajouté automatiquement.'),
+    h('p', { class: 'muted small' }, 'Une catégorie par ligne, suivie si besoin de « | » et des destinataires proposés par défaut. Puis ses sous-catégories, une par ligne commençant par « - ». Un « ! » en fin de ligne marque une sous-catégorie urgente par défaut. Chaque catégorie est une ligne de contrôle de la ronde. « Autre (préciser) » est ajouté automatiquement.'),
     tTaxo,
     h('label', { class: 'f' }, 'Motifs d’ouverture de barrière (un par ligne)'), tMotifs,
     h('label', { class: 'f' }, 'Téléphone d’urgence affiché aux agents'), tel,
     h('label', { class: 'f' }, 'Courriel d’urgence'), mail,
+    h('label', { class: 'f' }, 'Géolocalisation GPS des saisies'),
+    chips([{ val: false, lbl: 'Désactivée' }, { val: true, lbl: 'Activée' }], c.gps, v => c.gps = v),
     h('button', {
       class: 'ok', onclick: safe(async () => {
         const cats = parseTaxo(tTaxo.value);
         if (!cats.length) throw new Error('Aucune catégorie.');
         const vides = cats.filter(x => !x.subs.length).map(x => x.nom);
         if (vides.length) throw new Error('Catégorie sans sous-catégorie : ' + vides.join(', '));
-        const dests = lines(tDests);
+        const dl = lines(tDests).map(l => l.split('|').map(x => x.trim()));
+        const dests = dl.map(x => x[0]).filter(Boolean);
+        const contacts = Object.fromEntries(dl.filter(x => x[0]).map(x => [x[0], { tel: x[1] || '', mail: x[2] || '' }]));
         const inconnus = [...new Set(cats.flatMap(x => x.dests).filter(x => !dests.includes(x)))];
         if (inconnus.length) throw new Error('Destinataire inconnu dans les catégories : ' + inconnus.join(', '));
         if (!lines(tAgents).length || !dests.length) throw new Error('Listes vides.');
@@ -2038,7 +2478,7 @@ VIEWS.supConfig = async () => {
           const b = si.barr.value.split(',').map(x => x.trim()).filter(Boolean);
           if (b.length) c.sites[k].barrieres = b;
         });
-        Object.assign(c, { agents: lines(tAgents), dests, cats, motifs: lines(tMotifs), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
+        Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, motifs: lines(tMotifs), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
         await publishCfg(c);
         toast('Enregistré. Transmis à tous les appareils.');
         go('home');

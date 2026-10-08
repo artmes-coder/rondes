@@ -1,113 +1,101 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web hors ligne pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.3.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.4.
 
-**Principe.** L'outil appartient aux agents : ils font leurs rondes, signalent, suivent et clôturent eux-mêmes leurs signalements. À la fin de chaque ronde, tout part automatiquement vers un relais, qui conserve un journal chiffré commun. Chaque appareil reconstitue l'état à partir de ce journal :
+L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
-- **plusieurs téléphones agents** : chacun voit les signalements des autres ;
-- **plusieurs appareils superviseurs** (téléphone, ordinateur) : chacun voit la même chose ;
-- **un appareil réinstallé, perdu ou remplacé** retrouve toutes les données déjà envoyées.
-
-Les interventions du superviseur (clôturer, rouvrir, modifier, écrire aux agents) sont facultatives et sont transmises automatiquement à tous les appareils.
-
-**Confidentialité.** Ce dépôt ne contient que le programme. Tout ce qui est stocké sur le relais est chiffré sur l'appareil avant l'envoi. Le relais et le compte Google ne lisent rien.
-
-| Donnée | Lisible par |
-|---|---|
-| Signalements, constats, photos, barrières, comptages, observations PM, configuration, messages aux agents | téléphones agents, police municipale et superviseurs (clé d'équipe) |
-| Heure exacte et position de chaque saisie, notes internes DPMS | superviseurs seuls (clé superviseur) |
-| Clés du superviseur (« coffre ») | quiconque connaît la **phrase de passe superviseur** |
+Les données transitent par un relais (compte Google dédié). Tout y est chiffré sur les appareils avant l'envoi : le relais ne lit rien. Ce dépôt ne contient que le programme.
 
 ---
 
 ## 1. Mise en ligne de l'application
 
-Dépôt GitHub public `rondes`, publié par GitHub Pages (gratuit pour un dépôt public ; seul le programme est public) : `https://<compte>.github.io/rondes/`.
+Dépôt GitHub public `rondes`, publié par GitHub Pages : `https://<compte>.github.io/rondes/`.
 
-Pour une mise à jour : **Add file → Upload files**, glisser le **contenu** du dossier (pas le dossier lui-même), puis **Commit changes**. Depuis la 1.3, chaque appareil charge toujours la dernière version publiée dès qu'il a du réseau (la page se recharge d'elle-même à la première ouverture) ; sans réseau, il utilise sa copie locale. Le numéro de version figure en bas de l'accueil.
+Mise à jour : **Add file → Upload files**, glisser le **contenu** du dossier (pas le dossier lui-même), puis **Commit changes**. Chaque appareil charge la dernière version dès qu'il a du réseau (la page se recharge d'elle-même) ; sans réseau, il utilise sa copie locale. Le numéro de version figure en bas de l'accueil.
 
-## 2. Relais (une fois, gratuit)
+## 2. Relais (une fois)
 
-À faire sur un ordinateur, avec un **compte Google dédié au service** (pas un compte personnel).
+Sur un ordinateur, avec un **compte Google dédié au service**.
 
-1. **script.google.com → Nouveau projet**. Effacer le contenu, coller tout le fichier `relais/relais.gs`, puis enregistrer.
-2. **Déployer → Nouveau déploiement** → engrenage → **Application web**.
-   - *Exécuter en tant que* : **Moi**.
-   - *Qui a accès* : **Tout le monde**.
-   - **Déployer → Autoriser l'accès**. Au message « Google n'a pas validé cette application » : **Paramètres avancés → Accéder à … (non sécurisé) → Autoriser**.
+1. **script.google.com → Nouveau projet**. Effacer le contenu, coller tout le fichier `relais/relais.gs`, enregistrer.
+2. **Déployer → Nouveau déploiement** → engrenage → **Application web** : *Exécuter en tant que* **Moi**, *Qui a accès* **Tout le monde** → **Déployer → Autoriser l'accès** (au message « Google n'a pas validé cette application » : **Paramètres avancés → Accéder à … → Autoriser**).
 3. Copier l'**URL de l'application Web** (elle se termine par `/exec`).
 
-**Version 1.3 : le script du relais doit être mis à jour** (photos en grand pour la police municipale). **Mettre à jour le script du relais sans changer d'adresse** : coller le nouveau code, enregistrer, puis **Déployer → Gérer les déploiements → crayon → Version : Nouvelle version → Déployer**. Créer un *nouveau* déploiement change l'adresse ; archiver un déploiement n'efface rien.
+**Mettre à jour le relais** (sans rien perdre) : coller le nouveau code, enregistrer, puis **Déployer → Gérer les déploiements → crayon → Version : Nouvelle version → Déployer**. L'adresse ne change pas.
 
-**Repartir de zéro** : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la liste de la barre d'outils, puis cliquer sur **Exécuter**. Les codes d'accès sont effacés et tout le contenu du relais part à la corbeille du compte Google. Ces codes sont enregistrés dans le projet lui-même : redéployer ne suffit pas à les effacer. Réinitialiser ensuite chaque appareil (Réglages).
+**Repartir de zéro** (efface tout) : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la barre d'outils, puis **Exécuter**. Chaque appareil doit ensuite être réinitialisé (Réglages) et reconfiguré.
 
 ## 3. Premier superviseur
 
 1. Ouvrir l'application dans Chrome (téléphone ou ordinateur), puis menu ⋮ → **Installer l'application**.
-2. **Premier superviseur : activer un relais neuf** → coller l'adresse du relais → choisir la **phrase de passe superviseur** (12 caractères minimum) → **Créer et activer**.
-3. Noter la phrase de passe et la remettre sous pli fermé à la DGS. Sans elle, impossible d'ajouter un appareil superviseur.
-4. **Listes et coordonnées** : saisir les prénoms des agents (ils ne figurent volontairement pas dans le programme publié), vérifier destinataires et check-list, renseigner le téléphone et le courriel d'urgence.
-5. **QR codes → Imprimer les QR des parkings** : une page A4 par parking, à plastifier et fixer à l'entrée.
+2. **Premier superviseur : activer un relais neuf** → adresse du relais → **phrase de passe superviseur** (12 caractères minimum, à conserver précieusement : elle sert à ajouter d'autres appareils superviseurs).
+3. **Listes, catégories et coordonnées** :
+   - prénoms des agents ;
+   - barrières de chaque parking ;
+   - destinataires avec leurs coordonnées, une ligne par destinataire : `Skidata | 01 23 45 67 89 | support@…` ;
+   - catégories et sous-catégories de signalement ;
+   - motifs d'ouverture de barrière ;
+   - téléphone et courriel d'urgence.
 
 ## 4. Ajouter un appareil
 
-- **Superviseur supplémentaire** (ordinateur de bureau, autre téléphone) : ouvrir l'application → **Ajouter cet appareil comme superviseur** → adresse du relais + phrase de passe. L'adresse figure dans les Réglages de tout appareil configuré.
-- **Téléphone agents** (un ou plusieurs) : ouvrir l'application → **Scanner un QR de configuration** → QR « Téléphones des agents », affiché par un superviseur (menu **QR codes**). Autoriser la position et l'appareil photo à la première ronde.
-- **Police municipale** : même démarche avec le QR « Police municipale ».
-- Ces QR donnent accès aux signalements de l'équipe : ne pas les diffuser.
+- **Superviseur supplémentaire** : ouvrir l'application → **Ajouter cet appareil comme superviseur** → adresse du relais + phrase de passe.
+- **Téléphone agents** : **Scanner un QR de configuration** → QR « Téléphones des agents » affiché par un superviseur (**Configurer les appareils**).
+- **PC de la loge** (sans caméra) : sur le superviseur, **Configurer les appareils → Copier le lien**, puis ouvrir ce lien dans le navigateur du PC.
+- **Police municipale** : QR « Police municipale ».
 
-## 5. Fonctionnement courant
+Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur le relais. Les QR et liens de configuration donnent accès aux signalements de l'équipe : ne pas les diffuser.
 
-### Agents
-- **Ronde** : scan du QR du parking → nom → revue des signalements en cours (« Résolu » clôt le signalement) → écran de ronde :
-  - **compteur de véhicules** : un appui sur « +1 véhicule » par véhicule ; « −1 » et « Corriger » en cas d'erreur ;
-  - **contrôles** : une ligne par catégorie, « RAS » ou « + Signaler », autant de signalements que nécessaire par catégorie ;
-  - « Terminer la ronde » n'est possible que lorsque chaque catégorie est contrôlée ; le nombre de véhicules est demandé en confirmation.
-- **Signalement** : catégorie → « Quoi ? » (sous-catégorie, ou « Autre (préciser) ») → précisions, photos, destinataires (proposés selon la catégorie), urgence (proposée pour certaines sous-catégories). Pour les véhicules : plaque, **emplacement (numéro de place, niveau)**, marque/modèle/couleur.
-- **Signalement hors ronde** : depuis l'accueil, avec choix du parking et de l'agent. Envoi immédiat.
-- **Barrière ouverte** : depuis l'accueil ou pendant la ronde. Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'oubli). La barrière reste affichée en rouge sur l'accueil de tous les téléphones jusqu'à ce qu'un agent déclare « Barrière refermée » (maintenant ou plus tôt).
-- Envoi automatique en fin de ronde, à l'ouverture, au retour du réseau. Un signalement urgent ou hors ronde part aussitôt.
+**Réglages des téléphones agents et PM** : protégés par un mot de passe, choisi au premier accès aux réglages.
+
+## 5. Utilisation
+
+### Ronde (agents)
+**Commencer ma ronde** → parking → agent → revue des signalements en cours (« Résolu » clôt le signalement) → écran de ronde :
+- **comptage des véhicules** : « +1 véhicule » à chaque véhicule, « −1 » et « Corriger » en cas d'erreur, puis **Valider le comptage** ; le compteur se replie (« modifier » pour le rouvrir) ;
+- **contrôles** : une ligne par catégorie, « RAS » ou « + Signaler », autant de signalements que nécessaire ;
+- **Terminer la ronde** : possible une fois le comptage validé et toutes les catégories contrôlées.
+
+### Signalement
+Catégorie → « Quoi ? » (sous-catégorie ou « Autre (préciser) ») → précisions, photos, destinataires (proposés selon la catégorie), urgence. Véhicules : plaque, emplacement (numéro de place, niveau), marque/modèle/couleur. **Signalement hors ronde** depuis l'accueil.
+
+### Barrière ouverte
+Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'oubli). La barrière reste affichée en rouge sur l'accueil de tous les appareils jusqu'à **Barrière refermée** (maintenant ou plus tôt).
+
+### Traitement des signalements (téléphone ou PC de la loge)
+Accueil → **Traitement des signalements** : signalements classés en *À transmettre*, *En attente de réponse*, *Réponse reçue*, *Intervention prévue*, *Intervention réalisée*. Dans chaque fiche :
+- **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, et « Partager avec les photos » (WhatsApp, messagerie…) ;
+- **Ajouter une action** : appel, courriel, relance, réponse reçue, intervention prévue (date), intervention réalisée, note, avec le destinataire, le détail et l'agent ;
+- **Problème résolu : clore le signalement**.
 
 ### Police municipale
-Appareil configuré avec le QR « Police municipale ». Il affiche les signalements de véhicules (ou, au choix, tout ce qui est adressé à la PM), avec plaque, emplacement, photos en grand et constats des agents. Pour chacun : observations, puis « Traité » (clôt le signalement) ou « Non traité » (le laisse ouvert, observation visible des agents). Export Excel.
+Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, emplacement, photos et constats. Observations, puis **Traité** (clôt le signalement) ou **Non traité** (le laisse ouvert, observation visible des agents). Export Excel.
 
 ### Superviseur
-Consultation : rondes (durée, véhicules comptés, anomalies), signalements, barrières (ouvertes en ce moment, historique, durée cumulée, déclarations faites a posteriori), suivi PM, points d'attention. Interventions facultatives (clôturer, rouvrir, modifier, écrire aux agents, notes internes). **Excel complet** (onglets Signalements, Rondes, Barrières, Journal) et **archive avec photos** à verser sur un stockage de la Ville.
+- **Signalements** : sur PC, liste et fiche côte à côte ; filtres par statut, parking, catégorie, recherche (plaque, référence, texte) ; photos en galerie, agrandies d'un clic (flèches du clavier, Échap) ; traitement, constats, suivi PM ; interventions facultatives (clore, rouvrir, modifier, écrire aux agents, notes internes).
+- **Statistiques et graphiques** :
+  - période (7 jours à 12 mois, tout, ou dates) et parking ;
+  - indicateurs clés : signalements, en cours, clos, délai moyen de clôture, rondes, véhicules par ronde, ouvertures et durée cumulée des barrières ;
+  - graphiques prêts, et **Créer un graphique** : un indicateur (signalements, en cours / clos, délai de clôture, actions de traitement, rondes, véhicules comptés, ouvertures ou durée d'ouverture des barrières) par catégorie, sous-catégorie, agent, parking, destinataire, barrière, motif, jour, semaine ou mois ;
+  - chaque graphique : vue tableau, image, Excel.
+- **Exports** : Excel complet (Signalements, Rondes, Traitement, Barrières, Journal) et archive avec photos.
 
 ### Catégories
-Modifiables par le superviseur (« Listes, catégories et coordonnées »), sans toucher au programme :
+Modifiables par le superviseur, sans toucher au programme :
 ```
 Sécurité incendie | Ateliers          ← catégorie | destinataires proposés
 - Extincteur absent ou déplacé        ← sous-catégorie
 - Odeur de fumée ou de brûlé !        ← « ! » : urgent par défaut
 ```
-Chaque catégorie est une ligne de contrôle de la ronde. La liste par défaut s'appuie sur le règlement de sécurité des parcs de stationnement couverts (arrêté du 9 mai 2006, articles PS 12 à PS 32) : extincteurs à chaque niveau et au droit des issues, 100 L d'absorbant, déclencheurs manuels, portes pare-flammes à ferme-porte, commandes de désenfumage, éclairage de sécurité, plans et consignes, issues déverrouillées et dégagées, interdiction de dépôts combustibles.
+Chaque catégorie est une ligne de contrôle de la ronde.
 
-## 6. Garanties et limites
+## 6. Bon à savoir
 
-- **Chiffrement** :
-  - clé d'équipe AES-256-GCM ;
-  - clé superviseur ECDH P-256, HKDF-SHA-256, AES-256-GCM ;
-  - coffre protégé par PBKDF2-SHA-256 (600 000 itérations).
-- **Intégrité** : chaque saisie contient l'empreinte SHA-256 de la précédente du même téléphone, et chaque photo son empreinte. Une modification, une suppression ou un trou dans une série apparaît en « point d'attention ».
-- **Limites** :
-  - l'heure est celle du téléphone (verrouiller le réglage automatique de l'heure si la DSI gère la flotte) ;
-  - le QR d'un parking peut être photographié et rejoué ;
-  - en sous-sol, la position est souvent absente ou imprécise ; elle est enregistrée avec sa précision ;
-  - la phrase de passe superviseur est la seule protection du coffre : longue et confidentielle.
-- **Conflits** : si deux personnes modifient le même signalement, la dernière modification reçue par le relais l'emporte. L'historique complet reste dans le journal.
-- **Saisies non envoyées** : elles n'existent que sur le téléphone. Ne jamais vider les données du navigateur sur un téléphone agents.
-
-## 7. Préalables à la mise en service
-
-- Inscription du traitement au registre des activités de traitement de la Ville (art. 30 RGPD), après avis du délégué à la protection des données. Mentionner le relais : compte Google dédié, données chiffrées sur l'appareil, conservation pendant la durée du dispositif.
-- Information écrite des agents : finalités, données collectées dont la position au moment des saisies, durées de conservation, droits (art. 13 RGPD).
-- Consultation du comité social territorial (art. 54 du décret n° 2021-571 du 10 mai 2021).
-- Finalité affichée : traçabilité des rondes et des constats, suivi des anomalies. Pas le contrôle du temps de travail (CE, 15 décembre 2017, n° 403776).
+- Ne jamais vider les données du navigateur sur un téléphone agents : les saisies pas encore envoyées n'existent que sur lui.
+- Si deux personnes modifient le même signalement, la dernière modification reçue l'emporte ; l'historique reste dans le journal.
+- Le relais n'alerte pas en temps réel : pour une urgence, utiliser les boutons d'appel de l'accueil.
 
 ## Bibliothèques incluses (licences libres)
 
-- fflate (MIT) : compression.
-- qrcode-generator (MIT) : génération des QR codes.
-- jsQR (Apache 2.0) : lecture des QR codes si le navigateur n'a pas de lecteur intégré.
-- SheetJS Community Edition 0.18.5 (Apache 2.0) : fichiers Excel.
+fflate (MIT), qrcode-generator (MIT), jsQR (Apache 2.0), SheetJS Community Edition 0.18.5 (Apache 2.0), Chart.js 4.5 (MIT).
