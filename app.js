@@ -1,30 +1,26 @@
-/* Rondes parkings — Ville de Cachan, DPMS
+/* Rondes parkings — Ville de Cachan, DPMS — version 1.2
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : ils signalent, suivent et clôturent.
- * - Fin de ronde : envoi automatique, chiffré, vers un relais (boîte aux lettres) ;
- *   sans réseau, l'envoi attend et repart seul.
- * - Le superviseur relève automatiquement à l'ouverture de son application et consulte.
- *   Ses interventions ponctuelles (clôturer, rouvrir, modifier, message) redescendent seules.
- * - Tout ce qui transite par le relais est chiffré : le relais ne peut rien lire.
+ * - Le relais (Google Apps Script) conserve un journal chiffré partagé. Chaque appareil
+ *   y publie ses saisies et reconstitue l'état commun à partir de ce journal :
+ *   plusieurs téléphones agents et plusieurs appareils superviseurs sont possibles,
+ *   et un appareil réinstallé retrouve toutes les données.
+ * - Clé d'équipe (téléphones agents + superviseurs) : saisies, photos, interventions.
+ *   Clé superviseur (superviseurs seuls) : horodatage, position, notes internes.
+ *   Le relais ne peut rien lire.
  */
 'use strict';
 
-const APP_VERSION = '1.1.0';
-const FMT_PAQUET = 'rondes-cachan-paquet';
-const FMT_ETAT = 'rondes-cachan-etat';
-const FMT_SAUVEGARDE = 'rondes-cachan-sauvegarde';
-const FMT_CLE = 'rondes-cachan-cle';
-const HISTO_JOURS = 92;            // historique lisible conservé sur le téléphone agents
-const DECISIONS_JOURS = 180;       // interventions du superviseur renvoyées aux agents
+const APP_VERSION = '1.2.0';
+const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
-const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi vers le relais (photos comprises)
+const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
 const SYNC_PERIODE_MS = 120000;
 
 /* ====================================================================== */
 /* Utilitaires                                                            */
 /* ====================================================================== */
 const te = new TextEncoder(), td = new TextDecoder();
-
 const b64u = {
   enc(buf) {
     const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -40,7 +36,6 @@ const b64u = {
     return out;
   }
 };
-
 function uuid() { return crypto.randomUUID(); }
 function randCode(n) {
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -56,17 +51,12 @@ function fmtDT(iso) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 function fmtHeure(iso) { if (!iso) return ''; const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
-function fmtQuand(iso) {
-  if (!iso) return '';
-  return localDate(new Date(iso)) === localDate() ? 'aujourd’hui à ' + fmtHeure(iso) : 'le ' + fmtDT(iso);
-}
+function fmtQuand(iso) { if (!iso) return ''; return localDate(new Date(iso)) === localDate() ? 'aujourd’hui à ' + fmtHeure(iso) : 'le ' + fmtDT(iso); }
 function fileStamp(d = new Date()) { return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`; }
-
 function canon(v) {
   if (v === null || typeof v !== 'object') return JSON.stringify(v);
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
-  return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
-    .map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+  return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
 }
 async function sha256hex(data) {
   let buf;
@@ -76,9 +66,7 @@ async function sha256hex(data) {
   const h = await crypto.subtle.digest('SHA-256', buf);
   return Array.from(new Uint8Array(h), b => b.toString(16).padStart(2, '0')).join('');
 }
-function blobToDataURL(blob) {
-  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
-}
+function blobToDataURL(blob) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); }); }
 function download(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
@@ -94,20 +82,21 @@ async function shareOrDownload(blob, name, title) {
   download(blob, name);
   return 'telechargement';
 }
-function pickFile(accept) {
-  return new Promise(res => {
-    const i = document.createElement('input');
-    i.type = 'file'; i.accept = accept;
-    i.onchange = () => res(i.files[0] || null);
-    i.click();
-  });
-}
 function appBaseURL() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
 
 /* ====================================================================== */
 /* Base de données locale (IndexedDB)                                     */
 /* ====================================================================== */
-const DB_NAME = 'rondes-cachan', DB_VER = 1;
+const DB_NAME = 'rondes-cachan', DB_VER = 2;
+const STORES = {
+  kv: null,
+  events: { keyPath: 'seq' },     // agents : saisies pas encore publiées sur le relais
+  photos: { keyPath: 'id' },      // agents : photos pas encore publiées ; superviseurs : photos téléchargées
+  entries: { keyPath: 'k' },      // journal relevé sur le relais (déchiffré)
+  thumbs: { keyPath: 'id' },      // vignettes des signalements
+  sigs: { keyPath: 'id' },        // état reconstitué des signalements
+  rondes: { keyPath: 'rid' }      // superviseurs : rondes reconstituées
+};
 let _db = null;
 function openDB() {
   if (_db) return Promise.resolve(_db);
@@ -115,13 +104,9 @@ function openDB() {
     const r = indexedDB.open(DB_NAME, DB_VER);
     r.onupgradeneeded = () => {
       const d = r.result;
-      d.createObjectStore('kv');
-      d.createObjectStore('events', { keyPath: 'seq' });     // agents : journal chaîné non encore transmis
-      d.createObjectStore('photos', { keyPath: 'id' });
-      d.createObjectStore('sigs', { keyPath: 'id' });        // signalements
-      d.createObjectStore('histo', { keyPath: 'k' });        // agents : historique lisible
-      d.createObjectStore('sup_events', { keyPath: 'k' });   // superviseur : journal reçu
-      d.createObjectStore('rondes', { keyPath: 'rid' });     // superviseur : rondes reconstituées
+      // Version 1.2 : nouveau format de données ; les données de test des versions antérieures sont effacées.
+      [...d.objectStoreNames].forEach(n => d.deleteObjectStore(n));
+      for (const [n, o] of Object.entries(STORES)) o ? d.createObjectStore(n, o) : d.createObjectStore(n);
     };
     r.onsuccess = () => { _db = r.result; res(_db); };
     r.onerror = () => rej(r.error);
@@ -135,20 +120,18 @@ async function dbPut(s, v, k) { const d = await openDB(); const t = d.transactio
 async function dbPutMany(s, vals) { const d = await openDB(); const t = d.transaction(s, 'readwrite'); const o = t.objectStore(s); vals.forEach(v => o.put(v)); return txDone(t); }
 async function dbDel(s, k) { const d = await openDB(); const t = d.transaction(s, 'readwrite'); t.objectStore(s).delete(k); return txDone(t); }
 async function dbClear(s) { const d = await openDB(); const t = d.transaction(s, 'readwrite'); t.objectStore(s).clear(); return txDone(t); }
+async function dbReplaceAll(s, vals) { const d = await openDB(); const t = d.transaction(s, 'readwrite'); const o = t.objectStore(s); o.clear(); vals.forEach(v => o.put(v)); return txDone(t); }
 const kvGet = k => dbGet('kv', k);
 const kvSet = (k, v) => dbPut('kv', v, k);
 const kvDel = k => dbDel('kv', k);
-
 let _lock = Promise.resolve();
 function withLock(fn) { const p = _lock.then(fn, fn); _lock = p.catch(() => { }); return p; }
 
 /* ====================================================================== */
 /* Cryptographie (WebCrypto)                                              */
-/* ECDH P-256 éphémère + HKDF-SHA256 + AES-256-GCM (schéma de type ECIES) */
 /* ====================================================================== */
 const EC = { name: 'ECDH', namedCurve: 'P-256' };
 const HKDF_INFO = te.encode('rondes-cachan v1');
-
 async function hkdfKey(bits, salt, usages) {
   const base = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt, info: HKDF_INFO }, base, { name: 'AES-GCM', length: 256 }, false, usages);
@@ -159,20 +142,8 @@ async function importPub(jwk) {
   if (!_pubCache.has(s)) _pubCache.set(s, await crypto.subtle.importKey('jwk', jwk, EC, false, []));
   return _pubCache.get(s);
 }
-function getPubKey() { return importPub(state.cfg.pub); }
-
-/* Chiffrement d'un objet (horodatage et position, dans chaque saisie) */
-async function seal(obj) {
-  const r = await sealBytesFor(await getPubKey(), te.encode(JSON.stringify(obj)));
-  return { epk: b64u.enc(r.subarray(1, 66)), iv: b64u.enc(r.subarray(66, 78)), ct: b64u.enc(r.subarray(78)) };
-}
-async function unseal(priv, sec) {
-  const parts = [new Uint8Array([1]), b64u.dec(sec.epk), b64u.dec(sec.iv), b64u.dec(sec.ct)];
-  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
-  parts.forEach(p => { all.set(p, o); o += p.length; });
-  return JSON.parse(td.decode(await unsealBytes(priv, all)));
-}
-/* Chiffrement d'un bloc d'octets : [1][clé éphémère 65][iv 12][chiffré + étiquette] */
+function getPubKey() { return importPub(state.conn.pub); }
+/* Chiffré pour les seuls superviseurs : [1][clé éphémère 65][iv 12][chiffré] */
 async function sealBytesFor(pubKey, bytes) {
   const eph = await crypto.subtle.generateKey(EC, true, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pubKey }, eph.privateKey, 256);
@@ -180,7 +151,7 @@ async function sealBytesFor(pubKey, bytes) {
   const key = await hkdfKey(bits, epkRaw, ['encrypt']);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
-  const out = new Uint8Array(1 + 65 + 12 + ct.length);
+  const out = new Uint8Array(78 + ct.length);
   out[0] = 1; out.set(epkRaw, 1); out.set(iv, 66); out.set(ct, 78);
   return out;
 }
@@ -192,6 +163,36 @@ async function unsealBytes(priv, data) {
   const key = await hkdfKey(bits, epkRaw, ['decrypt']);
   return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: data.slice(66, 78) }, key, data.slice(78)));
 }
+async function seal(obj) {
+  const r = await sealBytesFor(await getPubKey(), te.encode(JSON.stringify(obj)));
+  return { epk: b64u.enc(r.subarray(1, 66)), iv: b64u.enc(r.subarray(66, 78)), ct: b64u.enc(r.subarray(78)) };
+}
+async function unseal(priv, sec) {
+  const parts = [new Uint8Array([1]), b64u.dec(sec.epk), b64u.dec(sec.iv), b64u.dec(sec.ct)];
+  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
+  parts.forEach(p => { all.set(p, o); o += p.length; });
+  return JSON.parse(td.decode(await unsealBytes(priv, all)));
+}
+/* Chiffré pour l'équipe (clé symétrique partagée) : [2][iv 12][chiffré] */
+let _teamKey = null, _teamRaw = null;
+async function teamKey() {
+  if (_teamKey && _teamRaw === state.conn.team) return _teamKey;
+  _teamKey = await crypto.subtle.importKey('raw', b64u.dec(state.conn.team), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  _teamRaw = state.conn.team;
+  return _teamKey;
+}
+async function teamEnc(bytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await teamKey(), bytes));
+  const out = new Uint8Array(13 + ct.length); out[0] = 2; out.set(iv, 1); out.set(ct, 13);
+  return out;
+}
+async function teamDec(data) {
+  if (data[0] !== 2) throw new Error('format chiffré inconnu');
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: data.slice(1, 13) }, await teamKey(), data.slice(13)));
+}
+const encJSON = async o => b64u.enc(await teamEnc(fflate.deflateSync(te.encode(JSON.stringify(o)))));
+const decJSON = async s => JSON.parse(td.decode(fflate.inflateSync(await teamDec(b64u.dec(s)))));
 async function newKeyPair() {
   const kp = await crypto.subtle.generateKey(EC, true, ['deriveBits']);
   const privJwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
@@ -216,11 +217,11 @@ async function decryptWithPass(pass, box) {
 }
 
 /* ====================================================================== */
-/* Relais (boîte aux lettres Google Apps Script)                          */
+/* Relais                                                                 */
 /* Requête « simple » (text/plain) : pas de pré-vol CORS, compatible avec */
 /* la redirection des applications web Apps Script.                       */
 /* ====================================================================== */
-async function relayCall(url, body, timeoutMs = 45000) {
+async function relayCall(url, body, timeoutMs = 60000) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   let r;
@@ -229,19 +230,21 @@ async function relayCall(url, body, timeoutMs = 45000) {
   } catch (e) { throw new Error('relais injoignable'); }
   finally { clearTimeout(t); }
   if (!r.ok) throw new Error('relais : erreur ' + r.status);
-  let j; try { j = await r.json(); } catch (e) { throw new Error('relais : réponse illisible'); }
-  if (!j.ok) throw new Error('relais : ' + (j.err || 'refus'));
+  let j; try { j = await r.json(); } catch (e) { throw new Error('relais : réponse illisible (vérifiez l’adresse et l’accès « Tout le monde »)'); }
+  if (!j.ok) { const e = new Error(j.err === 'deja-initialise' ? 'Ce relais est déjà activé par un superviseur.' : 'relais : ' + (j.err || 'refus')); e.code = j.err; throw e; }
   return j;
+}
+function rel(op, extra = {}, timeout) {
+  const c = state.conn;
+  return relayCall(c.url, { op, tok: state.mode === 'superviseur' ? c.supTok : c.agentTok, ...extra }, timeout);
 }
 
 /* ====================================================================== */
-/* Configuration par défaut                                               */
+/* Configuration                                                          */
 /* ====================================================================== */
-function defaultConfig(pubJwk) {
+function defaultConfig() {
   return {
-    v: 1,
-    cfgId: randCode(8),
-    pub: pubJwk,
+    v: 2, cfgId: randCode(8),
     sites: [
       { id: 'henouille', code: 'HEN', nom: 'Hénouille', token: randCode(10) },
       { id: 'dumotel', code: 'DUM', nom: 'Dumotel', token: randCode(10) },
@@ -260,27 +263,19 @@ function defaultConfig(pubJwk) {
       { lbl: 'Accès piétons (portes, escaliers, ascenseur)', cat: 'Dégradation / vandalisme' },
       { lbl: 'Véhicules (ventouses, épaves)', cat: 'Véhicule (ventouse, épave, gênant)' }
     ],
-    urgenceTel: '',
-    urgenceMail: '',
-    relay: null            // { url, agentTok } — code d'accès limité du téléphone agents
+    urgenceTel: '', urgenceMail: ''
   };
 }
 const VEHICULE_RE = /v[ée]hicule/i;
-function siteById(id) { return state.cfg.sites.find(s => s.id === id); }
+function siteById(id) { return state.cfg && state.cfg.sites.find(s => s.id === id); }
 function siteNom(id) { const s = siteById(id); return s ? s.nom : id; }
-function agentCfgPayload(cfg) {
-  // Ce qui part vers le téléphone des agents (jamais la clé privée ni le code d'accès superviseur)
-  return { v: cfg.v, cfgId: cfg.cfgId, pub: cfg.pub, sites: cfg.sites, agents: cfg.agents, dests: cfg.dests, cats: cfg.cats, checklist: cfg.checklist, urgenceTel: cfg.urgenceTel, urgenceMail: cfg.urgenceMail, relay: cfg.relay || null };
-}
-function packCfg(cfg) { return b64u.enc(fflate.deflateSync(te.encode(JSON.stringify(agentCfgPayload(cfg))), { level: 9 })); }
-function unpackCfg(s) { return JSON.parse(td.decode(fflate.inflateSync(b64u.dec(s)))); }
-function validCfg(c) {
-  return c && c.pub && c.pub.kty === 'EC' && Array.isArray(c.sites) && Array.isArray(c.agents) && Array.isArray(c.dests) && Array.isArray(c.cats) && Array.isArray(c.checklist);
-}
+function validCfg(c) { return c && Array.isArray(c.sites) && Array.isArray(c.agents) && Array.isArray(c.dests) && Array.isArray(c.cats) && Array.isArray(c.checklist); }
+/* QR de configuration des téléphones agents : accès au relais et clés publiques/équipe uniquement */
+function packJoin(c) { return b64u.enc(fflate.deflateSync(te.encode(JSON.stringify({ v: 2, url: c.url, tok: c.agentTok, team: c.team, pub: c.pub })), { level: 9 })); }
+function unpackJoin(s) { return JSON.parse(td.decode(fflate.inflateSync(b64u.dec(s)))); }
 
 /* ====================================================================== */
-/* Géolocalisation : uniquement pendant une ronde. Seule la position au   */
-/* moment de chaque saisie est enregistrée.                               */
+/* Géolocalisation : uniquement pendant une ronde                         */
 /* ====================================================================== */
 const Geo = {
   watchId: null, last: null, err: null,
@@ -304,7 +299,7 @@ const Geo = {
 /* ====================================================================== */
 /* État de l'application et rendu                                         */
 /* ====================================================================== */
-const state = { mode: null, cfg: null, view: 'home', params: {}, cleanup: null, sync: { busy: false, err: null } };
+const state = { mode: null, conn: null, cfg: null, priv: null, view: 'home', params: {}, cleanup: null, sync: { busy: false } };
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -314,7 +309,6 @@ function h(tag, attrs, ...kids) {
     else if (k === 'style') el.style.cssText = v;
     else if (k === 'html') el.innerHTML = v;
     else if (k === 'value') el.value = v;
-    else if (k === 'checked') el.checked = !!v;
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? '' : v);
   }
@@ -332,11 +326,10 @@ function toast(msg, bad) {
   document.querySelectorAll('.toast').forEach(t => t.remove());
   const t = h('div', { class: 'toast' + (bad ? ' bad' : ''), role: 'status' }, msg);
   document.body.append(t);
-  clearTimeout(_toastT); _toastT = setTimeout(() => t.remove(), bad ? 6000 : 3500);
+  clearTimeout(_toastT); _toastT = setTimeout(() => t.remove(), bad ? 7000 : 3500);
 }
 function showBusy(msg) { hideBusy(); document.body.append(h('div', { class: 'overlay', id: 'busy' }, msg || 'Patientez…')); }
 function hideBusy() { const b = document.getElementById('busy'); if (b) b.remove(); }
-
 function header(title, opts) {
   opts = opts || {};
   const tag = state.mode === 'agent' ? 'Téléphone agents' : state.mode === 'superviseur' ? 'Superviseur DPMS' : null;
@@ -346,7 +339,6 @@ function header(title, opts) {
     tag ? h('span', { class: 'tag' }, tag) : null);
 }
 function page(title, opts, ...content) { return h('div', null, header(title, opts), h('main', null, ...content)); }
-
 function go(view, params = {}, opts = {}) {
   if (state.cleanup) { try { state.cleanup(); } catch (e) { } state.cleanup = null; }
   state.view = view; state.params = params;
@@ -361,7 +353,7 @@ async function render() {
   const my = ++_renderSeq;
   try {
     const node = await fn(state.params);
-    if (my !== _renderSeq) return;      // un rendu plus récent a été demandé entre-temps
+    if (my !== _renderSeq) return;
     root.replaceChildren(node);
   } catch (e) {
     console.error(e);
@@ -390,16 +382,8 @@ async function processPhoto(file) {
   const full = await toJpeg(bmp, 1600, 0.72);
   const thumb = await toJpeg(bmp, 320, 0.6);
   if (bmp.close) bmp.close();
-  const id = uuid();
-  const sha = await sha256hex(full);
   const ageMin = file.lastModified ? Math.round((Date.now() - file.lastModified) / 60000) : null;
-  return { id, blob: full, sha, thumb: await blobToDataURL(thumb), ageMin };
-}
-async function thumbFromBlob(blob) {
-  const bmp = await createImageBitmap(blob);
-  const t = await toJpeg(bmp, 320, 0.6);
-  if (bmp.close) bmp.close();
-  return blobToDataURL(t);
+  return { id: uuid(), blob: full, sha: await sha256hex(full), thumb: await blobToDataURL(thumb), ageMin };
 }
 function photoInput(onFile) {
   return safe(async () => {
@@ -409,6 +393,11 @@ function photoInput(onFile) {
     i.click();
   });
 }
+async function thumbOf(s) {
+  if (s.thumb) return s.thumb;
+  const t = await dbGet('thumbs', s.id);
+  return t ? t.data : null;
+}
 
 /* ====================================================================== */
 /* Statuts                                                                */
@@ -416,14 +405,112 @@ function photoInput(onFile) {
 const VERDICTS = { resolu: 'Résolu', encours: 'Toujours en cours', aggrave: 'Aggravé' };
 const STATUTS = { ouvert: 'Ouvert', clos: 'Clos' };
 function statutBadge(s) { return h('span', { class: 'badge ' + (s === 'clos' ? 'b-ok' : 'b-warn') }, STATUTS[s] || s); }
-function applyVerdict(sig, verdict, ts, agent) {
-  if (verdict === 'resolu') { sig.statut = 'clos'; sig.closLe = ts || new Date().toISOString(); sig.closPar = agent || 'agent'; }
+function applyVerdict(sig, verdict, quand, agent) {
+  if (verdict === 'resolu') { sig.statut = 'clos'; sig.closLe = quand; sig.closPar = agent || 'agent'; }
   else { sig.statut = 'ouvert'; sig.closLe = null; sig.closPar = null; }
   if (verdict === 'aggrave') sig.aggrave = true;
 }
 
 /* ====================================================================== */
-/* AGENTS : journal chaîné                                                */
+/* Reconstitution de l'état à partir du journal                           */
+/* Ordre : numéro attribué par le relais, puis saisies locales en attente.*/
+/* ====================================================================== */
+const ORD_LOCAL = 1e15;
+async function fold() {
+  const sup = state.mode === 'superviseur';
+  const entries = await dbAll('entries');
+  const items = [];
+  for (const e of entries) items.push({ ord: e.n * 100000 + (e.idx || 0), e });
+  if (!sup) for (const ev of await dbAll('events')) items.push({ ord: ORD_LOCAL + ev.seq, e: { kind: 'ev', ev, local: true } });
+  if (sup) ((await kvGet('decQueue')) || []).forEach((q, i) => items.push({ ord: 2 * ORD_LOCAL + i, e: { kind: q.kind === 'n' ? 'note' : 'dec', dec: q.d, local: true } }));
+  items.sort((a, b) => a.ord - b.ord);
+
+  const sigs = new Map(), rondes = new Map(), devs = {}, chains = {};
+  let cfg = null;
+  const alertes = [];
+  for (const { e } of items) {
+    if (e.kind === 'ev') {
+      const ev = e.ev, dec = e.dec || null, ts = dec && dec.ts;
+      if (sup) {
+        (chains[ev.dev] = chains[ev.dev] || []).push(e);
+        const dv = devs[ev.dev] = devs[ev.dev] || { seq: 0, at: null };
+        if (ev.seq > dv.seq) { dv.seq = ev.seq; dv.at = e.at; dv.agent = ev.agent; }
+      }
+      if (ev.t === 'signalement') {
+        if (!sigs.has(ev.data.id)) sigs.set(ev.data.id, {
+          id: ev.data.id, ref: ev.data.ref, site: ev.site, cat: ev.data.cat, desc: ev.data.desc, plaque: ev.data.plaque,
+          dests: ev.data.dests, urgent: ev.data.urgent, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
+          thumb: e.local && typeof ev.data.thumb === 'string' ? ev.data.thumb : null,
+          photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), ts, geo: dec && dec.geo, dev: ev.dev, seq: ev.seq,
+          suivi: [], journalDPMS: [], notes: '', notesAgents: '', lieu: e.local ? 'local' : 'relais'
+        });
+      } else if (ev.t === 'revue') {
+        const s = sigs.get(ev.data.sig);
+        if (s) {
+          s.suivi.push({ jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), geo: dec && dec.geo });
+          applyVerdict(s, ev.data.verdict, ts || ev.jour, ev.agent);
+        } else if (sup) alertes.push({ key: `orph:${ev.dev}:${ev.seq}`, at: e.at, msg: `${siteNom(ev.site)}, ${ev.agent}, ${fmtJour(ev.jour)} — constat sur un signalement inconnu (${ev.data.ref})` });
+      }
+      if (sup && ev.rid) {
+        const r = rondes.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: ev.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, alertes: [] };
+        if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; }
+        if (ev.t === 'ronde_fin') r.fin = ts;
+        if (ev.t === 'checklist') r.checklist = ev.data.items;
+        if (ev.t === 'signalement') r.nbSig++;
+        if (ev.t === 'revue') r.nbRevue++;
+        rondes.set(ev.rid, r);
+      }
+    } else if (e.kind === 'dec') {
+      const d = e.dec;
+      if (d.type === 'cfg') { if (validCfg(d.cfg)) cfg = d.cfg; }
+      else if (d.type === 'sig') {
+        const s = sigs.get(d.sig);
+        if (s) {
+          Object.assign(s, d.patch);
+          s.journalDPMS.push({ ts: d.ts, action: d.action, par: d.par || 'DPMS' });
+        }
+      }
+    } else if (e.kind === 'note' && sup) {
+      const s = sigs.get(e.dec.sig);
+      if (s) s.notes = e.dec.text;
+    }
+  }
+
+  if (sup) {
+    // Contrôles d'intégrité par téléphone : continuité de la série et chaînage
+    for (const [dev, list] of Object.entries(chains)) {
+      list.sort((a, b) => a.ev.seq - b.ev.seq);
+      let prev = null;
+      for (const e of list) {
+        const ev = e.ev, lieu = `${siteNom(ev.site)}, ${ev.agent || '?'}, ${fmtJour(ev.jour)}`;
+        const add = (m) => {
+          alertes.push({ key: `${dev}:${ev.seq}:${m}`, at: e.at, msg: `${lieu} — saisie n° ${ev.seq} (${dev}) : ${m}` });
+          if (ev.rid && rondes.has(ev.rid)) rondes.get(ev.rid).alertes.push(m);
+        };
+        if (!e.hashOk) add('empreinte invalide (saisie modifiée)');
+        if (prev === null) { if (ev.seq !== 1) add(`saisies 1 à ${ev.seq - 1} manquantes`); else if (ev.prev !== '0'.repeat(64)) add('chaînage rompu'); }
+        else if (ev.seq !== prev.ev.seq + 1) add(`saisies ${prev.ev.seq + 1} à ${ev.seq - 1} manquantes`);
+        else if (ev.prev !== prev.ev.hash) add('chaînage rompu avec la saisie précédente');
+        if (!e.dec) add('horodatage et position illisibles');
+        else {
+          if (e.dec.qr === false) add('ronde démarrée sans QR code');
+          (e.dec.photoAges || []).forEach(a => { if (a.ageMin != null && a.ageMin > 15) add(`photo prise ${a.ageMin} min avant la saisie`); });
+          if (ev.t === 'ronde_debut' && e.dec.geo && e.dec.geo.err) add('position : ' + e.dec.geo.err);
+        }
+        prev = e;
+      }
+    }
+    for (const r of rondes.values()) if (r.debut && !r.fin && Date.now() - new Date(r.debut).getTime() > 6 * 3600000) r.alertes.push('fin de ronde non reçue');
+    await dbReplaceAll('rondes', [...rondes.values()]);
+    await kvSet('alertes', alertes.sort((a, b) => (b.at || '').localeCompare(a.at || '')));
+    await kvSet('devs', devs);
+  }
+  await dbReplaceAll('sigs', [...sigs.values()]);
+  if (cfg && JSON.stringify(cfg) !== JSON.stringify(state.cfg)) { state.cfg = cfg; await kvSet('cfg', cfg); }
+}
+
+/* ====================================================================== */
+/* AGENTS : journal chaîné local                                          */
 /* ====================================================================== */
 async function appendEvent(type, base, data, secretExtra = {}, photos = []) {
   return withLock(async () => {
@@ -431,7 +518,7 @@ async function appendEvent(type, base, data, secretExtra = {}, photos = []) {
     const now = new Date();
     const secret = { ts: now.toISOString(), tzo: now.getTimezoneOffset(), geo: Geo.snap(), ...secretExtra };
     const ev = {
-      v: 1, dev: await kvGet('dev'), cfgId: state.cfg.cfgId, seq: head.seq + 1, t: type, jour: localDate(now),
+      v: 2, dev: await kvGet('dev'), seq: head.seq + 1, t: type, jour: localDate(now),
       rid: base.rid || null, site: base.site || null, agent: base.agent || null,
       data, photos: photos.map(p => ({ id: p.id, sha: p.sha })),
       sec: await seal(secret), prev: head.hash
@@ -445,118 +532,107 @@ async function appendEvent(type, base, data, secretExtra = {}, photos = []) {
     return ev;
   });
 }
-async function addHisto(ev, row) { await dbPut('histo', { k: ev.seq, jour: ev.jour, site: ev.site, agent: ev.agent, ...row }); }
-async function savePhotos(list) { await dbPutMany('photos', list.map(p => ({ id: p.id, blob: p.blob, sha: p.sha, at: Date.now() }))); }
+async function savePhotos(list) { await dbPutMany('photos', list.map(p => ({ id: p.id, blob: p.blob, sha: p.sha }))); }
 
-/* Purge des saisies dont la réception est confirmée */
-async function purgeUpTo(n) {
-  return withLock(async () => {
-    const ack = (await kvGet('ack')) || 0;
-    const newAck = Math.max(ack, n);
-    const events = await dbAll('events');
-    const keep = new Set();
-    const d = await openDB();
-    const t = d.transaction(['events', 'kv'], 'readwrite');
-    for (const e of events) {
-      if (e.seq <= newAck) t.objectStore('events').delete(e.seq);
-      else e.photos.forEach(p => keep.add(p.id));
-    }
-    t.objectStore('kv').put(newAck, 'ack');
-    await txDone(t);
-    const photos = await dbAll('photos');
-    const t2 = d.transaction('photos', 'readwrite');
-    // une photo très récente peut appartenir à une saisie en cours d'enregistrement
-    photos.forEach(p => { if (!keep.has(p.id) && !(p.at && Date.now() - p.at < 3600000)) t2.objectStore('photos').delete(p.id); });
-    await txDone(t2);
-  });
+/* Entrée de journal : la vignette est rangée à part, l'empreinte reste vérifiable */
+async function storeEvEntry(ev, n, idx, at, extra = {}) {
+  const k = `e:${ev.dev}:${String(ev.seq).padStart(8, '0')}`;
+  const old = await dbGet('entries', k);
+  if (old && old.ev.hash === ev.hash && old.n <= n) return false;    // déjà connue (renvoi après coupure)
+  if (ev.t === 'signalement' && typeof ev.data.thumb === 'string') await dbPut('thumbs', { id: ev.data.id, data: ev.data.thumb });
+  const light = ev.t === 'signalement' && typeof ev.data.thumb === 'string' ? { ...ev, data: { ...ev.data, thumb: true } } : ev;
+  await dbPut('entries', { k, kind: 'ev', n, idx, at, ev: light, ...extra });
+  return true;
 }
-/* Paquet : zip (journal + photos), puis chiffré pour le seul superviseur */
-async function buildPaquetSealed(events) {
-  const files = {};
-  const ids = new Set(events.flatMap(e => e.photos.map(p => p.id)));
-  for (const id of ids) {
-    const p = await dbGet('photos', id);
-    if (p) files[`photos/${id}.jpg`] = [new Uint8Array(await p.blob.arrayBuffer()), { level: 0 }];
-  }
-  const dev = await kvGet('dev');
-  const paquet = {
-    format: FMT_PAQUET, v: 2, app: APP_VERSION, dev, devPub: await kvGet('devPub'), cfgId: state.cfg.cfgId,
-    cree: new Date().toISOString(), from: events[0].seq, to: events[events.length - 1].seq, events
-  };
-  files['paquet.json'] = te.encode(JSON.stringify(paquet));
-  return { sealed: await sealBytesFor(await getPubKey(), fflate.zipSync(files)), from: paquet.from, to: paquet.to, dev };
-}
-async function nextBatch() {
-  const ack = (await kvGet('ack')) || 0;
-  const events = (await dbAll('events')).filter(e => e.seq > ack).sort((a, b) => a.seq - b.seq);
-  const batch = []; let bytes = 0;
-  for (const e of events) {
-    batch.push(e);
-    for (const p of e.photos) { const ph = await dbGet('photos', p.id); if (ph) bytes += ph.blob.size; }
-    if (bytes > LOT_MAX_OCTETS) break;
-  }
-  return batch;
+function restoreThumbForHash(ev, thumb) {
+  return ev.t === 'signalement' && ev.data.thumb === true ? { ...ev, data: { ...ev.data, thumb } } : ev;
 }
 
-/* ---------- Synchronisation automatique du téléphone agents ---------- */
-let _syncP = null;
+/* ---------- Synchronisation ---------- */
+let _syncP = null, _syncAgain = null;
 function syncNow() {
-  if (_syncP) return _syncP;
+  // Une synchronisation déjà en cours a pu démarrer avant la dernière saisie : on en relance une à sa suite.
+  if (_syncP) { if (!_syncAgain) _syncAgain = _syncP.then(() => { _syncAgain = null; return syncNow(); }); return _syncAgain; }
   _syncP = (async () => {
+    await null;            // garantit que _syncP est affecté avant toute sortie anticipée
     state.sync.busy = true;
-    try { return state.mode === 'agent' ? await agentSync() : state.mode === 'superviseur' ? await supSync() : null; }
-    catch (e) { state.sync.err = e.message; await kvSet('syncErr', { at: new Date().toISOString(), msg: e.message }); return { err: e.message }; }
+    try {
+      if (!state.conn) return { skipped: true };
+      if (!navigator.onLine) return { offline: true };
+      const r = state.mode === 'agent' ? await agentSync() : await supSync();
+      await kvDel('syncErr');
+      await kvSet('lastSync', new Date().toISOString());
+      return r;
+    } catch (e) { await kvSet('syncErr', { at: new Date().toISOString(), msg: e.message }); return { err: e.message }; }
     finally { state.sync.busy = false; _syncP = null; }
   })();
   return _syncP;
 }
 async function agentSync() {
-  const relay = state.cfg && state.cfg.relay;
-  if (!relay || !relay.url) return { skipped: true };
-  if (!navigator.onLine) return { offline: true };
   const dev = await kvGet('dev');
   let sent = 0;
+  // 1. Publication des saisies en attente
   for (let guard = 0; guard < 50; guard++) {
-    const batch = await nextBatch();
-    if (!batch.length) break;
-    const pk = await buildPaquetSealed(batch);
-    await relayCall(relay.url, { op: 'put', tok: relay.agentTok, dev, from: pk.from, to: pk.to, data: b64u.enc(pk.sealed) }, 120000);
-    await purgeUpTo(pk.to);
+    const pending = (await dbAll('events')).sort((a, b) => a.seq - b.seq);
+    if (!pending.length) break;
+    const batch = []; let bytes = 0; const files = {};
+    for (const ev of pending) {
+      batch.push(ev);
+      for (const p of ev.photos) {
+        const ph = await dbGet('photos', p.id);
+        if (ph) { files[`${p.id}.jpg`] = [new Uint8Array(await ph.blob.arrayBuffer()), { level: 0 }]; bytes += ph.blob.size; }
+      }
+      if (bytes > LOT_MAX_OCTETS) break;
+    }
+    const data = await encJSON({ v: 2, dev, events: batch });
+    const media = Object.keys(files).length ? b64u.enc(await teamEnc(fflate.zipSync(files))) : null;
+    const r = await rel('put', { dev, data, media }, 180000);
+    for (let i = 0; i < batch.length; i++) await storeEvEntry(batch[i], r.n, i, r.at);
+    const d = await openDB(); const t = d.transaction(['events', 'photos'], 'readwrite');
+    batch.forEach(ev => { t.objectStore('events').delete(ev.seq); ev.photos.forEach(p => t.objectStore('photos').delete(p.id)); });
+    await txDone(t);
     sent += batch.length;
   }
-  // Interventions du superviseur et configuration
-  const r = await relayCall(relay.url, { op: 'getEtat', tok: relay.agentTok, dev });
-  let maj = false;
-  if (r.data && r.ver !== (await kvGet('etatVer'))) {
-    const bytes = await unsealBytes(await kvGet('devPriv'), b64u.dec(r.data));
-    await applyEtat(JSON.parse(td.decode(fflate.inflateSync(bytes))));
-    await kvSet('etatVer', r.ver);
-    maj = true;
-  }
-  state.sync.err = null;
-  await kvDel('syncErr');
-  await kvSet('lastSync', new Date().toISOString());
-  return { sent, maj };
+  // 2. Relève : saisies des autres téléphones, interventions et configuration du DPMS
+  const got = await pullAll(['p', 'd']);
+  if (sent || got) await fold();
+  return { sent, got };
 }
-async function applyEtat(etat) {
-  if (etat.format !== FMT_ETAT) throw new Error('Ce fichier n’est pas une mise à jour du DPMS.');
-  if (!validCfg(etat.cfg)) throw new Error('Configuration reçue invalide.');
-  if (JSON.stringify(etat.cfg.pub) !== JSON.stringify(state.cfg.pub)) throw new Error('Mise à jour produite par un autre superviseur : refusée.');
-  await kvSet('cfg', etat.cfg); state.cfg = etat.cfg;
-  const applied = new Set((await kvGet('appliedDec')) || []);
-  const decs = [...(etat.decisions || [])].sort((a, b) => a.ts.localeCompare(b.ts));
-  for (const d of decs) {
-    if (applied.has(d.id)) continue;
-    const local = await dbGet('sigs', d.sig.id);
-    if (!local || !local.lastLocalTs || d.ts > local.lastLocalTs) {
-      await dbPut('sigs', { ...(local || {}), ...d.sig, thumb: d.sig.thumb || (local && local.thumb) || null, lastLocalTs: (local && local.lastLocalTs) || null });
-    }
-    applied.add(d.id);
+async function pullAll(kinds) {
+  let after = (await kvGet('cursor')) || 0, got = 0;
+  for (let guard = 0; guard < 400; guard++) {
+    const r = await rel('pull', { after, kinds }, 180000);
+    for (const x of r.entries) { if (x.data) await ingest(x); got++; }
+    after = r.last;
+    await kvSet('cursor', after);
+    if (!r.more) break;
   }
-  await kvSet('appliedDec', [...applied].slice(-3000));
-  const dev = await kvGet('dev');
-  if (etat.ack && etat.ack[dev]) await purgeUpTo(etat.ack[dev]);
-  await kvSet('lastEtatImport', new Date().toISOString());
+  return got;
+}
+async function ingest(x) {
+  if (x.k === 'p') {
+    let pk; try { pk = await decJSON(x.data); } catch (e) { await noteIllisible(x); return; }
+    for (let i = 0; i < pk.events.length; i++) {
+      const ev = pk.events[i];
+      const extra = { media: !!x.media };
+      if (state.mode === 'superviseur') {
+        const { hash, ...rest } = ev;
+        extra.hashOk = (await sha256hex(canon(rest))) === hash;
+        try { extra.dec = await unseal(state.priv, ev.sec); } catch (e) { extra.dec = null; }
+      }
+      await storeEvEntry(ev, x.n, i, x.at, extra);
+    }
+  } else if (x.k === 'd') {
+    let d; try { d = await decJSON(x.data); } catch (e) { await noteIllisible(x); return; }
+    await dbPut('entries', { k: `d:${x.n}`, kind: 'dec', n: x.n, at: x.at, dec: d });
+  } else if (x.k === 'n' && state.mode === 'superviseur') {
+    let d; try { d = JSON.parse(td.decode(fflate.inflateSync(await unsealBytes(state.priv, b64u.dec(x.data))))); } catch (e) { await noteIllisible(x); return; }
+    await dbPut('entries', { k: `n:${x.n}`, kind: 'note', n: x.n, at: x.at, dec: d });
+  }
+}
+async function noteIllisible(x) {
+  const l = (await kvGet('illisibles')) || [];
+  l.push({ n: x.n, k: x.k, at: x.at }); await kvSet('illisibles', l.slice(-100));
 }
 
 /* ====================================================================== */
@@ -568,48 +644,49 @@ VIEWS.home = async () => {
   return state.mode === 'agent' ? agentHome() : supHome();
 };
 
-/* ---------- Première configuration ---------- */
+/* ---------- Premier lancement ---------- */
 async function viewSetup() {
-  const pending = state.pendingCfg;
+  const pending = state.pendingJoin;
   if (pending) {
     return page('Configuration', null,
       h('div', { class: 'card' },
-        h('h3', null, 'Configurer ce téléphone comme téléphone des agents ?'),
-        h('p', { class: 'muted' }, `Parkings : ${pending.sites.map(s => s.nom).join(', ')}.`),
-        h('p', { class: 'muted' }, pending.relay ? 'Envoi automatique des rondes activé.' : 'Transmission par fichier (relais non configuré).'),
+        h('h3', null, 'Configurer cet appareil comme téléphone des agents ?'),
+        h('p', { class: 'muted' }, 'Il se connectera au relais et récupérera la configuration et les signalements en cours.'),
         h('button', { class: 'ok', onclick: safe(async () => { await setupAgent(pending); }) }, 'Oui, configurer'),
-        h('button', { class: 'sec', onclick: () => { state.pendingCfg = null; render(); } }, 'Annuler')));
+        h('button', { class: 'sec', onclick: () => { state.pendingJoin = null; render(); } }, 'Annuler')));
   }
   return page('Rondes parkings', null,
     h('div', { class: 'card' },
       h('h3', null, 'Téléphone des agents'),
-      h('p', { class: 'muted' }, 'Sur le téléphone superviseur, ouvrez « QR codes » puis scannez le QR de configuration avec ce téléphone.'),
+      h('p', { class: 'muted' }, 'Sur un appareil superviseur, ouvrez « QR codes » puis scannez le QR de configuration avec ce téléphone. Plusieurs téléphones agents peuvent être configurés.'),
       h('button', { class: 'big', onclick: () => go('scan') }, 'Scanner le QR de configuration')),
     h('div', { class: 'card' },
-      h('h3', null, 'Téléphone superviseur (DPMS)'),
-      h('p', { class: 'muted' }, 'Crée la clé qui seule permet de lire les rondes transmises.'),
-      h('button', { class: 'sec', onclick: () => go('supInit') }, 'Créer le superviseur'),
-      h('button', { class: 'sec', onclick: () => go('supRestore') }, 'Restaurer une sauvegarde superviseur')),
+      h('h3', null, 'Appareil superviseur (DPMS)'),
+      h('p', { class: 'muted' }, 'Téléphone ou ordinateur. Plusieurs appareils superviseurs peuvent être utilisés.'),
+      h('button', { class: 'sec', onclick: () => go('supJoin') }, 'Ajouter cet appareil comme superviseur'),
+      h('button', { class: 'sec', onclick: () => go('supInit') }, 'Premier superviseur : activer un relais neuf')),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
-
-async function setupAgent(cfg) {
-  if (!validCfg(cfg)) throw new Error('Configuration invalide.');
-  if (state.mode === 'superviseur') throw new Error('Ce téléphone est le superviseur.');
-  if (state.mode === 'agent') {
-    if (JSON.stringify(state.cfg.pub) !== JSON.stringify(cfg.pub)) throw new Error('Ce code provient d’un autre superviseur. Réinitialisez d’abord le téléphone.');
-    await kvSet('cfg', cfg); state.cfg = cfg; state.pendingCfg = null;
-    toast('Configuration mise à jour.'); go('home'); syncNow().then(refreshIfHome); return;
+async function setupAgent(j) {
+  if (!j || !j.url || !j.tok || !j.team || !j.pub) throw new Error('QR de configuration invalide.');
+  if (state.mode === 'superviseur') throw new Error('Cet appareil est superviseur.');
+  if (state.mode === 'agent' && JSON.stringify(state.conn.pub) === JSON.stringify(j.pub) && state.conn.url === j.url) {
+    state.pendingJoin = null; toast('Ce téléphone est déjà configuré.'); go('home'); return;
   }
-  showBusy('Configuration…');
-  const kp = await newKeyPair();       // clé propre au téléphone : seul lui lit ce que le DPMS lui renvoie
-  await kvSet('devPriv', kp.priv); await kvSet('devPub', kp.pub);
+  if (state.mode === 'agent' && ((await dbAll('events')).length)) throw new Error('Des saisies ne sont pas encore envoyées : envoyez-les avant de changer de configuration.');
+  showBusy('Connexion au relais…');
+  const conn = { url: j.url, agentTok: j.tok, team: j.team, pub: j.pub };
+  await relayCall(conn.url, { op: 'ping', tok: conn.agentTok });   // vérifie l'accès avant d'enregistrer
+  if (state.mode === 'agent') { for (const s of ['entries', 'thumbs', 'sigs']) await dbClear(s); await kvDel('cursor'); }
   if (!(await kvGet('dev'))) await kvSet('dev', 'T-' + randCode(6));
-  await kvSet('cfg', cfg); await kvSet('mode', 'agent');
-  state.mode = 'agent'; state.cfg = cfg; state.pendingCfg = null;
-  await requestPersist();
+  await kvSet('conn', conn); await kvSet('mode', 'agent');
+  state.mode = 'agent'; state.conn = conn; state.pendingJoin = null;
+  showBusy('Récupération de la configuration et des signalements…');
+  const r = await syncNow();
   hideBusy();
-  toast('Téléphone des agents configuré.');
+  await requestPersist();
+  if (r && r.err) toast('Configuré, mais la récupération a échoué : ' + r.err, true);
+  else toast(state.cfg ? 'Téléphone des agents configuré.' : 'Configuré, mais aucune configuration trouvée sur le relais.', !state.cfg);
   go('home');
 }
 async function requestPersist() {
@@ -658,28 +735,25 @@ VIEWS.scan = async () => {
   })();
   return node;
 };
-
 function parseLink(text) {
   let hash = '';
   try { hash = new URL(text, appBaseURL()).hash; } catch (e) { hash = ''; }
   if (!hash && text.startsWith('#')) hash = text;
-  const m = /^#(cfg|site)=(.+)$/.exec(hash);
+  const m = /^#(join|site)=(.+)$/.exec(hash);
   return m ? { kind: m[1], val: m[2] } : null;
 }
 async function handleLink(text, fromScan) {
   const l = parseLink(text);
-  if (!l) { toast('QR code non reconnu.', true); if (fromScan) go('home'); return; }
-  if (l.kind === 'cfg') {
-    let cfg; try { cfg = unpackCfg(l.val); } catch (e) { toast('QR de configuration illisible.', true); go('home'); return; }
-    if (state.mode === 'superviseur') { toast('Ce téléphone est le superviseur : configuration ignorée.', true); go('home'); return; }
-    if (state.mode === 'agent') {
-      if (confirm('Mettre à jour la configuration de ce téléphone ?')) await safe(setupAgent)(cfg); else go('home');
-      return;
-    }
-    state.pendingCfg = cfg; go('home'); return;
+  if (!l) { toast('QR code non reconnu (ancienne version ?).', true); if (fromScan) go('home'); return; }
+  if (l.kind === 'join') {
+    let j; try { j = unpackJoin(l.val); } catch (e) { toast('QR de configuration illisible.', true); go('home'); return; }
+    if (state.mode === 'superviseur') { toast('Cet appareil est superviseur : configuration ignorée.', true); go('home'); return; }
+    if (state.mode === 'agent') { if (confirm('Reconfigurer ce téléphone avec ce QR ?')) await safe(setupAgent)(j); else go('home'); return; }
+    state.pendingJoin = j; go('home'); return;
   }
   if (l.kind === 'site') {
-    if (state.mode !== 'agent') { toast('QR de parking : à scanner avec le téléphone des agents.', true); go('home'); return; }
+    if (state.mode !== 'agent') { toast('QR de parking : à scanner avec un téléphone des agents.', true); go('home'); return; }
+    if (!state.cfg) { toast('Configuration non encore reçue : connectez le téléphone au réseau.', true); go('home'); return; }
     const [id, token] = l.val.split('.');
     const site = siteById(id);
     if (!site || site.token !== token) { toast('QR code de parking inconnu ou périmé.', true); go('home'); return; }
@@ -690,40 +764,32 @@ async function handleLink(text, fromScan) {
 /* ====================================================================== */
 /* AGENTS                                                                 */
 /* ====================================================================== */
+function syncCard(enAttente, lastSync, syncErr) {
+  return h('div', { class: 'card' }, h('h2', null, 'Envoi au DPMS'),
+    enAttente > 0
+      ? h('div', { class: 'banner warn' }, `${enAttente} saisie(s) en attente d’envoi. L’envoi est automatique dès que le réseau est disponible.`)
+      : h('div', { class: 'banner ok' }, 'Tout est envoyé.'),
+    lastSync ? h('p', { class: 'muted small' }, `Dernière liaison ${fmtQuand(lastSync)}.`) : null,
+    syncErr ? h('p', { class: 'muted small' }, `Dernier essai : ${syncErr.msg}.`) : null,
+    h('button', { class: 'sec', disabled: state.sync.busy, onclick: safe(async () => { showBusy('Synchronisation…'); const r = await syncNow(); hideBusy(); toast(r && r.err ? 'Échec : ' + r.err : r && r.offline ? 'Pas de réseau.' : 'Synchronisé.', !!(r && (r.err || r.offline))); render(); }) }, enAttente > 0 ? 'Envoyer maintenant' : 'Actualiser'));
+}
 async function agentHome() {
-  const ronde = await kvGet('ronde');
-  const sigs = await dbAll('sigs');
-  const head = (await kvGet('head')) || { seq: 0 };
-  const ack = (await kvGet('ack')) || 0;
   const lastSync = await kvGet('lastSync');
   const syncErr = await kvGet('syncErr');
-  const enAttente = head.seq - ack;
+  const enAttente = (await dbAll('events')).length;
+  if (!state.cfg) {
+    return page('Rondes parkings', null,
+      h('div', { class: 'banner warn' }, 'Configuration pas encore reçue du relais. Connectez le téléphone au réseau.'),
+      syncCard(enAttente, lastSync, syncErr),
+      h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'));
+  }
+  const ronde = await kvGet('ronde');
+  const sigs = await dbAll('sigs');
   const cfg = state.cfg;
-  const auto = !!(cfg.relay && cfg.relay.url);
-
   const perSite = cfg.sites.map(s => {
     const o = sigs.filter(x => x.site === s.id && x.statut === 'ouvert').length;
     return h('div', { class: 'stat' }, h('span', null, s.nom), h('span', null, h('b', null, o), h('span', { class: 'muted small' }, o > 1 ? ' ouverts' : ' ouvert')));
   });
-
-  let transmission;
-  if (auto) {
-    transmission = h('div', { class: 'card' }, h('h2', null, 'Envoi au DPMS'),
-      enAttente > 0
-        ? h('div', { class: 'banner warn' }, `${enAttente} saisie(s) en attente d’envoi. L’envoi est automatique dès que le réseau est disponible.`)
-        : h('div', { class: 'banner ok' }, 'Tout est envoyé.'),
-      lastSync ? h('p', { class: 'muted small' }, `Dernière liaison ${fmtQuand(lastSync)}.`) : null,
-      syncErr && enAttente > 0 ? h('p', { class: 'muted small' }, `Dernier essai : ${syncErr.msg}.`) : null,
-      enAttente > 0 ? h('button', { class: 'sec', disabled: state.sync.busy, onclick: safe(async () => { showBusy('Envoi…'); const r = await syncNow(); hideBusy(); toast(r && r.err ? 'Envoi impossible : ' + r.err : r && r.offline ? 'Pas de réseau.' : 'Envoyé.', !!(r && (r.err || r.offline))); render(); }) }, 'Envoyer maintenant') : null);
-  } else {
-    transmission = h('div', { class: 'card' }, h('h2', null, 'Transmission au DPMS (par fichier)'),
-      enAttente > 0
-        ? h('div', { class: 'banner warn' }, `${enAttente} saisie(s) non encore reçue(s) par le DPMS.`)
-        : h('div', { class: 'banner ok' }, 'Tout a été reçu par le DPMS.'),
-      h('button', { disabled: enAttente <= 0 || !!ronde, onclick: safe(agentExportFichier) }, 'Transmettre au DPMS'),
-      h('button', { class: 'sec', onclick: safe(agentImportFichier) }, 'Recevoir la mise à jour du DPMS'));
-  }
-
   return page('Rondes parkings', null,
     ronde ? h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
       h('h3', null, `Ronde en cours : ${siteNom(ronde.site)}`),
@@ -734,7 +800,7 @@ async function agentHome() {
         h('button', { class: 'link', onclick: () => go('siteManuel') }, 'QR code illisible ? Démarrer sans QR')),
     h('div', { class: 'card' }, h('h2', null, 'Signalements en cours'), ...perSite,
       h('button', { class: 'sec', onclick: () => go('agentSigs') }, 'Voir les signalements')),
-    transmission,
+    syncCard(enAttente, lastSync, syncErr),
     h('div', { class: 'card' }, h('h2', null, 'Extrait Excel'),
       h('div', { class: 'row' },
         h('button', { class: 'sec', onclick: safe(() => agentExcel(7)) }, '7 jours'),
@@ -750,7 +816,7 @@ async function agentHome() {
 
 VIEWS.siteManuel = async () => page('Choisir le parking', { back: true },
   h('div', { class: 'banner warn' }, 'Le démarrage sans QR code est signalé au DPMS. Signalez le QR abîmé dans la ronde.'),
-  ...state.cfg.sites.map(s => h('button', { class: 'big sec', onclick: () => startRondeFlow(s.id, false) }, s.nom)));
+  ...(state.cfg ? state.cfg.sites : []).map(s => h('button', { class: 'big sec', onclick: () => startRondeFlow(s.id, false) }, s.nom)));
 
 async function startRondeFlow(siteId, qr) {
   const cur = await kvGet('ronde');
@@ -761,7 +827,6 @@ async function startRondeFlow(siteId, qr) {
   }
   go('choixAgent', { site: siteId, qr });
 }
-
 VIEWS.choixAgent = async ({ site, qr }) => page(`Ronde : ${siteNom(site)}`, { back: true },
   h('p', null, 'Qui fait la ronde ?'),
   ...state.cfg.agents.map(a => h('button', { class: 'big sec', onclick: safe(() => beginRonde(site, a, qr)) }, a)));
@@ -770,8 +835,7 @@ async function beginRonde(site, agent, qr) {
   showBusy('Démarrage de la ronde…');
   Geo.start();
   await Geo.waitFirst(4000);
-  const now = new Date();
-  const ronde = { rid: uuid(), site, agent, qr, debut: now.toISOString(), step: 'revue', checklist: {}, sigsCrees: [] };
+  const ronde = { rid: uuid(), site, agent, qr, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [] };
   await appendEvent('ronde_debut', ronde, { qr }, { qr });
   await kvSet('ronde', ronde);
   hideBusy();
@@ -791,13 +855,11 @@ VIEWS.revue = async () => {
   if (!ronde) return agentHome();
   const open = (await dbAll('sigs')).filter(s => s.site === ronde.site && s.statut === 'ouvert')
     .sort((a, b) => (a.jour || '').localeCompare(b.jour || ''));
-  if (!open.length) {
-    ronde.step = 'checklist'; await kvSet('ronde', ronde);
-    return VIEWS.checklist();
-  }
+  if (!open.length) { ronde.step = 'checklist'; await kvSet('ronde', ronde); return VIEWS.checklist(); }
   const btnValider = h('button', { class: 'ok' }, 'Valider la revue');
   const refresh = () => { btnValider.disabled = !open.every(s => revueDraft[s.id] && revueDraft[s.id].verdict); };
-  const cards = open.map(s => {
+  const cards = [];
+  for (const s of open) {
     const d = revueDraft[s.id] || (revueDraft[s.id] = { verdict: null, comment: '', photos: [] });
     const thumbs = h('div', { class: 'thumbs' });
     const drawThumbs = () => thumbs.replaceChildren(...d.photos.map((p, i) =>
@@ -807,36 +869,30 @@ VIEWS.revue = async () => {
       class: d.verdict === k ? 'sel-' + k : '',
       onclick: (e) => { d.verdict = k; [...e.target.parentNode.children].forEach(b => b.className = ''); e.target.className = 'sel-' + k; refresh(); }
     }, lbl));
-    return h('div', { class: 'card' },
+    const th = await thumbOf(s);
+    cards.push(h('div', { class: 'card' },
       h('h3', null, s.cat, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
       h('p', { class: 'muted small' }, `${s.ref} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
       s.desc ? h('p', null, s.desc) : null,
       s.plaque ? h('p', null, h('b', null, 'Plaque : '), s.plaque) : null,
-      s.thumb ? h('div', { class: 'thumbs' }, h('img', { src: s.thumb, alt: 'Photo du signalement' })) : null,
+      th ? h('div', { class: 'thumbs' }, h('img', { src: th, alt: 'Photo du signalement' })) : null,
       s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
       h('p', { style: 'margin:10px 0 6px;font-weight:600' }, 'Aujourd’hui :'),
       h('div', { class: 'verdicts' }, ...vbtns),
       h('input', { type: 'text', placeholder: 'Commentaire (facultatif)', value: d.comment, style: 'margin-top:8px', oninput: e => d.comment = e.target.value }),
       thumbs,
-      h('button', { class: 'sec', onclick: photoInput(async f => { showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Ajouter une photo'));
-  });
+      h('button', { class: 'sec', onclick: photoInput(async f => { showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Ajouter une photo')));
+  }
   btnValider.onclick = safe(async () => {
     showBusy('Enregistrement…');
     for (const s of open) {
       const d = revueDraft[s.id];
       await savePhotos(d.photos);
-      const ev = await appendEvent('revue', ronde, { sig: s.id, ref: s.ref, verdict: d.verdict, comment: d.comment.trim() },
+      await appendEvent('revue', ronde, { sig: s.id, ref: s.ref, verdict: d.verdict, comment: d.comment.trim() },
         { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
-      const sig = await dbGet('sigs', s.id);
-      const now = new Date().toISOString();
-      sig.suivi = sig.suivi || [];
-      sig.suivi.push({ jour: ev.jour, agent: ronde.agent, verdict: d.verdict, comment: d.comment.trim() });
-      applyVerdict(sig, d.verdict, now, ronde.agent);
-      sig.lastLocalTs = now;
-      await dbPut('sigs', sig);
-      await addHisto(ev, { type: 'Constat de suivi', ref: s.ref, cat: s.cat, desc: s.desc, plaque: s.plaque, verdict: VERDICTS[d.verdict], comment: d.comment.trim() });
       delete revueDraft[s.id];
     }
+    await fold();
     ronde.step = 'checklist'; await kvSet('ronde', ronde);
     hideBusy(); go('checklist');
   });
@@ -859,10 +915,7 @@ VIEWS.checklist = async () => {
     const bR = h('button', { class: v === 'RAS' ? 'sel-ras' : '' }, 'RAS');
     const bA = h('button', { class: v === 'Anomalie' ? 'sel-ano' : '' }, 'Anomalie');
     bR.onclick = safe(async () => { ronde.checklist[it.lbl] = 'RAS'; bR.className = 'sel-ras'; bA.className = ''; await kvSet('ronde', ronde); refresh(); });
-    bA.onclick = safe(async () => {
-      ronde.checklist[it.lbl] = 'Anomalie'; await kvSet('ronde', ronde);
-      go('signalement', { cat: it.cat, from: 'checklist', item: it.lbl });
-    });
+    bA.onclick = safe(async () => { ronde.checklist[it.lbl] = 'Anomalie'; await kvSet('ronde', ronde); go('signalement', { cat: it.cat, from: 'checklist', item: it.lbl }); });
     return h('div', { class: 'chk' }, h('span', { class: 'lbl' }, it.lbl), bR, bA);
   });
   btnValider.onclick = safe(async () => {
@@ -888,7 +941,7 @@ VIEWS.ronde = async () => {
     h('div', { class: 'card' }, h('h2', null, 'Signalements de cette ronde'),
       sigs.length ? sigs.map(s => h('div', { class: 'stat' }, h('span', null, s.cat, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null), h('span', { class: 'muted small' }, s.ref)))
         : h('p', { class: 'muted' }, 'Aucun pour l’instant.')),
-    h('button', { class: 'ok', onclick: safe(async () => { if (confirm('Terminer la ronde ?')) { await finishRonde(ronde); } }) }, 'Terminer la ronde'));
+    h('button', { class: 'ok', onclick: safe(async () => { if (confirm('Terminer la ronde ?')) await finishRonde(ronde); }) }, 'Terminer la ronde'));
 };
 async function finishRonde(ronde, silent) {
   showBusy('Clôture de la ronde…');
@@ -897,10 +950,9 @@ async function finishRonde(ronde, silent) {
   Geo.stop();
   hideBusy();
   if (!silent) {
-    const auto = !!(state.cfg.relay && state.cfg.relay.url);
-    toast(auto ? 'Ronde terminée. Envoi au DPMS en cours…' : 'Ronde terminée et enregistrée.');
+    toast('Ronde terminée. Envoi au DPMS en cours…');
     go('home');
-    if (auto) syncNow().then(r => {
+    syncNow().then(r => {
       if (r && r.sent) toast('Ronde envoyée au DPMS.');
       else if (r && (r.offline || r.err)) toast('Pas de réseau : la ronde partira automatiquement plus tard.');
       refreshIfHome();
@@ -934,34 +986,27 @@ VIEWS.signalement = async ({ cat, from, item }) => {
   drawThumbs();
   showPlaque();
   const back = () => { if (!d.photos.length && !d.desc || confirm('Abandonner ce signalement ?')) { sigDraft = null; go(from === 'checklist' ? 'checklist' : 'ronde'); } };
-
   const save = safe(async () => {
     if (!d.cat) throw new Error('Choisissez une catégorie.');
     if (!d.desc.trim() && !d.photos.length) throw new Error('Ajoutez une description ou une photo.');
     if (!d.dests.length) throw new Error('Choisissez au moins un destinataire.');
     showBusy('Enregistrement…');
     const site = siteById(ronde.site);
-    const now = new Date().toISOString();
-    const sig = {
-      id: uuid(), ref: `${site.code}-${randCode(5)}`, site: ronde.site, cat: d.cat, desc: d.desc.trim(),
-      plaque: VEHICULE_RE.test(d.cat) ? d.plaque.trim().toUpperCase() : '', dests: [...d.dests], urgent: d.urgent,
-      statut: 'ouvert', jour: localDate(), agent: ronde.agent, thumb: d.photos[0] ? d.photos[0].thumb : null, suivi: [], lastLocalTs: now
-    };
+    const id = uuid(), ref = `${site.code}-${randCode(5)}`;
     await savePhotos(d.photos);
-    const ev = await appendEvent('signalement', ronde,
-      { id: sig.id, ref: sig.ref, cat: sig.cat, desc: sig.desc, plaque: sig.plaque, dests: sig.dests, urgent: sig.urgent, checklist: item || null },
+    await appendEvent('signalement', ronde,
+      { id, ref, cat: d.cat, desc: d.desc.trim(), plaque: VEHICULE_RE.test(d.cat) ? d.plaque.trim().toUpperCase() : '', dests: [...d.dests], urgent: d.urgent, checklist: item || null, thumb: d.photos[0] ? d.photos[0].thumb : null },
       { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
-    await dbPut('sigs', sig);
-    await addHisto(ev, { type: 'Signalement', ref: sig.ref, cat: sig.cat, desc: sig.desc, plaque: sig.plaque, dests: sig.dests.join(', '), urgent: sig.urgent ? 'Oui' : '' });
-    ronde.sigsCrees.push(sig.id);
+    await fold();
+    ronde.sigsCrees.push(id);
     await kvSet('ronde', ronde);
+    const urgent = d.urgent;
     sigDraft = null;
     hideBusy();
-    toast(`Signalement ${sig.ref} enregistré.`);
+    toast(`Signalement ${ref} enregistré.`);
     go(from === 'checklist' ? 'checklist' : 'ronde');
-    if (sig.urgent) syncNow();     // un signalement urgent part sans attendre la fin de la ronde
+    if (urgent) syncNow();     // un signalement urgent part sans attendre la fin de la ronde
   });
-
   return page('Nouveau signalement', { back },
     item ? h('div', { class: 'banner warn' }, `Anomalie de la check-list : ${item}`) : null,
     h('label', { class: 'f' }, 'Catégorie'), catChips,
@@ -973,7 +1018,6 @@ VIEWS.signalement = async ({ cat, from, item }) => {
     h('button', { class: 'sec', onclick: photoInput(async f => { if (d.photos.length >= 4) { toast('4 photos maximum.', true); return; } showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Prendre une photo'),
     h('label', { class: 'f' }, 'À signaler à'), destChips,
     h('label', { class: 'f' }, 'Priorité'), h('div', { class: 'chips' }, urg),
-    d.urgent && (state.cfg.urgenceTel) ? h('p', { class: 'muted small' }, 'Urgent : prévenez aussi par téléphone depuis l’accueil.') : null,
     h('div', { style: 'height:70px' }),
     h('div', { class: 'sticky-bottom' }, h('div', null, h('button', { class: 'ok', onclick: save }, 'Enregistrer le signalement'))));
 };
@@ -981,43 +1025,35 @@ VIEWS.signalement = async ({ cat, from, item }) => {
 /* ---------- Liste des signalements (agents) ---------- */
 VIEWS.agentSigs = async () => {
   const sigs = (await dbAll('sigs')).filter(s => s.statut === 'ouvert').sort((a, b) => (b.jour || '').localeCompare(a.jour || ''));
-  return page('Signalements en cours', { back: true },
-    sigs.length ? sigs.map(s => h('div', { class: 'card' },
+  const cards = [];
+  for (const s of sigs) {
+    const th = await thumbOf(s);
+    cards.push(h('div', { class: 'card' },
       h('h3', null, s.cat, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
-      h('p', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${fmtJour(s.jour)}`),
+      h('p', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${fmtJour(s.jour)}${s.agent ? ' — ' + s.agent : ''}`),
       s.desc ? h('p', null, s.desc) : null,
       s.plaque ? h('p', null, h('b', null, 'Plaque : '), s.plaque) : null,
-      s.thumb ? h('div', { class: 'thumbs' }, h('img', { src: s.thumb, alt: '' })) : null,
-      s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null))
-      : h('p', { class: 'muted' }, 'Aucun signalement en cours.'));
+      th ? h('div', { class: 'thumbs' }, h('img', { src: th, alt: '' })) : null,
+      s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null));
+  }
+  return page('Signalements en cours', { back: true }, cards.length ? cards : h('p', { class: 'muted' }, 'Aucun signalement en cours.'));
 };
 
-/* ---------- Secours sans relais : fichiers ---------- */
-async function agentExportFichier() {
-  const ack = (await kvGet('ack')) || 0;
-  const events = (await dbAll('events')).filter(e => e.seq > ack).sort((a, b) => a.seq - b.seq);
-  if (!events.length) { toast('Rien à transmettre.'); return; }
-  showBusy('Préparation du fichier…');
-  const pk = await buildPaquetSealed(events);
-  hideBusy();
-  const r = await shareOrDownload(new Blob([pk.sealed], { type: 'application/octet-stream' }), `rondes_${pk.dev}_${fileStamp()}_${pk.from}-${pk.to}.rondes`, 'Rondes parkings');
-  if (r !== 'annule') toast('Fichier chiffré prêt : à envoyer au DPMS (Quick Share, courriel…).');
-}
-async function agentImportFichier() {
-  const f = await pickFile('.json,application/json');
-  if (!f) return;
-  showBusy('Lecture…');
-  await applyEtat(JSON.parse(await f.text()));
-  hideBusy(); toast('Mise à jour du DPMS appliquée.'); go('home');
-}
-
-/* ---------- Extrait Excel (agents) : sans horodatage précis ni position ---------- */
+/* ---------- Extrait Excel (agents) : toutes les rondes, sans horodatage précis ni position ---------- */
 async function agentExcel(jours) {
   const lim = localDate(new Date(Date.now() - jours * 86400000));
-  const rows = (await dbAll('histo')).filter(r => r.jour >= lim).sort((a, b) => a.k - b.k);
-  if (!rows.length) { toast('Aucune saisie sur la période.'); return; }
+  const evs = [...(await dbAll('entries')).filter(e => e.kind === 'ev').map(e => ({ ord: e.n * 100000 + e.idx, ev: e.ev })),
+  ...(await dbAll('events')).map(ev => ({ ord: ORD_LOCAL + ev.seq, ev }))].sort((a, b) => a.ord - b.ord);
+  const refs = new Map();
+  evs.forEach(({ ev }) => { if (ev.t === 'signalement') refs.set(ev.data.id, ev.data); });
   const aoa = [['Date', 'Parking', 'Agent', 'Type', 'Réf.', 'Catégorie', 'Description', 'Plaque', 'Destinataires', 'Urgent', 'Constat', 'Commentaire']];
-  rows.forEach(r => aoa.push([fmtJour(r.jour), siteNom(r.site), r.agent || '', r.type, r.ref || '', r.cat || '', r.desc || '', r.plaque || '', r.dests || '', r.urgent || '', r.verdict || '', r.comment || '']));
+  for (const { ev } of evs) {
+    if (ev.jour < lim) continue;
+    if (ev.t === 'signalement') aoa.push([fmtJour(ev.jour), siteNom(ev.site), ev.agent, 'Signalement', ev.data.ref, ev.data.cat, ev.data.desc, ev.data.plaque || '', (ev.data.dests || []).join(', '), ev.data.urgent ? 'Oui' : '', '', '']);
+    else if (ev.t === 'revue') { const s = refs.get(ev.data.sig) || {}; aoa.push([fmtJour(ev.jour), siteNom(ev.site), ev.agent, 'Constat de suivi', ev.data.ref, s.cat || '', s.desc || '', s.plaque || '', '', '', VERDICTS[ev.data.verdict], ev.data.comment || '']); }
+    else if (ev.t === 'checklist') { const an = Object.entries(ev.data.items || {}).filter(([, v]) => v === 'Anomalie').map(([k]) => k); aoa.push([fmtJour(ev.jour), siteNom(ev.site), ev.agent, 'Check-list', '', '', an.length ? 'Anomalies : ' + an.join(', ') : 'RAS', '', '', '', '', '']); }
+  }
+  if (aoa.length === 1) { toast('Aucune saisie sur la période.'); return; }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [10, 12, 12, 16, 11, 24, 50, 12, 28, 8, 16, 30].map(w => ({ wch: w }));
   ws['!autofilter'] = { ref: ws['!ref'] };
@@ -1032,205 +1068,165 @@ VIEWS.reglages = async () => {
   try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : null; } catch (e) { }
   let est = null; try { est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null; } catch (e) { }
   const dev = await kvGet('dev');
-  const auto = !!(state.cfg && state.cfg.relay && state.cfg.relay.url);
+  const enAttente = state.mode === 'agent' ? (await dbAll('events')).length : 0;
   return page('Réglages', { back: true },
     h('div', { class: 'card' }, h('dl', { class: 'kv' },
       h('dt', null, 'Mode'), h('dd', null, state.mode === 'agent' ? 'Téléphone agents' : 'Superviseur'),
       dev ? [h('dt', null, 'Identifiant'), h('dd', null, dev)] : null,
-      state.cfg ? [h('dt', null, 'Configuration'), h('dd', null, state.cfg.cfgId)] : null,
-      h('dt', null, 'Transmission'), h('dd', null, auto ? 'automatique (relais)' : 'par fichier'),
+      state.conn ? [h('dt', null, 'Relais'), h('dd', { class: 'small' }, state.conn.url)] : null,
       h('dt', null, 'Stockage protégé'), h('dd', null, persisted === true ? 'Oui' : persisted === false ? 'Non (installez l’application sur l’écran d’accueil)' : 'Inconnu'),
       est ? [h('dt', null, 'Espace utilisé'), h('dd', null, (est.usage / 1048576).toFixed(1) + ' Mo')] : null,
       h('dt', null, 'Version'), h('dd', null, APP_VERSION))),
     persisted === false ? h('button', { class: 'sec', onclick: safe(async () => { const ok = await requestPersist(); toast(ok ? 'Stockage protégé.' : 'Refusé par le navigateur.', !ok); render(); }) }, 'Demander la protection du stockage') : null,
-    state.mode === 'agent' ? h('button', { class: 'sec', onclick: () => go('scan') }, 'Scanner une nouvelle configuration') : null,
-    state.mode === 'agent' && auto ? h('div', { class: 'card' }, h('h2', null, 'Secours sans réseau'),
-      h('p', { class: 'muted small' }, 'Uniquement si l’envoi automatique est impossible durablement.'),
-      h('button', { class: 'sec', onclick: safe(agentExportFichier) }, 'Transmettre par fichier'),
-      h('button', { class: 'sec', onclick: safe(agentImportFichier) }, 'Recevoir une mise à jour par fichier')) : null,
+    state.mode === 'agent' ? h('button', { class: 'sec', onclick: () => go('scan') }, 'Scanner un nouveau QR de configuration') : null,
     h('hr'),
-    h('div', { class: 'card' }, h('h2', null, 'Réinitialiser'),
+    h('div', { class: 'card' }, h('h2', null, 'Réinitialiser cet appareil'),
       h('p', { class: 'muted small' }, state.mode === 'agent'
-        ? 'Efface toutes les données de ce téléphone, y compris les saisies non envoyées.'
-        : 'Efface la clé et toutes les données. Sans sauvegarde, rien ne pourra être relu.'),
+        ? (enAttente ? `Attention : ${enAttente} saisie(s) pas encore envoyée(s) seront perdues. ` : '') + 'Les données déjà envoyées restent sur le relais et seront retrouvées après reconfiguration.'
+        : 'Efface cet appareil. Les données restent sur le relais : l’appareil pourra être rajouté avec l’adresse du relais et la phrase de passe.'),
       h('button', {
         class: 'danger', onclick: safe(async () => {
           const r = prompt('Tapez EFFACER pour confirmer.');
           if (r !== 'EFFACER') return;
           Geo.stop();
-          for (const s of ['kv', 'events', 'photos', 'sigs', 'histo', 'sup_events', 'rondes']) await dbClear(s);
-          state.mode = null; state.cfg = null;
-          toast('Téléphone réinitialisé.'); go('home');
+          for (const s of Object.keys(STORES)) await dbClear(s);
+          Object.assign(state, { mode: null, conn: null, cfg: null, priv: null });
+          toast('Appareil réinitialisé.'); go('home');
         })
-      }, 'Réinitialiser ce téléphone')));
+      }, 'Réinitialiser cet appareil')));
 };
 
 /* ====================================================================== */
 /* SUPERVISEUR                                                            */
 /* ====================================================================== */
+const ETAPES_RELAIS = [
+  'Avec le compte Google dédié, ouvrez script.google.com, créez un projet et collez le contenu du fichier relais/relais.gs.',
+  'Déployer → Nouveau déploiement → Application web. Exécuter en tant que : moi. Accès : tout le monde. Autorisez l’accès à Drive.',
+  'Copiez l’adresse de l’application web (elle se termine par /exec).'
+];
 VIEWS.supInit = async () => {
+  const url = h('input', { type: 'text', placeholder: 'https://script.google.com/macros/s/…/exec' });
   const p1 = h('input', { type: 'password', autocomplete: 'new-password' });
   const p2 = h('input', { type: 'password', autocomplete: 'new-password' });
-  return page('Créer le superviseur', { back: true },
-    h('div', { class: 'banner info' }, 'La phrase de passe protège la clé de secours. Elle sera demandée pour restaurer le superviseur sur un autre téléphone. Notez-la et remettez-la sous pli fermé à la DGS avec la clé de secours.'),
-    h('label', { class: 'f' }, 'Phrase de passe (12 caractères minimum)'), p1,
-    h('label', { class: 'f' }, 'Confirmation'), p2,
+  const err = h('div');
+  return page('Activer un relais neuf', { back: true },
+    h('div', { class: 'banner info' }, 'À faire une seule fois, par le premier superviseur. Les autres appareils superviseurs utiliseront « Ajouter cet appareil comme superviseur ».'),
+    h('div', { class: 'card' }, h('h2', null, 'Relais'), ...ETAPES_RELAIS.map((t, i) => h('p', { class: 'small' }, `${i + 1}. ${t}`)),
+      h('label', { class: 'f' }, 'Adresse du relais'), url),
+    h('div', { class: 'card' }, h('h2', null, 'Phrase de passe superviseur'),
+      h('p', { class: 'small muted' }, 'Elle permet d’ajouter d’autres appareils superviseurs. Elle est la seule protection des clés : longue, notée, remise sous pli fermé à la DGS.'),
+      h('label', { class: 'f' }, 'Phrase de passe (12 caractères minimum)'), p1,
+      h('label', { class: 'f' }, 'Confirmation'), p2),
+    err,
     h('button', {
       class: 'ok', onclick: safe(async () => {
-        if (p1.value.length < 12) throw new Error('12 caractères minimum.');
-        if (p1.value !== p2.value) throw new Error('Les deux saisies diffèrent.');
-        showBusy('Création de la clé…');
+        err.replaceChildren();
+        const u = url.value.trim();
+        if (!/^https:\/\/\S+$/.test(u) && !/^http:\/\/localhost[:/]/.test(u)) throw new Error('Adresse du relais invalide.');
+        if (p1.value.length < 12) throw new Error('Phrase de passe : 12 caractères minimum.');
+        if (p1.value !== p2.value) throw new Error('Les deux phrases de passe diffèrent.');
+        showBusy('Création des clés et activation du relais…');
         const kp = await newKeyPair();
-        const privEnc = await encryptWithPass(p1.value, kp.privJwk);
-        const cfg = defaultConfig(kp.pub);
-        await kvSet('privKey', kp.priv); await kvSet('privEnc', privEnc);
-        await kvSet('cfg', cfg); await kvSet('mode', 'superviseur'); await kvSet('devs', {});
-        state.mode = 'superviseur'; state.cfg = cfg;
+        const conn = { url: u, supTok: randCode(32), agentTok: randCode(32), team: b64u.enc(crypto.getRandomValues(new Uint8Array(32))), pub: kp.pub };
+        try { await relayCall(u, { op: 'init', supTok: conn.supTok, agentTok: conn.agentTok }); }
+        catch (e) {
+          hideBusy();
+          if (e.code === 'deja-initialise') {
+            err.replaceChildren(h('div', { class: 'banner warn' },
+              h('b', null, 'Ce relais est déjà activé. '), 'Deux possibilités :',
+              h('p', { class: 'small' }, '• Ajouter cet appareil au superviseur existant : « Ajouter cet appareil comme superviseur », avec la même phrase de passe.'),
+              h('p', { class: 'small' }, '• Repartir de zéro (efface tout le relais) : dans l’éditeur Apps Script, choisir la fonction « reinitialiserRelais » dans la barre d’outils, cliquer sur « Exécuter », puis recommencer ici.'),
+              h('button', { class: 'sec', onclick: () => go('supJoin', { url: u }, { noPush: true }) }, 'Ajouter cet appareil comme superviseur')));
+            return;
+          }
+          throw e;
+        }
+        const vault = await encryptWithPass(p1.value, { v: 2, privJwk: kp.privJwk, ...conn });
+        state.mode = 'superviseur'; state.conn = conn; state.priv = kp.priv;
+        await relayCall(u, { op: 'putVault', tok: conn.supTok, data: JSON.stringify(vault) });
+        const cfg = defaultConfig();
+        await kvSet('privKey', kp.priv); await kvSet('conn', conn); await kvSet('mode', 'superviseur');
+        state.cfg = cfg; await kvSet('cfg', cfg);
+        await queueDec('d', { type: 'cfg', ts: new Date().toISOString(), cfg });
+        await syncNow();
         await requestPersist();
         hideBusy();
-        toast('Superviseur créé.');
-        go('supCle', { first: true });
+        toast('Relais activé.');
+        go('supQR', { first: true });
       })
-    }, 'Créer la clé'));
+    }, 'Créer et activer'));
+};
+VIEWS.supJoin = async ({ url: u0 } = {}) => {
+  const url = h('input', { type: 'text', value: u0 || '', placeholder: 'https://script.google.com/macros/s/…/exec' });
+  const pass = h('input', { type: 'password', autocomplete: 'current-password' });
+  return page('Ajouter un superviseur', { back: true },
+    h('p', { class: 'muted' }, 'L’adresse du relais figure dans les Réglages de tout appareil déjà configuré.'),
+    h('label', { class: 'f' }, 'Adresse du relais'), url,
+    h('label', { class: 'f' }, 'Phrase de passe superviseur'), pass,
+    h('button', {
+      class: 'ok', onclick: safe(async () => {
+        const u = url.value.trim();
+        if (!u) throw new Error('Adresse du relais manquante.');
+        showBusy('Récupération des clés…');
+        const r = await relayCall(u, { op: 'getVault' });
+        let v;
+        try { v = await decryptWithPass(pass.value, JSON.parse(r.data)); } catch (e) { throw new Error('Phrase de passe incorrecte.'); }
+        const priv = await crypto.subtle.importKey('jwk', v.privJwk, EC, false, ['deriveBits']);
+        const conn = { url: u, supTok: v.supTok, agentTok: v.agentTok, team: v.team, pub: v.pub };
+        for (const s of Object.keys(STORES)) await dbClear(s);
+        await kvSet('privKey', priv); await kvSet('conn', conn); await kvSet('mode', 'superviseur');
+        Object.assign(state, { mode: 'superviseur', conn, priv, cfg: null });
+        showBusy('Récupération des données…');
+        const s = await syncNow();
+        await requestPersist();
+        hideBusy();
+        if (s && s.err) toast('Ajouté, mais la récupération a échoué : ' + s.err, true); else toast('Appareil superviseur ajouté.');
+        go('home');
+      })
+    }, 'Ajouter cet appareil'));
 };
 
-VIEWS.supRestore = async () => page('Restaurer le superviseur', { back: true },
-  h('p', { class: 'muted' }, 'Choisissez une sauvegarde complète (.zip) ou une clé de secours (.json).'),
-  h('button', {
-    onclick: safe(async () => {
-      const f = await pickFile('.zip,.json');
-      if (!f) return;
-      const pass = prompt('Phrase de passe de la clé :');
-      if (!pass) return;
-      showBusy('Restauration…');
-      let cle, db = null, photos = {};
-      if (f.name.toLowerCase().endsWith('.zip')) {
-        const z = fflate.unzipSync(new Uint8Array(await f.arrayBuffer()));
-        const dump = JSON.parse(td.decode(z['sauvegarde.json']));
-        if (dump.format !== FMT_SAUVEGARDE) throw new Error('Sauvegarde invalide.');
-        cle = dump.cle; db = dump;
-        for (const [k, v] of Object.entries(z)) if (k.startsWith('photos/')) photos[k.slice(7, -4)] = v;
-      } else {
-        cle = JSON.parse(await f.text());
-        if (cle.format !== FMT_CLE) throw new Error('Clé de secours invalide.');
-      }
-      let privJwk;
-      try { privJwk = await decryptWithPass(pass, cle.privEnc); } catch (e) { throw new Error('Phrase de passe incorrecte.'); }
-      const priv = await crypto.subtle.importKey('jwk', privJwk, EC, false, ['deriveBits']);
-      await kvSet('privKey', priv); await kvSet('privEnc', cle.privEnc);
-      const cfg = (db && db.cfg) || cle.cfg;
-      await kvSet('cfg', cfg); await kvSet('mode', 'superviseur'); await kvSet('devs', (db && db.devs) || {});
-      const relaySup = (db && db.relaySup) || cle.relaySup;
-      if (relaySup) await kvSet('relaySup', relaySup);
-      if (db) {
-        await dbPutMany('sigs', db.sigs); await dbPutMany('sup_events', db.events); await dbPutMany('rondes', db.rondes);
-        await kvSet('decisions', db.decisions || []);
-        const shaMap = {};
-        db.events.forEach(e => (e.photos || []).forEach(p => shaMap[p.id] = p.sha));
-        await dbPutMany('photos', Object.entries(photos).map(([id, bytes]) => ({ id, blob: new Blob([bytes], { type: 'image/jpeg' }), sha: shaMap[id] || null })));
-      }
-      state.mode = 'superviseur'; state.cfg = cfg;
-      await requestPersist();
-      hideBusy(); toast('Superviseur restauré.'); go('home');
-      syncNow().then(refreshIfHome);
-    })
-  }, 'Choisir le fichier'));
-
-/* ---------- Relève automatique (superviseur) ---------- */
+/* ---------- Synchronisation superviseur ---------- */
+async function queueDec(kind, d) {
+  const q = (await kvGet('decQueue')) || [];
+  q.push({ kind, d }); await kvSet('decQueue', q);
+}
 async function supSync() {
-  const rs = await kvGet('relaySup');
-  if (!rs || !rs.url) return { skipped: true };
-  if (!navigator.onLine) return { offline: true };
-  const priv = await getPrivKey();
-  const list = await relayCall(rs.url, { op: 'list', tok: rs.supTok });
-  const rapport = nouveauRapport();
-  for (const f of list.files) {
-    const g = await relayCall(rs.url, { op: 'get', tok: rs.supTok, id: f.id }, 120000);
-    try {
-      const zipBytes = await unsealBytes(priv, b64u.dec(g.data));
-      await importPaquetZip(zipBytes, rapport);
-      await relayCall(rs.url, { op: 'del', tok: rs.supTok, id: f.id });
-      rapport.fichiers++;
-    } catch (e) {
-      rapport.alertes.push(`Envoi ${f.nom} illisible (${e.message}) : laissé sur le relais.`);
-    }
+  // 1. Publication des interventions en attente
+  let q = (await kvGet('decQueue')) || [];
+  while (q.length) {
+    const it = q[0];
+    const data = it.kind === 'n'
+      ? b64u.enc(await sealBytesFor(await getPubKey(), fflate.deflateSync(te.encode(JSON.stringify(it.d)))))
+      : await encJSON(it.d);
+    const r = await rel('putDec', { kind: it.kind, data });
+    await dbPut('entries', { k: `${it.kind}:${r.n}`, kind: it.kind === 'n' ? 'note' : 'dec', n: r.n, at: r.at, dec: it.d });
+    q = q.slice(1); await kvSet('decQueue', q);
   }
-  if (rapport.fichiers || rapport.alertes.length) await enregistrerRapport(rapport);
-  await pushEtats();
-  state.sync.err = null;
-  await kvDel('syncErr');
-  await kvSet('lastSupSync', new Date().toISOString());
-  return rapport;
-}
-async function getPrivKey() { return kvGet('privKey'); }
-function nouveauRapport() { return { at: new Date().toISOString(), fichiers: 0, importes: 0, dejaRecus: 0, nouveauxSigs: 0, revues: 0, rondes: 0, alertes: [] }; }
-async function enregistrerRapport(r) {
-  const journal = (await kvGet('journalSync')) || [];
-  journal.unshift(r);
-  await kvSet('journalSync', journal.slice(0, 100));
-  if (r.alertes.length) {
-    const al = (await kvGet('alertes')) || [];
-    r.alertes.forEach(a => al.unshift({ at: r.at, msg: a, vu: false }));
-    await kvSet('alertes', al.slice(0, 500));
-  }
-}
-
-/* Mise à jour envoyée au téléphone agents : uniquement si le superviseur est intervenu */
-function sigSnapshot(s) {
-  return { id: s.id, ref: s.ref, site: s.site, cat: s.cat, desc: s.desc, plaque: s.plaque, dests: s.dests, urgent: !!s.urgent, aggrave: !!s.aggrave, statut: s.statut, closLe: s.closLe || null, closPar: s.closPar || null, jour: s.jour, agent: s.agent, thumb: s.thumb || null, notesAgents: s.notesAgents || '', suivi: (s.suivi || []).map(v => ({ jour: v.jour, agent: v.agent, verdict: v.verdict, comment: v.comment })) };
-}
-async function buildEtat(withAck) {
-  const devs = (await kvGet('devs')) || {};
-  const lim = new Date(Date.now() - DECISIONS_JOURS * 86400000).toISOString();
-  const decisions = ((await kvGet('decisions')) || []).filter(d => d.ts >= lim);
-  const etat = { format: FMT_ETAT, v: 2, cree: new Date().toISOString(), cfg: agentCfgPayload(state.cfg), decisions };
-  if (withAck) etat.ack = Object.fromEntries(Object.entries(devs).map(([d, v]) => [d, v.seq]));
-  return etat;
-}
-async function pushEtats(force) {
-  const rs = await kvGet('relaySup');
-  if (!rs || !rs.url) return;
-  if (!force && !(await kvGet('etatDirty'))) return;
-  const devs = (await kvGet('devs')) || {};
-  const etat = await buildEtat(false);
-  const bytes = fflate.deflateSync(te.encode(JSON.stringify(etat)));
-  let n = 0;
-  for (const [dev, v] of Object.entries(devs)) {
-    if (!v.pub) continue;
-    const sealed = await sealBytesFor(await importPub(v.pub), bytes);
-    await relayCall(rs.url, { op: 'putEtat', tok: rs.supTok, dev, data: b64u.enc(sealed) }, 120000);
-    n++;
-  }
-  if (n) await kvSet('etatDirty', false);
-}
-async function marquerModifie() {
-  await kvSet('etatDirty', true);
-  syncNow();
+  // 2. Relève
+  const got = await pullAll(['p', 'd', 'n']);
+  await fold();
+  return { got };
 }
 
 async function supHome() {
   const sigs = await dbAll('sigs');
   const devs = (await kvGet('devs')) || {};
-  const rs = await kvGet('relaySup');
-  const lastSync = await kvGet('lastSupSync');
+  const lastSync = await kvGet('lastSync');
   const syncErr = await kvGet('syncErr');
-  const lastBackup = await kvGet('lastBackup');
-  const alertes = ((await kvGet('alertes')) || []).filter(a => !a.vu);
-  const journal = (await kvGet('journalSync')) || [];
+  const vues = new Set((await kvGet('alertesVues')) || []);
+  const alertes = ((await kvGet('alertes')) || []).filter(a => !vues.has(a.key));
   const ouverts = sigs.filter(s => s.statut === 'ouvert');
   const urg = ouverts.filter(s => s.urgent).length;
   const rondes = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 5);
-  const backupOld = !lastBackup || (Date.now() - new Date(lastBackup).getTime()) > 7 * 86400000;
-  const derniere = journal.find(j => j.importes);
-
+  const queue = (await kvGet('decQueue')) || [];
   return page('Rondes parkings', null,
-    !rs ? h('div', { class: 'banner warn' }, 'Transmission automatique non configurée.', h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Configurer')) : null,
-    rs ? h('div', { class: 'card' },
+    h('div', { class: 'card' },
       h('div', { class: 'stat' },
         h('span', null, state.sync.busy ? 'Relève en cours…' : lastSync ? `Relevé ${fmtQuand(lastSync)}` : 'Jamais relevé'),
-        h('button', { class: 'chip', style: 'width:auto', disabled: state.sync.busy, onclick: safe(async () => { const r = await syncNow(); toast(r && r.err ? 'Relève impossible : ' + r.err : r && r.offline ? 'Pas de réseau.' : r && r.fichiers ? `${r.rondes} ronde(s) et ${r.nouveauxSigs} signalement(s) reçus.` : 'Rien de nouveau.', !!(r && (r.err || r.offline))); render(); }) }, 'Actualiser')),
+        h('button', { class: 'chip', style: 'width:auto', disabled: state.sync.busy, onclick: safe(async () => { const r = await syncNow(); toast(r && r.err ? 'Relève impossible : ' + r.err : r && r.offline ? 'Pas de réseau.' : r && r.got ? `${r.got} élément(s) reçu(s).` : 'Rien de nouveau.', !!(r && (r.err || r.offline))); render(); }) }, 'Actualiser')),
       syncErr ? h('p', { class: 'muted small' }, 'Dernier essai : ' + syncErr.msg) : null,
-      derniere ? h('p', { class: 'muted small' }, `Dernière réception ${fmtQuand(derniere.at)} : ${derniere.rondes} ronde(s), ${derniere.nouveauxSigs} signalement(s), ${derniere.revues} constat(s).`) : null) : null,
+      queue.length ? h('p', { class: 'muted small' }, `${queue.length} intervention(s) en attente d’envoi.`) : null),
     alertes.length ? h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supAlertes') },
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
@@ -1240,18 +1236,15 @@ async function supHome() {
     h('div', { class: 'card' }, h('h2', null, 'Dernières rondes'),
       rondes.length ? rondes.map(rondeLigne) : h('p', { class: 'muted' }, 'Aucune ronde reçue.'),
       rondes.length ? h('button', { class: 'sec', onclick: () => go('supRondes') }, 'Toutes les rondes') : null),
-    h('div', { class: 'card' }, h('h2', null, 'Exports et sauvegarde'),
-      backupOld ? h('div', { class: 'banner warn' }, lastBackup ? `Dernière sauvegarde ${fmtQuand(lastBackup)}.` : 'Aucune sauvegarde.') : null,
+    h('div', { class: 'card' }, h('h2', null, 'Exports'),
       h('button', { class: 'sec', onclick: safe(supExcel) }, 'Excel complet (heures et positions)'),
-      h('button', { class: 'sec', onclick: safe(supBackup) }, 'Sauvegarde complète (.zip)'),
-      h('button', { class: 'sec', onclick: () => go('supCle') }, 'Clé de secours')),
+      h('button', { class: 'sec', onclick: safe(supArchive) }, 'Archive complète avec photos (.zip)')),
     h('div', { class: 'card' }, h('h2', null, 'Paramétrage'),
-      h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Transmission automatique'),
-      h('button', { class: 'sec', onclick: () => go('supQR') }, 'QR codes (parkings et configuration)'),
+      h('button', { class: 'sec', onclick: () => go('supQR') }, 'QR codes (parkings et téléphones agents)'),
       h('button', { class: 'sec', onclick: () => go('supConfig') }, 'Listes et coordonnées'),
-      h('button', { class: 'sec', onclick: () => go('supSecours') }, 'Secours : transmission par fichier')),
-    Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Téléphones connus'),
-      ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', null, d), h('span', { class: 'muted small' }, `saisie n° ${v.seq} — reçue ${fmtQuand(v.at)}`)))) : null,
+      h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Relais et appareils')),
+    Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Téléphones agents'),
+      ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', { style: 'white-space:nowrap;margin-right:8px' }, d), h('span', { class: 'muted small', style: 'text-align:right' }, `${v.seq} saisies — dernier envoi ${fmtQuand(v.at)}`)))) : null,
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
@@ -1263,171 +1256,26 @@ function rondeLigne(r) {
     h('div', { class: 'muted small' }, `${fmtDT(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${dur != null ? ` (${dur} min)` : ''} — ${r.nbSig} signalement(s), ${r.nbRevue} constat(s)`),
     anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null);
 }
-
 VIEWS.supAlertes = async () => {
   const al = (await kvGet('alertes')) || [];
+  const vues = new Set((await kvGet('alertesVues')) || []);
   const node = page('Points d’attention', { back: true },
-    h('p', { class: 'muted small' }, 'Contrôles automatiques à la réception : intégrité des saisies, démarrages sans QR, photos anciennes, absence de position.'),
-    al.length ? al.slice(0, 200).map(a => h('div', { class: 'card', style: a.vu ? '' : 'border-color:var(--warn)' }, h('div', { class: 'muted small' }, fmtDT(a.at)), h('div', null, a.msg)))
+    h('p', { class: 'muted small' }, 'Contrôles automatiques : intégrité des saisies, continuité des séries, démarrages sans QR, photos anciennes, absence de position.'),
+    al.length ? al.slice(0, 300).map(a => h('div', { class: 'card', style: vues.has(a.key) ? '' : 'border-color:var(--warn)' }, h('div', { class: 'muted small' }, fmtDT(a.at)), h('div', null, a.msg)))
       : h('p', { class: 'muted' }, 'Aucun.'));
-  if (al.some(a => !a.vu)) { al.forEach(a => a.vu = true); await kvSet('alertes', al); }
+  await kvSet('alertesVues', [...new Set([...vues, ...al.map(a => a.key)])].slice(-5000));
   return node;
 };
 
-/* ---------- Import d'un paquet (relais ou fichier) ---------- */
-async function importPaquetZip(zipBytes, rapport) {
-  const z = fflate.unzipSync(zipBytes);
-  if (!z['paquet.json']) throw new Error('paquet sans journal');
-  const paquet = JSON.parse(td.decode(z['paquet.json']));
-  if (paquet.format !== FMT_PAQUET) throw new Error('format de paquet inconnu');
-  const priv = await getPrivKey();
-  const devs = (await kvGet('devs')) || {};
-  const dv = devs[paquet.dev] || { seq: 0, hash: '0'.repeat(64) };
-  const evs = [...paquet.events].sort((a, b) => a.seq - b.seq);
-  let expSeq = dv.seq + 1, expPrev = dv.hash;
-  const sigsMap = new Map((await dbAll('sigs')).map(s => [s.id, s]));
-  const rondesMap = new Map((await dbAll('rondes')).map(r => [r.rid, r]));
-  const toStore = [], photosToStore = [];
-
-  for (const ev of evs) {
-    const k = `${paquet.dev}:${String(ev.seq).padStart(8, '0')}`;
-    const integ = [];
-    const { hash, ...rest } = ev;
-    if (await sha256hex(canon(rest)) !== hash) integ.push('empreinte invalide (saisie modifiée)');
-    if (ev.seq <= dv.seq) {
-      const prevStored = await dbGet('sup_events', k);
-      if (prevStored && prevStored.hash === hash) { rapport.dejaRecus++; continue; }
-      integ.push('saisie déjà reçue avec un contenu différent');
-    } else {
-      if (ev.seq !== expSeq) integ.push(`rupture : saisies ${expSeq} à ${ev.seq - 1} manquantes`);
-      else if (ev.prev !== expPrev) integ.push('chaînage rompu avec la saisie précédente');
-      expSeq = ev.seq + 1; expPrev = hash;
-    }
-    let dec = null;
-    try { dec = await unseal(priv, ev.sec); } catch (e) { integ.push('données chiffrées illisibles'); }
-    for (const p of ev.photos || []) {
-      const bytes = z[`photos/${p.id}.jpg`];
-      if (!bytes) { integ.push(`photo ${p.id.slice(0, 8)} absente`); continue; }
-      if (await sha256hex(bytes) !== p.sha) integ.push(`photo ${p.id.slice(0, 8)} modifiée`);
-      photosToStore.push({ id: p.id, blob: new Blob([bytes], { type: 'image/jpeg' }), sha: p.sha });
-    }
-    if (dec) {
-      if (dec.qr === false) integ.push('ronde démarrée sans QR code');
-      (dec.photoAges || []).forEach(a => { if (a.ageMin != null && a.ageMin > 15) integ.push(`photo ${a.id.slice(0, 8)} prise ${a.ageMin} min avant la saisie`); });
-      if (dec.geo && dec.geo.err && ev.t === 'ronde_debut') integ.push('position : ' + dec.geo.err);
-    }
-    const lieu = `${siteNom(ev.site)}, ${ev.agent || '?'}, ${fmtJour(ev.jour)}`;
-    integ.forEach(m => rapport.alertes.push(`${lieu} — saisie n° ${ev.seq} : ${m}`));
-    toStore.push({ k, ...ev, dec, integ });
-    rapport.importes++;
-    const ts = dec && dec.ts;
-
-    if (ev.t === 'signalement') {
-      if (!sigsMap.has(ev.data.id)) {
-        sigsMap.set(ev.data.id, {
-          id: ev.data.id, ref: ev.data.ref, site: ev.site, cat: ev.data.cat, desc: ev.data.desc, plaque: ev.data.plaque,
-          dests: ev.data.dests, urgent: ev.data.urgent, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
-          photos: (ev.photos || []).map(p => p.id), ts, geo: dec && dec.geo, dev: paquet.dev, seq: ev.seq,
-          suivi: [], journalDPMS: [], notes: '', notesAgents: ''
-        });
-        rapport.nouveauxSigs++;
-      }
-    } else if (ev.t === 'revue') {
-      const s = sigsMap.get(ev.data.sig);
-      if (s) {
-        s.suivi = s.suivi || [];
-        s.suivi.push({ jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => p.id), geo: dec && dec.geo });
-        // une intervention du DPMS postérieure au constat prévaut
-        if (!(s.lastSupTs && ts && ts < s.lastSupTs)) applyVerdict(s, ev.data.verdict, ts, ev.agent);
-        rapport.revues++;
-      } else rapport.alertes.push(`${lieu} — constat sur un signalement inconnu (${ev.data.ref})`);
-    }
-    if (ev.rid) {
-      const r = rondesMap.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: paquet.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, alertes: [] };
-      if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; rapport.rondes++; }
-      if (ev.t === 'ronde_fin') { r.fin = ts; }
-      if (ev.t === 'checklist') r.checklist = ev.data.items;
-      if (ev.t === 'signalement') r.nbSig++;
-      if (ev.t === 'revue') r.nbRevue++;
-      r.alertes.push(...integ);
-      rondesMap.set(ev.rid, r);
-    }
-  }
-  await dbPutMany('photos', photosToStore);
-  await dbPutMany('sup_events', toStore);
-  await dbPutMany('sigs', [...sigsMap.values()]);
-  await dbPutMany('rondes', [...rondesMap.values()]);
-  const last = toStore.filter(e => e.seq > dv.seq).pop();
-  const nd = { ...dv, pub: paquet.devPub || dv.pub || null, at: new Date().toISOString() };
-  if (last) { nd.seq = last.seq; nd.hash = last.hash; }
-  const nouveau = !devs[paquet.dev] || (!devs[paquet.dev].pub && nd.pub);
-  devs[paquet.dev] = nd;
-  await kvSet('devs', devs);
-  if (nouveau && nd.pub) await kvSet('etatDirty', true);   // premier contact : lui envoyer la configuration à jour
-}
-
-/* ---------- Secours par fichier ---------- */
-VIEWS.supSecours = async () => page('Secours par fichier', { back: true },
-  h('p', { class: 'muted' }, 'À utiliser seulement si le relais est indisponible.'),
-  h('button', {
-    onclick: safe(async () => {
-      const f = await pickFile('.rondes,.zip,application/octet-stream,application/zip');
-      if (!f) return;
-      showBusy('Vérification et déchiffrement…');
-      let bytes = new Uint8Array(await f.arrayBuffer());
-      if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) bytes = await unsealBytes(await getPrivKey(), bytes);
-      const rapport = nouveauRapport(); rapport.fichiers = 1;
-      await importPaquetZip(bytes, rapport);
-      await enregistrerRapport(rapport);
-      hideBusy();
-      toast(`${rapport.importes} saisie(s) importée(s)${rapport.alertes.length ? `, ${rapport.alertes.length} point(s) d’attention` : ''}.`);
-      go('home');
-    })
-  }, 'Importer un fichier des agents'),
-  h('button', {
-    class: 'sec', onclick: safe(async () => {
-      const etat = await buildEtat(true);
-      await shareOrDownload(new Blob([JSON.stringify(etat)], { type: 'application/json' }), `maj_rondes_${fileStamp()}.json`, 'Mise à jour rondes');
-    })
-  }, 'Préparer une mise à jour par fichier'));
-
-/* ---------- Transmission automatique : paramétrage ---------- */
-VIEWS.supRelais = async () => {
-  let rs = await kvGet('relaySup');
-  const url = h('input', { type: 'text', value: (rs && rs.url) || '', placeholder: 'https://script.google.com/macros/s/…/exec' });
-  const actif = !!(rs && rs.url);
-  return page('Transmission automatique', { back: true },
-    actif ? h('div', { class: 'banner ok' }, 'Relais actif.') : null,
-    h('div', { class: 'card' }, h('h2', null, 'Installation (une fois)'),
-      h('p', { class: 'small' }, '1. Avec un compte Google dédié au service, ouvrez script.google.com, créez un projet et collez le contenu du fichier relais.gs (fourni avec l’application).'),
-      h('p', { class: 'small' }, '2. Déployer → Nouveau déploiement → Application web. Exécuter en tant que : moi. Accès : tout le monde. Autorisez l’accès à Drive.'),
-      h('p', { class: 'small' }, '3. Copiez l’adresse de l’application web ci-dessous puis « Tester et activer ».'),
-      h('label', { class: 'f' }, 'Adresse du relais'), url,
-      h('button', {
-        class: 'ok', onclick: safe(async () => {
-          const u = url.value.trim();
-          if (!/^https:\/\/\S+$/.test(u) && !/^http:\/\/localhost[:/]/.test(u)) throw new Error('Adresse invalide.');
-          showBusy('Test du relais…');
-          rs = (await kvGet('relaySup')) || {};
-          const supTok = rs.supTok || randCode(32), agentTok = rs.agentTok || randCode(32);
-          await relayCall(u, { op: 'init', supTok, agentTok });
-          await relayCall(u, { op: 'ping', tok: supTok });
-          await kvSet('relaySup', { url: u, supTok, agentTok });
-          state.cfg.relay = { url: u, agentTok };
-          state.cfg.cfgId = randCode(8);
-          await kvSet('cfg', state.cfg);
-          await kvSet('etatDirty', true);
-          hideBusy();
-          toast('Relais activé.');
-          go('supRelaisOk');
-        })
-      }, 'Tester et activer')),
-    h('p', { class: 'muted small' }, 'Le relais ne reçoit que des données chiffrées, qu’il ne peut pas lire. Il les supprime dès que votre téléphone les a relevées.'));
-};
-VIEWS.supRelaisOk = async () => page('Relais activé', { back: true },
-  h('div', { class: 'banner ok' }, 'Dernière étape : le téléphone des agents doit connaître le relais.'),
-  h('p', null, 'Sur le téléphone des agents, scannez une dernière fois le QR de configuration. Ensuite, les rondes arrivent seules.'),
-  h('button', { onclick: () => go('supQR') }, 'Afficher le QR de configuration'));
+/* ---------- Relais et appareils ---------- */
+VIEWS.supRelais = async () => page('Relais et appareils', { back: true },
+  h('div', { class: 'card' }, h('h2', null, 'Adresse du relais'), h('p', { class: 'small', style: 'word-break:break-all' }, state.conn.url)),
+  h('div', { class: 'card' }, h('h2', null, 'Ajouter un appareil'),
+    h('p', { class: 'small' }, h('b', null, 'Superviseur (téléphone ou ordinateur) : '), 'ouvrir l’application → « Ajouter cet appareil comme superviseur » → adresse ci-dessus + phrase de passe.'),
+    h('p', { class: 'small' }, h('b', null, 'Téléphone agents : '), 'ouvrir l’application → scanner le QR de configuration (menu « QR codes »).'),
+    h('p', { class: 'small muted' }, 'Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur le relais.')),
+  h('div', { class: 'card' }, h('h2', null, 'Repartir de zéro'),
+    h('p', { class: 'small' }, 'Dans l’éditeur Apps Script du relais : choisir la fonction « reinitialiserRelais » dans la barre d’outils, cliquer sur « Exécuter ». Tout le contenu du relais est mis à la corbeille du compte Google. Réinitialiser ensuite chaque appareil (Réglages), puis activer un relais neuf.')));
 
 /* ---------- Liste et fiche des signalements ---------- */
 VIEWS.supSigs = async ({ f = 'ouvert', site = '' }) => {
@@ -1451,35 +1299,42 @@ function geoLink(geo) {
   return h('a', { href: `https://www.openstreetmap.org/?mlat=${geo.lat}&mlon=${geo.lon}#map=19/${geo.lat}/${geo.lon}`, target: '_blank', rel: 'noopener' },
     `${geo.lat}, ${geo.lon} (± ${geo.acc} m)`);
 }
-async function photoImgs(ids) {
+/* Photos : téléchargées à la demande depuis le relais, vérifiées, conservées sur l'appareil */
+async function fetchMedia(n, wanted) {
+  const r = await rel('media', { n }, 180000);
+  const z = fflate.unzipSync(await teamDec(b64u.dec(r.data)));
   const out = [];
-  for (const id of ids || []) {
-    const p = await dbGet('photos', id);
-    if (p) out.push(h('img', { class: 'photo-full', src: URL.createObjectURL(p.blob), alt: 'Photo' }));
+  for (const [name, bytes] of Object.entries(z)) {
+    const id = name.replace(/\.jpg$/, '');
+    const sha = await sha256hex(bytes);
+    out.push({ id, blob: new Blob([bytes], { type: 'image/jpeg' }), sha, ok: !wanted || !wanted[id] || wanted[id] === sha });
+  }
+  await dbPutMany('photos', out);
+  return out;
+}
+async function photoBlocks(list) {
+  const out = [];
+  const missing = new Map();
+  for (const p of list || []) { const c = await dbGet('photos', p.id); if (!c && p.n) missing.set(p.n, true); }
+  for (const n of missing.keys()) { try { await fetchMedia(n); } catch (e) { out.push(h('p', { class: 'muted small' }, 'Photos indisponibles : ' + e.message)); } }
+  for (const p of list || []) {
+    const c = await dbGet('photos', p.id);
+    if (!c) continue;
+    if (p.sha && c.sha !== p.sha) out.push(h('div', { class: 'banner bad' }, 'Photo modifiée après la saisie (empreinte différente).'));
+    out.push(h('img', { class: 'photo-full', src: URL.createObjectURL(c.blob), alt: 'Photo' }));
   }
   return out;
 }
-/* Intervention ponctuelle du superviseur : enregistrée et renvoyée aux agents */
-async function supDecision(s, action) {
-  const ts = new Date().toISOString();
-  if (!s.thumb && s.photos && s.photos[0]) { const p = await dbGet('photos', s.photos[0]); if (p) s.thumb = await thumbFromBlob(p.blob); }
-  s.lastSupTs = ts;
-  s.journalDPMS = s.journalDPMS || [];
-  s.journalDPMS.push({ ts, action });
-  await dbPut('sigs', s);
-  const decs = (await kvGet('decisions')) || [];
-  decs.push({ id: uuid(), ts, action, sig: sigSnapshot(s) });
-  const lim = new Date(Date.now() - DECISIONS_JOURS * 86400000).toISOString();
-  await kvSet('decisions', decs.filter(d => d.ts >= lim));
-  await marquerModifie();
+async function supDecision(s, action, patch) {
+  await queueDec('d', { type: 'sig', id: uuid(), ts: new Date().toISOString(), par: 'DPMS', action, sig: s.id, patch });
+  await fold();
+  syncNow();     // l'état local est déjà à jour : pas de rafraîchissement d'écran (il effacerait une saisie en cours)
 }
 VIEWS.supSig = async ({ id, edit }) => {
   const s = await dbGet('sigs', id);
   if (!s) return page('Signalement', { back: true }, h('p', null, 'Introuvable.'));
   const back = () => go('supSigs', { f: s.statut });
-  const notes = h('textarea', { value: s.notes || '', placeholder: 'Notes internes DPMS (non transmises aux agents)' });
   const done = (msg) => { toast(msg); go('supSig', { id }, { noPush: true, keepScroll: true }); };
-
   if (edit) {
     const cat = h('select', null, ...state.cfg.cats.map(c => h('option', { value: c, selected: c === s.cat ? true : null }, c)));
     const desc = h('textarea', { value: s.desc || '' });
@@ -1501,20 +1356,19 @@ VIEWS.supSig = async ({ id, edit }) => {
       h('label', { class: 'f' }, 'Message affiché aux agents'), msg,
       h('button', {
         class: 'ok', onclick: safe(async () => {
-          Object.assign(s, { cat: cat.value, desc: desc.value.trim(), plaque: plaque.value.trim().toUpperCase(), dests: [...dests], urgent, notesAgents: msg.value.trim() });
-          await supDecision(s, 'modification');
-          done('Modifié. Transmis au téléphone des agents.');
+          await supDecision(s, 'modification', { cat: cat.value, desc: desc.value.trim(), plaque: plaque.value.trim().toUpperCase(), dests: [...dests], urgent, notesAgents: msg.value.trim() });
+          done('Modifié. Transmis aux agents.');
         })
       }, 'Enregistrer et transmettre aux agents'));
   }
-
+  const notes = h('textarea', { value: s.notes || '', placeholder: 'Notes internes DPMS (lisibles par les seuls superviseurs)' });
   const suivi = [];
   for (const v of s.suivi || []) {
     suivi.push(h('div', { class: 'card' },
       h('div', null, h('b', null, VERDICTS[v.verdict] || v.verdict), ` — ${v.ts ? fmtDT(v.ts) : fmtJour(v.jour)} — ${v.agent || ''}`),
       v.comment ? h('p', null, v.comment) : null,
       h('div', { class: 'small' }, 'Position : ', geoLink(v.geo)),
-      ...(await photoImgs(v.photos))));
+      ...(await photoBlocks(v.photos))));
   }
   return page(`Signalement ${s.ref}`, { back },
     h('div', { class: 'card' },
@@ -1525,20 +1379,20 @@ VIEWS.supSig = async ({ id, edit }) => {
         h('dt', null, 'Position'), h('dd', null, geoLink(s.geo)),
         h('dt', null, 'À signaler à'), h('dd', null, (s.dests || []).join(', ')),
         s.plaque ? [h('dt', null, 'Plaque'), h('dd', null, s.plaque)] : null,
-        s.statut === 'clos' ? [h('dt', null, 'Clos'), h('dd', null, `${fmtDT(s.closLe)}${s.closPar ? ' par ' + s.closPar : ''}`)] : null,
+        s.statut === 'clos' ? [h('dt', null, 'Clos'), h('dd', null, `${s.closLe && s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)}${s.closPar ? ' par ' + s.closPar : ''}`)] : null,
         s.notesAgents ? [h('dt', null, 'Message aux agents'), h('dd', null, s.notesAgents)] : null),
       s.desc ? h('p', null, s.desc) : null,
-      ...(await photoImgs(s.photos))),
+      ...(await photoBlocks(s.photos))),
     suivi.length ? h('h2', { style: 'font-size:16px;color:var(--navy)' }, 'Constats des agents') : null, ...suivi,
     h('div', { class: 'card' }, h('h2', null, 'Intervenir (facultatif)'),
-      h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement au téléphone des agents.'),
+      h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement aux téléphones des agents et aux autres superviseurs.'),
       s.statut !== 'clos'
-        ? h('button', { class: 'ok', onclick: safe(async () => { if (!confirm('Clôturer ce signalement ?')) return; s.statut = 'clos'; s.closLe = new Date().toISOString(); s.closPar = 'DPMS'; await supDecision(s, 'clôture'); done('Clos. Transmis aux agents.'); }) }, 'Clôturer')
-        : h('button', { class: 'sec', onclick: safe(async () => { s.statut = 'ouvert'; s.closLe = null; s.closPar = null; await supDecision(s, 'réouverture'); done('Rouvert. Transmis aux agents.'); }) }, 'Rouvrir'),
+        ? h('button', { class: 'ok', onclick: safe(async () => { if (!confirm('Clôturer ce signalement ?')) return; await supDecision(s, 'clôture', { statut: 'clos', closLe: new Date().toISOString(), closPar: 'DPMS' }); done('Clos. Transmis aux agents.'); }) }, 'Clôturer')
+        : h('button', { class: 'sec', onclick: safe(async () => { await supDecision(s, 'réouverture', { statut: 'ouvert', closLe: null, closPar: null }); done('Rouvert. Transmis aux agents.'); }) }, 'Rouvrir'),
       h('button', { class: 'sec', onclick: () => go('supSig', { id, edit: true }, { noPush: true }) }, 'Modifier ou écrire aux agents'),
-      s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { s.plaque = ''; await supDecision(s, 'effacement de la plaque'); done('Plaque effacée.'); } }) }, 'Effacer la plaque (dossier traité)') : null),
+      s.plaque && s.statut === 'clos' ? h('button', { class: 'link', onclick: safe(async () => { if (confirm('Effacer la plaque de ce signalement clos ?')) { await supDecision(s, 'effacement de la plaque', { plaque: '' }); done('Plaque effacée.'); } }) }, 'Effacer la plaque (dossier traité)') : null),
     h('div', { class: 'card' }, h('h2', null, 'Notes internes'), notes,
-      h('button', { class: 'sec', onclick: safe(async () => { s.notes = notes.value; await dbPut('sigs', s); toast('Notes enregistrées.'); }) }, 'Enregistrer les notes')),
+      h('button', { class: 'sec', onclick: safe(async () => { await queueDec('n', { type: 'note', ts: new Date().toISOString(), sig: s.id, text: notes.value }); await fold(); syncNow(); toast('Notes enregistrées.'); }) }, 'Enregistrer les notes')),
     (s.journalDPMS || []).length ? h('div', { class: 'card' }, h('h2', null, 'Interventions DPMS'),
       ...s.journalDPMS.map(j => h('p', { class: 'small' }, `${fmtDT(j.ts)} — ${j.action}`))) : null);
 };
@@ -1547,22 +1401,24 @@ VIEWS.supSig = async ({ id, edit }) => {
 VIEWS.supRondes = async () => {
   const rs = (await dbAll('rondes')).sort((a, b) => (b.debut || '').localeCompare(a.debut || '')).slice(0, 300);
   return page('Rondes', { back: true },
-    rs.length ? rs.map(r => h('div', { class: 'card' }, rondeLigne(r), h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut))))
+    rs.length ? rs.map(r => h('div', { class: 'card' }, rondeLigne(r), h('div', { class: 'small' }, 'Position au départ : ', geoLink(r.geoDebut)),
+      r.alertes && r.alertes.length ? h('div', { class: 'small', style: 'color:var(--warn)' }, [...new Set(r.alertes)].join(' ; ')) : null))
       : h('p', { class: 'muted' }, 'Aucune ronde reçue.'));
 };
 
-/* ---------- Excel complet (superviseur) ---------- */
+/* ---------- Excel complet ---------- */
 async function supExcel() {
   showBusy('Construction du classeur…');
   const sigs = (await dbAll('sigs')).sort((a, b) => (a.ts || a.jour || '').localeCompare(b.ts || b.jour || ''));
   const rondes = (await dbAll('rondes')).sort((a, b) => (a.debut || '').localeCompare(b.debut || ''));
-  const evs = (await dbAll('sup_events')).sort((a, b) => a.k.localeCompare(b.k));
+  const evs = (await dbAll('entries')).filter(e => e.kind === 'ev').sort((a, b) => a.k.localeCompare(b.k));
   const g = (geo, k) => geo && !geo.err && geo[k] != null ? geo[k] : '';
   const A1 = [['Réf.', 'Parking', 'Catégorie', 'Description', 'Plaque', 'Destinataires', 'Urgent', 'Aggravé', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Message aux agents', 'Notes DPMS']];
   sigs.forEach(s => {
     const last = (s.suivi || []).slice(-1)[0];
     A1.push([s.ref, siteNom(s.site), s.cat, s.desc, s.plaque || '', (s.dests || []).join(', '), s.urgent ? 'Oui' : '', s.aggrave ? 'Oui' : '', STATUTS[s.statut] || s.statut, s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent || '',
-      g(s.geo, 'lat'), g(s.geo, 'lon'), g(s.geo, 'acc'), (s.photos || []).length, last ? VERDICTS[last.verdict] : '', last ? (last.ts ? fmtDT(last.ts) : fmtJour(last.jour)) : '', s.closLe ? fmtDT(s.closLe) : '', s.closPar || '', s.notesAgents || '', s.notes || '']);
+      g(s.geo, 'lat'), g(s.geo, 'lon'), g(s.geo, 'acc'), (s.photos || []).length, last ? VERDICTS[last.verdict] : '', last ? (last.ts ? fmtDT(last.ts) : fmtJour(last.jour)) : '',
+      s.closLe ? (s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)) : '', s.closPar || '', s.notesAgents || '', s.notes || '']);
   });
   const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Démarrage par QR', 'Anomalies check-list', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
   rondes.forEach(r => {
@@ -1571,70 +1427,60 @@ async function supExcel() {
     A2.push([siteNom(r.site), r.agent, fmtDT(r.debut), fmtDT(r.fin), dur, r.qr === false ? 'Non' : 'Oui', anos, r.nbSig, r.nbRevue, g(r.geoDebut, 'lat'), g(r.geoDebut, 'lon'), g(r.geoDebut, 'acc'), [...new Set(r.alertes || [])].join(' ; '), r.dev]);
   });
   const TYPES = { ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', checklist: 'Check-list', signalement: 'Signalement', revue: 'Constat de suivi' };
-  const A3 = [['Téléphone', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Intégrité']];
+  const A3 = [['Téléphone', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Reçu par le relais', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Empreinte']];
   evs.forEach(e => {
-    let det = '';
-    if (e.t === 'signalement') det = `${e.data.ref} ${e.data.cat}${e.data.desc ? ' — ' + e.data.desc : ''}`;
-    if (e.t === 'revue') det = `${e.data.ref} : ${VERDICTS[e.data.verdict]}${e.data.comment ? ' — ' + e.data.comment : ''}`;
-    if (e.t === 'checklist') det = Object.entries(e.data.items || {}).map(([k, v]) => `${k} : ${v}`).join(' ; ');
-    if (e.t === 'ronde_debut') det = e.data.qr ? 'QR scanné' : 'sans QR';
-    if (e.t === 'ronde_fin') det = `${e.data.nbSig} signalement(s)`;
+    const ev = e.ev; let det = '';
+    if (ev.t === 'signalement') det = `${ev.data.ref} ${ev.data.cat}${ev.data.desc ? ' — ' + ev.data.desc : ''}`;
+    if (ev.t === 'revue') det = `${ev.data.ref} : ${VERDICTS[ev.data.verdict]}${ev.data.comment ? ' — ' + ev.data.comment : ''}`;
+    if (ev.t === 'checklist') det = Object.entries(ev.data.items || {}).map(([k, v]) => `${k} : ${v}`).join(' ; ');
+    if (ev.t === 'ronde_debut') det = ev.data.qr ? 'QR scanné' : 'sans QR';
+    if (ev.t === 'ronde_fin') det = `${ev.data.nbSig} signalement(s)`;
     const geo = e.dec && e.dec.geo;
-    A3.push([e.dev, e.seq, TYPES[e.t] || e.t, fmtJour(e.jour), e.dec ? fmtDT(e.dec.ts) : 'illisible', siteNom(e.site), e.agent || '', det, g(geo, 'lat'), g(geo, 'lon'), g(geo, 'acc'), g(geo, 'age'), (e.integ || []).length ? e.integ.join(' ; ') : 'OK']);
+    A3.push([ev.dev, ev.seq, TYPES[ev.t] || ev.t, fmtJour(ev.jour), e.dec ? fmtDT(e.dec.ts) : 'illisible', fmtDT(e.at), siteNom(ev.site), ev.agent || '', det, g(geo, 'lat'), g(geo, 'lon'), g(geo, 'acc'), g(geo, 'age'), e.hashOk ? 'OK' : 'INVALIDE']);
   });
   const wb = XLSX.utils.book_new();
   const add = (aoa, name, widths) => { const ws = XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = widths.map(w => ({ wch: w })); ws['!autofilter'] = { ref: ws['!ref'] }; XLSX.utils.book_append_sheet(wb, ws, name); };
   add(A1, 'Signalements', [11, 12, 24, 50, 12, 28, 8, 8, 10, 16, 12, 11, 11, 10, 7, 16, 16, 16, 12, 30, 40]);
   add(A2, 'Rondes', [12, 12, 16, 16, 10, 10, 30, 12, 10, 11, 11, 10, 40, 10]);
-  add(A3, 'Journal', [10, 6, 16, 11, 16, 12, 12, 50, 11, 11, 10, 10, 40]);
+  add(A3, 'Journal', [10, 6, 16, 11, 16, 16, 12, 12, 50, 11, 11, 10, 10, 10]);
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   hideBusy();
   await shareOrDownload(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `rondes_parkings_complet_${fileStamp()}.xlsx`, 'Rondes parkings');
 }
-
-/* ---------- Sauvegarde et clé de secours ---------- */
-async function supBackup() {
-  showBusy('Sauvegarde…');
-  const dump = {
-    format: FMT_SAUVEGARDE, v: 2, app: APP_VERSION, cree: new Date().toISOString(),
-    cfg: state.cfg, devs: (await kvGet('devs')) || {}, relaySup: (await kvGet('relaySup')) || null,
-    decisions: (await kvGet('decisions')) || [],
-    cle: { format: FMT_CLE, privEnc: await kvGet('privEnc') },
-    sigs: await dbAll('sigs'), events: await dbAll('sup_events'), rondes: await dbAll('rondes')
-  };
-  const files = { 'sauvegarde.json': te.encode(JSON.stringify(dump)) };
+/* ---------- Archive complète (pour versement sur un stockage de la Ville) ---------- */
+async function supArchive() {
+  showBusy('Téléchargement des photos…');
+  const entries = (await dbAll('entries')).filter(e => e.kind === 'ev' && e.media);
+  const ns = [...new Set(entries.map(e => e.n))];
+  for (const n of ns) {
+    const ids = entries.filter(e => e.n === n).flatMap(e => e.ev.photos.map(p => p.id));
+    let have = true; for (const id of ids) if (!(await dbGet('photos', id))) { have = false; break; }
+    if (!have) await fetchMedia(n);
+  }
+  showBusy('Construction de l’archive…');
+  const dump = { format: 'rondes-cachan-archive', v: 2, app: APP_VERSION, cree: new Date().toISOString(), cfg: state.cfg, sigs: await dbAll('sigs'), rondes: await dbAll('rondes'), journal: (await dbAll('entries')).map(e => ({ ...e })) };
+  const files = { 'archive.json': te.encode(JSON.stringify(dump, null, 1)) };
   for (const p of await dbAll('photos')) files[`photos/${p.id}.jpg`] = [new Uint8Array(await p.blob.arrayBuffer()), { level: 0 }];
   const zip = fflate.zipSync(files);
-  await kvSet('lastBackup', new Date().toISOString());
   hideBusy();
-  await shareOrDownload(new Blob([zip], { type: 'application/zip' }), `sauvegarde_rondes_${fileStamp()}.zip`, 'Sauvegarde rondes');
-  toast('Versez ce fichier sur un stockage de la Ville (OneDrive professionnel, lecteur réseau).');
+  await shareOrDownload(new Blob([zip], { type: 'application/zip' }), `archive_rondes_${fileStamp()}.zip`, 'Archive rondes');
+  toast('Archive en clair : à verser uniquement sur un stockage de la Ville.');
 }
-VIEWS.supCle = async ({ first } = {}) => page('Clé de secours', { back: true },
-  first ? h('div', { class: 'banner ok' }, 'Superviseur créé. Étape suivante : la clé de secours.') : null,
-  h('div', { class: 'card' },
-    h('p', null, 'Sans cette clé, si ce téléphone est perdu ou réinitialisé, aucune donnée transmise ne pourra plus être lue.'),
-    h('p', { class: 'muted' }, 'Le fichier est chiffré par votre phrase de passe. Conservez-le sur un stockage de la Ville et remettez la phrase de passe sous pli fermé à la DGS.'),
-    h('button', {
-      onclick: safe(async () => {
-        const cle = { format: FMT_CLE, v: 1, cree: new Date().toISOString(), privEnc: await kvGet('privEnc'), cfg: state.cfg, relaySup: (await kvGet('relaySup')) || null };
-        await shareOrDownload(new Blob([JSON.stringify(cle)], { type: 'application/json' }), 'cle_secours_rondes.json', 'Clé de secours rondes');
-      })
-    }, 'Télécharger la clé de secours')),
-  first ? h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Continuer : transmission automatique') : null);
 
 /* ---------- QR codes ---------- */
 function qrSvg(text, ecc = 'M') {
   const q = qrcode(0, ecc); q.addData(text, 'Byte'); q.make();
   return q.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
 }
-VIEWS.supQR = async () => {
-  const cfgURL = appBaseURL() + '#cfg=' + packCfg(state.cfg);
+VIEWS.supQR = async ({ first } = {}) => {
+  const joinURL = appBaseURL() + '#join=' + packJoin(state.conn);
   const show = h('div', { class: 'qr' });
   return page('QR codes', { back: true },
-    h('div', { class: 'card' }, h('h2', null, 'Configuration du téléphone agents'),
-      h('p', { class: 'muted small' }, 'À scanner avec l’appareil photo du téléphone agents. Nécessaire à l’installation et après l’activation du relais ; ensuite, les modifications de listes lui parviennent seules.'),
-      h('button', { onclick: () => { show.innerHTML = qrSvg(cfgURL, 'L'); } }, 'Afficher le QR de configuration'), show),
+    first ? h('div', { class: 'banner ok' }, 'Relais activé. Étapes suivantes : saisir les prénoms des agents (Listes et coordonnées), imprimer les QR des parkings, configurer le téléphone des agents.') : null,
+    h('div', { class: 'card' }, h('h2', null, 'Configuration des téléphones agents'),
+      h('p', { class: 'muted small' }, 'À scanner une fois avec l’appareil photo de chaque téléphone agents. Les modifications de listes leur parviennent ensuite seules.'),
+      h('button', { onclick: () => { show.innerHTML = qrSvg(joinURL, 'L'); } }, 'Afficher le QR de configuration'), show,
+      h('p', { class: 'muted small' }, 'Ce QR donne accès aux signalements de l’équipe : ne le diffusez pas.')),
     h('div', { class: 'card' }, h('h2', null, 'Parkings'),
       h('p', { class: 'muted small' }, 'Un QR par parking, à afficher à l’entrée, plastifié, hors de portée. Scanné à l’arrivée, il démarre la ronde.'),
       ...state.cfg.sites.map(s => h('div', { class: 'stat' }, h('span', null, s.nom), h('span', { class: 'muted small' }, 'code ' + s.token.slice(0, 4) + '…'))),
@@ -1642,8 +1488,9 @@ VIEWS.supQR = async () => {
       h('button', {
         class: 'link', onclick: safe(async () => {
           if (!confirm('Générer de nouveaux codes ? Les QR affichés dans les parkings ne fonctionneront plus.')) return;
-          state.cfg.sites.forEach(s => s.token = randCode(10)); state.cfg.cfgId = randCode(8);
-          await kvSet('cfg', state.cfg); await marquerModifie();
+          const cfg = JSON.parse(JSON.stringify(state.cfg));
+          cfg.sites.forEach(s => s.token = randCode(10)); cfg.cfgId = randCode(8);
+          await publishCfg(cfg);
           toast('Nouveaux codes générés : réimprimez les QR.'); render();
         })
       }, 'Régénérer les codes (QR perdu ou copié)')));
@@ -1660,10 +1507,15 @@ function printSiteQR() {
   }));
   setTimeout(() => window.print(), 100);
 }
+async function publishCfg(cfg) {
+  state.cfg = cfg; await kvSet('cfg', cfg);
+  await queueDec('d', { type: 'cfg', ts: new Date().toISOString(), cfg });
+  syncNow();
+}
 
 /* ---------- Listes et coordonnées ---------- */
 VIEWS.supConfig = async () => {
-  const c = state.cfg;
+  const c = JSON.parse(JSON.stringify(state.cfg));
   const ta = (lines) => h('textarea', { value: lines.join('\n'), style: 'min-height:140px' });
   const tAgents = ta(c.agents), tDests = ta(c.dests), tCats = ta(c.cats);
   const tChk = ta(c.checklist.map(x => `${x.lbl} | ${x.cat}`));
@@ -1672,7 +1524,7 @@ VIEWS.supConfig = async () => {
   const mail = h('input', { type: 'email', value: c.urgenceMail || '', placeholder: 'prenom.nom@ville-cachan.fr' });
   const lines = t => t.value.split('\n').map(x => x.trim()).filter(Boolean);
   return page('Listes et coordonnées', { back: true },
-    h('div', { class: 'banner info' }, 'Les modifications sont transmises automatiquement au téléphone des agents.'),
+    h('div', { class: 'banner info' }, 'Les modifications sont transmises automatiquement à tous les appareils.'),
     h('label', { class: 'f' }, 'Noms des parkings'), ...sitesInputs,
     h('label', { class: 'f' }, 'Agents (un par ligne)'), tAgents,
     h('label', { class: 'f' }, 'Destinataires (un par ligne)'), tDests,
@@ -1687,9 +1539,8 @@ VIEWS.supConfig = async () => {
         if (!lines(tAgents).length || !lines(tDests).length || !cats.length) throw new Error('Listes vides.');
         sitesInputs.forEach((i, k) => { if (i.value.trim()) c.sites[k].nom = i.value.trim(); });
         Object.assign(c, { agents: lines(tAgents), dests: lines(tDests), cats, checklist: chk, urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
-        await kvSet('cfg', c);
-        await marquerModifie();
-        toast('Enregistré. Transmis au téléphone des agents.');
+        await publishCfg(c);
+        toast('Enregistré. Transmis à tous les appareils.');
         go('home');
       })
     }, 'Enregistrer'));
@@ -1706,10 +1557,13 @@ async function boot() {
   }
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
   state.mode = (await kvGet('mode')) || null;
+  state.conn = (await kvGet('conn')) || null;
   state.cfg = (await kvGet('cfg')) || null;
+  state.priv = state.mode === 'superviseur' ? await kvGet('privKey') : null;
+  if (state.mode && !state.conn) { state.mode = null; }
   if (state.mode === 'agent' && (await kvGet('ronde'))) Geo.start();
   const hash = location.hash;
-  if (hash && /^#(cfg|site)=/.test(hash)) {
+  if (hash && /^#(join|site)=/.test(hash)) {
     history.replaceState(null, '', location.pathname + location.search);
     await handleLink(hash, false);
     if (state.view === 'home') render();
@@ -1718,7 +1572,7 @@ async function boot() {
 }
 window.addEventListener('hashchange', () => {
   const hash = location.hash;
-  if (hash && /^#(cfg|site)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
+  if (hash && /^#(join|site)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
 });
 window.addEventListener('online', () => { if (state.mode) syncNow().then(refreshIfHome); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); });

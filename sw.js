@@ -1,6 +1,6 @@
 /* Service worker : met l'application en cache pour un fonctionnement hors réseau.
  * Il ne voit passer aucune donnée de ronde (tout est en base locale). */
-const CACHE = 'rondes-cachan-1.1.0';
+const CACHE = 'rondes-cachan-1.2.0';
 const ASSETS = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png',
   './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js'];
 self.addEventListener('install', e => {
