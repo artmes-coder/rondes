@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -255,7 +255,9 @@ async function relayCall(url, body, timeoutMs = 60000) {
   if (!j.ok) {
     const msg = j.err === 'deja-initialise' ? 'Ce relais est déjà activé par un superviseur.'
       : j.err === 'aucun superviseur enregistré' ? 'Ce relais a été activé, mais l’activation n’est pas allée à son terme (aucune clé enregistrée). Réinitialisez le relais (fonction reinitialiserRelais), puis activez-le à nouveau.'
-        : 'relais : ' + (j.err || 'refus');
+        : j.err === 'relais non initialisé' ? 'Le relais a été remis à zéro. Cet appareil doit être reconfiguré : Réglages → Réinitialiser cet appareil, puis configuration (superviseur : « activer un relais neuf » ; téléphones : nouveau QR).'
+          : j.err === 'accès refusé' ? 'Le relais a été réactivé avec de nouveaux codes. Cet appareil doit être reconfiguré : Réglages → Réinitialiser cet appareil, puis nouveau QR ou « Ajouter cet appareil comme superviseur ».'
+            : 'relais : ' + (j.err || 'refus');
     const e = new Error(msg); e.code = j.err; throw e;
   }
   return j;
