@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web hors ligne pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.2.
+Application web hors ligne pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.3.
 
 **Principe.** L'outil appartient aux agents : ils font leurs rondes, signalent, suivent et clôturent eux-mêmes leurs signalements. À la fin de chaque ronde, tout part automatiquement vers un relais, qui conserve un journal chiffré commun. Chaque appareil reconstitue l'état à partir de ce journal :
 
@@ -14,7 +14,7 @@ Les interventions du superviseur (clôturer, rouvrir, modifier, écrire aux agen
 
 | Donnée | Lisible par |
 |---|---|
-| Signalements, constats, photos, configuration, messages aux agents | téléphones agents et superviseurs (clé d'équipe) |
+| Signalements, constats, photos, barrières, comptages, observations PM, configuration, messages aux agents | téléphones agents, police municipale et superviseurs (clé d'équipe) |
 | Heure exacte et position de chaque saisie, notes internes DPMS | superviseurs seuls (clé superviseur) |
 | Clés du superviseur (« coffre ») | quiconque connaît la **phrase de passe superviseur** |
 
@@ -24,7 +24,7 @@ Les interventions du superviseur (clôturer, rouvrir, modifier, écrire aux agen
 
 Dépôt GitHub public `rondes`, publié par GitHub Pages (gratuit pour un dépôt public ; seul le programme est public) : `https://<compte>.github.io/rondes/`.
 
-Pour une mise à jour : **Add file → Upload files**, glisser le **contenu** du dossier (pas le dossier lui-même), puis **Commit changes**. Sur chaque appareil, la nouvelle version s'installe à la deuxième ouverture avec réseau. Le numéro de version figure en bas de l'accueil.
+Pour une mise à jour : **Add file → Upload files**, glisser le **contenu** du dossier (pas le dossier lui-même), puis **Commit changes**. Depuis la 1.3, chaque appareil charge toujours la dernière version publiée dès qu'il a du réseau (la page se recharge d'elle-même à la première ouverture) ; sans réseau, il utilise sa copie locale. Le numéro de version figure en bas de l'accueil.
 
 ## 2. Relais (une fois, gratuit)
 
@@ -37,7 +37,7 @@ Pour une mise à jour : **Add file → Upload files**, glisser le **contenu** du
    - **Déployer → Autoriser l'accès**. Au message « Google n'a pas validé cette application » : **Paramètres avancés → Accéder à … (non sécurisé) → Autoriser**.
 3. Copier l'**URL de l'application Web** (elle se termine par `/exec`).
 
-**Mettre à jour le script du relais sans changer d'adresse** : coller le nouveau code, enregistrer, puis **Déployer → Gérer les déploiements → crayon → Version : Nouvelle version → Déployer**. Créer un *nouveau* déploiement change l'adresse ; archiver un déploiement n'efface rien.
+**Version 1.3 : le script du relais doit être mis à jour** (photos en grand pour la police municipale). **Mettre à jour le script du relais sans changer d'adresse** : coller le nouveau code, enregistrer, puis **Déployer → Gérer les déploiements → crayon → Version : Nouvelle version → Déployer**. Créer un *nouveau* déploiement change l'adresse ; archiver un déploiement n'efface rien.
 
 **Repartir de zéro** : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la liste de la barre d'outils, puis cliquer sur **Exécuter**. Les codes d'accès sont effacés et tout le contenu du relais part à la corbeille du compte Google. Ces codes sont enregistrés dans le projet lui-même : redéployer ne suffit pas à les effacer. Réinitialiser ensuite chaque appareil (Réglages).
 
@@ -52,19 +52,36 @@ Pour une mise à jour : **Add file → Upload files**, glisser le **contenu** du
 ## 4. Ajouter un appareil
 
 - **Superviseur supplémentaire** (ordinateur de bureau, autre téléphone) : ouvrir l'application → **Ajouter cet appareil comme superviseur** → adresse du relais + phrase de passe. L'adresse figure dans les Réglages de tout appareil configuré.
-- **Téléphone agents** (un ou plusieurs) : ouvrir l'application → **Scanner le QR de configuration**, affiché par un superviseur (menu **QR codes**). Autoriser la position et l'appareil photo à la première ronde. Ce QR donne accès aux signalements de l'équipe : ne pas le diffuser.
+- **Téléphone agents** (un ou plusieurs) : ouvrir l'application → **Scanner un QR de configuration** → QR « Téléphones des agents », affiché par un superviseur (menu **QR codes**). Autoriser la position et l'appareil photo à la première ronde.
+- **Police municipale** : même démarche avec le QR « Police municipale ».
+- Ces QR donnent accès aux signalements de l'équipe : ne pas les diffuser.
 
 ## 5. Fonctionnement courant
 
-| Qui | Quand | Ce qui se passe |
-|---|---|---|
-| Agent | Arrivée au parking | Scan du QR → nom → revue des signalements en cours (« Résolu » clôt le signalement) → check-list → nouveaux signalements → « Terminer la ronde » |
-| Téléphone agents | Fin de ronde, ouverture, retour du réseau, toutes les 2 min si ouvert | Envoi des saisies, réception des signalements des autres téléphones et des interventions du DPMS. Un signalement urgent part aussitôt. |
-| Superviseur | À l'ouverture, puis toutes les 2 min | Relève et contrôles d'intégrité ; consultation des rondes et des signalements |
-| Superviseur | Quand il le souhaite | Clôturer, rouvrir, modifier, écrire aux agents, notes internes |
-| Superviseur | Périodiquement | **Archive complète** → stockage de la Ville (versement des archives) |
+### Agents
+- **Ronde** : scan du QR du parking → nom → revue des signalements en cours (« Résolu » clôt le signalement) → écran de ronde :
+  - **compteur de véhicules** : un appui sur « +1 véhicule » par véhicule ; « −1 » et « Corriger » en cas d'erreur ;
+  - **contrôles** : une ligne par catégorie, « RAS » ou « + Signaler », autant de signalements que nécessaire par catégorie ;
+  - « Terminer la ronde » n'est possible que lorsque chaque catégorie est contrôlée ; le nombre de véhicules est demandé en confirmation.
+- **Signalement** : catégorie → « Quoi ? » (sous-catégorie, ou « Autre (préciser) ») → précisions, photos, destinataires (proposés selon la catégorie), urgence (proposée pour certaines sous-catégories). Pour les véhicules : plaque, **emplacement (numéro de place, niveau)**, marque/modèle/couleur.
+- **Signalement hors ronde** : depuis l'accueil, avec choix du parking et de l'agent. Envoi immédiat.
+- **Barrière ouverte** : depuis l'accueil ou pendant la ronde. Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'oubli). La barrière reste affichée en rouge sur l'accueil de tous les téléphones jusqu'à ce qu'un agent déclare « Barrière refermée » (maintenant ou plus tôt).
+- Envoi automatique en fin de ronde, à l'ouverture, au retour du réseau. Un signalement urgent ou hors ronde part aussitôt.
 
-Le relais n'alerte pas en temps réel : pour une urgence, utiliser les boutons d'appel et de courriel du téléphone agents.
+### Police municipale
+Appareil configuré avec le QR « Police municipale ». Il affiche les signalements de véhicules (ou, au choix, tout ce qui est adressé à la PM), avec plaque, emplacement, photos en grand et constats des agents. Pour chacun : observations, puis « Traité » (clôt le signalement) ou « Non traité » (le laisse ouvert, observation visible des agents). Export Excel.
+
+### Superviseur
+Consultation : rondes (durée, véhicules comptés, anomalies), signalements, barrières (ouvertes en ce moment, historique, durée cumulée, déclarations faites a posteriori), suivi PM, points d'attention. Interventions facultatives (clôturer, rouvrir, modifier, écrire aux agents, notes internes). **Excel complet** (onglets Signalements, Rondes, Barrières, Journal) et **archive avec photos** à verser sur un stockage de la Ville.
+
+### Catégories
+Modifiables par le superviseur (« Listes, catégories et coordonnées »), sans toucher au programme :
+```
+Sécurité incendie | Ateliers          ← catégorie | destinataires proposés
+- Extincteur absent ou déplacé        ← sous-catégorie
+- Odeur de fumée ou de brûlé !        ← « ! » : urgent par défaut
+```
+Chaque catégorie est une ligne de contrôle de la ronde. La liste par défaut s'appuie sur le règlement de sécurité des parcs de stationnement couverts (arrêté du 9 mai 2006, articles PS 12 à PS 32) : extincteurs à chaque niveau et au droit des issues, 100 L d'absorbant, déclencheurs manuels, portes pare-flammes à ferme-porte, commandes de désenfumage, éclairage de sécurité, plans et consignes, issues déverrouillées et dégagées, interdiction de dépôts combustibles.
 
 ## 6. Garanties et limites
 
