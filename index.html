@@ -132,6 +132,15 @@ button.link.mini{min-height:34px;padding:2px 6px}
 table.tableau{width:100%;border-collapse:collapse;font-size:14px}
 table.tableau th,table.tableau td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
 table.tableau td+td,table.tableau th+th{text-align:right;font-variant-numeric:tabular-nums}
+.ctl{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
+.ctl:last-child{border-bottom:0}
+.ctl-txt{flex:1;min-width:0}
+.ctl-txt .badge{margin-left:0}
+.ctl-btns{display:flex;flex-direction:column;gap:6px;flex:none;width:136px}
+.ctl-btns button{margin:0;min-height:44px;padding:6px 8px;font-size:15px;background:#e8edf4;color:var(--ink)}
+.ctl-btns button.sel-ras{background:var(--ok);color:#fff}
+.ctl-btns button.sel-ano{background:var(--bad);color:#fff}
+.ctl-btns button.link{background:none;color:var(--navy);min-height:32px;font-size:13px}
 #print-area{display:none}
 @media print{
   body > *:not(#print-area){display:none !important}

@@ -1,4 +1,4 @@
-/* Rondes parkings — Ville de Cachan, DPMS — version 1.4
+/* Rondes parkings — Ville de Cachan, DPMS — version 1.5
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : rondes, comptage des véhicules, signalements (catégories et
  *   sous-catégories, plusieurs par catégorie, en ronde ou hors ronde), barrières laissées ouvertes.
@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.5.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -366,6 +366,60 @@ Sûreté et présences | Police municipale
 - Trace d’effraction
 - Caméra de vidéoprotection dégradée ou masquée
 - Vandalisme en cours (appeler le 17) !`;
+const CONTROLES_DEFAUT = `[Quotidien]
+- Barrières et bornes : entrée et sortie fonctionnent, lisses intactes, bornes de ticket en service | Barrières, bornes et caisses
+- ?Caisses automatiques : en service, écran allumé, pas de trace d’effraction | Barrières, bornes et caisses
+- Issues de secours : dégagées, portes fermées mais pas verrouillées | Issues de secours et évacuation
+- Portes coupe-feu : fermées, pas calées ouvertes | Sécurité incendie
+- Éclairage : pas de zone éteinte, blocs de sécurité allumés | Éclairage et électricité
+- Extincteurs : à leur place, non utilisés, accès libre | Sécurité incendie
+- Propreté : déchets, dépôts, urine, seringues, tags, taches d’huile, matières combustibles stockées | Propreté et hygiène
+- Eau : fuite, flaque importante, avaloir bouché | Bâtiment et infiltrations
+- ?Ascenseurs : en service | Accès piétons et ascenseurs
+- Sûreté : présences, squat, trace d’effraction, caméra masquée ou arrachée | Sûreté et présences
+- Véhicules : épave, véhicule gênant ou sur place PMR, véhicule suspect ou présent depuis longtemps | Véhicules
+[Mensuel]
+- Extincteurs (un par un) : étiquette de vérification à jour, goupille et scellé, support fixé, panneau au-dessus | Sécurité incendie
+- Bac d’absorbant : rempli, pelle présente | Sécurité incendie
+- Déclencheurs manuels d’alarme : intacts, non masqués, accessibles (sans les actionner) | Sécurité incendie
+- Blocs d’éclairage de sécurité (un par un) : voyant de charge allumé, bloc non arraché | Issues de secours et évacuation
+- Ferme-portes des portes coupe-feu : la porte lâchée se referme complètement seule | Sécurité incendie
+- ?Commandes de désenfumage : accessibles, boîtier fermé et intact, signalées | Sécurité incendie
+- Bouches de ventilation : dégagées, rien stationné ni stocké devant | Ventilation et qualité de l’air
+- Signalétique d’évacuation : panneaux en place et visibles | Issues de secours et évacuation
+- Plans et consignes : affichés, lisibles, non arrachés | Sécurité incendie
+- ?Interphones et appel d’urgence : essai d’appel depuis chaque borne et depuis la cabine d’ascenseur | Barrières, bornes et caisses
+- Signalisation routière : hauteur maximale à l’entrée, gabarit, marquage au sol, places PMR, numérotation | Signalisation et marquage
+- ?Bornes de recharge : en service, câbles intacts, extincteur à proximité | Bornes de recharge électrique
+- Issues côté extérieur : rien stationné ni entreposé devant les sorties et les accès pompiers | Issues de secours et évacuation
+[Trimestriel]
+- ?Colonnes sèches : prises accessibles, capots et bouchons présents, signalétique en place | Sécurité incendie
+- Inventaire des extincteurs : nombre et emplacements conformes au plan, au moins un par niveau à chaque issue | Sécurité incendie
+- Plans d’évacuation et d’intervention : conformes à l’état des lieux, affichés aux bons endroits | Sécurité incendie
+- ?Locaux techniques : portes fermées à clé, signalées, aucun stockage | Bâtiment et infiltrations
+- Dates d’entretien affichées : ascenseurs, portes automatiques, extincteurs ; relever et signaler les dates dépassées | Autre
+- Clés, badges et télécommandes d’exploitation : inventaire | Autre`;
+const NIVEAUX = { quotidien: { titre: 'Quotidien', lbl: 'Contrôle quotidien', jours: 1 }, mensuel: { titre: 'Mensuel', lbl: 'Contrôle mensuel', jours: 30 }, trimestriel: { titre: 'Trimestriel', lbl: 'Contrôle trimestriel', jours: 90 } };
+function slug(t) { return t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40); }
+function parseControles(text) {
+  const out = []; let niv = null;
+  for (const raw of text.split('\n')) {
+    const l = raw.trim(); if (!l) continue;
+    const m = /^\[(.+)\]$/.exec(l);
+    if (m) { const k = slug(m[1]); niv = NIVEAUX[k] ? k : null; continue; }
+    if (!niv || !/^[-•*]/.test(l)) continue;
+    let t = l.replace(/^[-•*]\s*/, ''), opt = false;
+    if (t.startsWith('?')) { opt = true; t = t.slice(1).trim(); }
+    const [corps, cat] = t.split('|').map(x => x.trim());
+    const i = corps.indexOf(' : ');
+    const lbl = (i >= 0 ? corps.slice(0, i) : corps).trim(), detail = i >= 0 ? corps.slice(i + 3).trim() : '';
+    if (lbl) out.push({ id: niv[0] + '-' + slug(lbl), niveau: niv, lbl, detail, cat: cat || CAT_AUTRE, opt });
+  }
+  return out;
+}
+function controlesToText(list) {
+  return Object.keys(NIVEAUX).map(n => [`[${NIVEAUX[n].titre}]`, ...list.filter(c => c.niveau === n).map(c => `- ${c.opt ? '?' : ''}${c.lbl}${c.detail ? ' : ' + c.detail : ''}${c.cat ? ' | ' + c.cat : ''}`)].join('\n')).join('\n');
+}
 const MOTIFS_DEFAUT = ['Panne de la barrière', 'Panne de borne ou de caisse', 'Intervention technique', 'Forte affluence', 'Consigne de la hiérarchie', 'Autre'];
 const CAT_AUTRE = 'Autre';
 const SUB_AUTRE = 'Autre (préciser)';
@@ -414,6 +468,7 @@ function normalizeCfg(c) {
   n.sites = (n.sites || []).map(s => ({ ...s, barrieres: Array.isArray(s.barrieres) && s.barrieres.length ? s.barrieres : ['Entrée', 'Sortie'] }));
   if (!Array.isArray(n.motifs) || !n.motifs.length) n.motifs = MOTIFS_DEFAUT.slice();
   n.gps = n.gps === true;
+  if (!Array.isArray(n.controles) || !n.controles.length) n.controles = parseControles(CONTROLES_DEFAUT);
   n.contacts = n.contacts && typeof n.contacts === 'object' ? n.contacts : {};
   n.v = 3;
   return n;
@@ -631,7 +686,7 @@ async function fold() {
   for (const [id, d] of suppr) if (!annul.has(id)) { (d.sigs || []).forEach(x => del.sigs.add(x)); (d.rids || []).forEach(x => del.rids.add(x)); }
   const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
 
-  const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {};
+  const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [];
   let cfg = null;
   const alertes = [];
   for (const { e } of items) {
@@ -651,7 +706,7 @@ async function fold() {
           dests: ev.data.dests, urgent: ev.data.urgent, horsRonde: !!ev.data.horsRonde, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
           thumb: e.local && typeof ev.data.thumb === 'string' ? ev.data.thumb : null,
           photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), ts, geo: dec && dec.geo, dev: ev.dev, seq: ev.seq,
-          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: []
+          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], controle: ev.data.controle || null
         });
       } else if (ev.t === 'revue') {
         const s = sigs.get(ev.data.sig);
@@ -671,6 +726,12 @@ async function fold() {
           if (ev.data.statut === 'traite') { s.statut = 'clos'; s.closLe = ts || ev.jour; s.closPar = 'Police municipale'; }
           else if (ev.data.statut === 'non_traite' && s.closPar === 'Police municipale') { s.statut = 'ouvert'; s.closLe = null; s.closPar = null; }
         }
+      } else if (ev.t === 'controle') {
+        const c = ctl[ev.site] = ctl[ev.site] || { na: new Set() };
+        const quand = ev.data.quand || ev.jour + 'T12:00:00';
+        if (!c[ev.data.niveau] || c[ev.data.niveau].at <= quand) c[ev.data.niveau] = { at: quand, agent: ev.agent };
+        Object.entries(ev.data.items || {}).forEach(([k, v]) => { if (v === 'NA') c.na.add(k); });
+        ctlHist.push({ site: ev.site, niveau: ev.data.niveau, at: quand, ts, agent: ev.agent, items: ev.data.items, libelles: ev.data.libelles, rid: ev.rid });
       } else if (ev.t === 'barriere') {
         const d = ev.data;
         const b = barr.get(d.bid) || { bid: d.bid, site: ev.site, barriere: d.barriere, ouverte: null, fermee: null };
@@ -685,6 +746,7 @@ async function fold() {
         if (ev.t === 'ronde_fin') { r.fin = ts; if (r.compte == null && ev.data.compte != null) r.compte = ev.data.compte; }
         if (ev.t === 'checklist') r.checklist = ev.data.items;
         if (ev.t === 'comptage') r.compte = ev.data.total;
+        if (ev.t === 'controle') { r.controles = r.controles || []; r.controles.push({ niveau: ev.data.niveau, nc: resumeControle(ev.data.items, ev.data.libelles).nc }); }
         if (ev.t === 'signalement') r.nbSig++;
         if (ev.t === 'revue') r.nbRevue++;
         rondes.set(ev.rid, r);
@@ -696,6 +758,7 @@ async function fold() {
         const s = sigs.get(d.action.sig);
         if (s) s.actions.push({ ...d.action, quand: d.action.quand || d.ts, jour: (d.ts || '').slice(0, 10), par: d.par || 'DPMS' });
       }
+      else if (d.type === 'ctl_reactiver') { if (ctl[d.site]) ctl[d.site].na.delete(d.item); }
       else if (d.type === 'sig') {
         const s = sigs.get(d.sig);
         if (s) { Object.assign(s, d.patch); s.journalDPMS.push({ ts: d.ts, action: d.action, par: d.par || 'DPMS' }); }
@@ -738,6 +801,8 @@ async function fold() {
   await dbReplaceAll('sigs', [...sigs.values()]);
   await kvSet('barrieres', [...barr.values()]);
   await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
+  await kvSet('controles', Object.fromEntries(Object.entries(ctl).map(([k, v]) => [k, { ...v, na: [...v.na] }])));
+  if (sup) await kvSet('controlesHist', ctlHist.sort((a, b) => b.at.localeCompare(a.at)));
   if (sup) await kvSet('corbeille', [...suppr.values()].map(d => ({ ...d, annule: annul.has(d.id) })).sort((a, b) => b.ts.localeCompare(a.ts)));
   if (cfg && JSON.stringify(cfg) !== JSON.stringify(state.cfg)) { state.cfg = cfg; await kvSet('cfg', cfg); }
 }
@@ -1036,6 +1101,7 @@ async function agentHome() {
       h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
       h('button', { class: 'accent big', onclick: () => resumeRonde(ronde) }, 'Reprendre la ronde'))
       : h('button', { class: 'big', onclick: () => go('choixParking') }, 'Commencer ma ronde'),
+    await carteControlesAFaire(),
     h('div', { class: 'row' },
       h('button', { class: 'sec', onclick: () => go('signalement', { from: 'hr' }) }, 'Signalement hors ronde'),
       h('button', { class: 'sec', onclick: () => go('barriere', {}) }, 'Barrière ouverte')),
@@ -1059,6 +1125,14 @@ async function agentHome() {
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
 
+async function carteControlesAFaire() {
+  const st = await etatControles();
+  const lignes = state.cfg.sites.map(s => {
+    const dus = Object.keys(NIVEAUX).filter(n => echeance(st, s.id, n).du);
+    return dus.length ? h('div', { class: 'stat' }, h('span', null, s.nom), h('span', { class: 'small' }, ...dus.map(n => h('span', { class: 'badge ' + (n === 'quotidien' ? 'b-info' : 'b-warn') }, n)))) : null;
+  }).filter(Boolean);
+  return lignes.length ? h('div', { class: 'card' }, h('h2', null, 'Contrôles à faire'), ...lignes, h('p', { class: 'muted small' }, 'Ils sont proposés pendant la ronde du parking concerné.')) : null;
+}
 VIEWS.choixParking = async () => page('Commencer ma ronde', { back: true },
   h('p', null, 'Quel parking ?'),
   ...(state.cfg ? state.cfg.sites : []).map(s => h('button', { class: 'big sec', onclick: () => startRondeFlow(s.id) }, s.nom)));
@@ -1080,7 +1154,8 @@ async function beginRonde(site, agent) {
   showBusy('Démarrage de la ronde…');
   Geo.start();
   await Geo.waitFirst(4000);
-  const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [], compte: 0, compteValide: false };
+  const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [], compte: 0, compteValide: false,
+    quotidienDu: echeance(await etatControles(), site, 'quotidien').du, ctl: {}, ctlEmis: {} };
   await appendEvent('ronde_debut', ronde, {});
   await kvSet('ronde', ronde);
   await kvSet('dernierAgent', { nom: agent, at: Date.now() });
@@ -1148,15 +1223,74 @@ VIEWS.revue = async () => {
     h('div', { class: 'sticky-bottom' }, h('div', null, btnValider)));
 };
 
-/* ---------- Ronde : comptage, contrôles par catégorie, signalements ---------- */
+/* ---------- Contrôles : quotidien (une fois par jour), mensuel (30 j), trimestriel (90 j) ---------- */
+async function etatControles() { return (await kvGet('controles')) || {}; }
+function joursDepuis(iso) { return Math.round((new Date(localDate() + 'T12:00:00') - new Date(localDate(new Date(iso)) + 'T12:00:00')) / 86400000); }
+function echeance(st, site, niveau) {
+  const d = st[site] && st[site][niveau];
+  if (!d) return { du: true, dernier: null, depuis: null };
+  const j = joursDepuis(d.at);
+  return { du: niveau === 'quotidien' ? j >= 1 : j >= NIVEAUX[niveau].jours, dernier: d, depuis: j };
+}
+function pointsSite(st, site, niveau) {
+  const na = new Set((st[site] && st[site].na) || []);
+  return state.cfg.controles.filter(c => c.niveau === niveau && !na.has(c.id));
+}
+function catPour(c) { return state.cfg.cats.some(x => x.nom === c.cat) ? c.cat : CAT_AUTRE; }
+function ncDe(sigsRonde, id) { return sigsRonde.filter(s => s.controle && s.controle.id === id); }
+function restantControle(ronde, niveau, points, sigsRonde) {
+  const rep = (ronde.ctl || {})[niveau] || {};
+  return points.filter(c => !ncDe(sigsRonde, c.id).length && !rep[c.id]).length;
+}
+function lignesControle(ronde, niveau, points, sigsRonde, rafraichir) {
+  ronde.ctl = ronde.ctl || {};
+  const rep = ronde.ctl[niveau] = ronde.ctl[niveau] || {};
+  return points.map(c => {
+    const nc = ncDe(sigsRonde, c.id);
+    const v = nc.length ? 'NC' : rep[c.id];
+    const etat = v === 'NC' ? h('span', { class: 'badge b-bad' }, nc.length > 1 ? `non conforme (${nc.length})` : 'non conforme')
+      : v === 'C' ? h('span', { class: 'badge b-ok' }, 'conforme')
+        : v === 'NA' ? h('span', { class: 'badge b-info' }, 'n’existe pas ici') : h('span', { class: 'badge b-warn' }, 'à contrôler');
+    return h('div', { class: 'ctl' },
+      h('div', { class: 'ctl-txt' }, h('b', null, c.lbl), ' ', etat, c.detail ? h('div', { class: 'muted small' }, c.detail) : null),
+      h('div', { class: 'ctl-btns' },
+        nc.length || v === 'NA' ? null : h('button', {
+          class: v === 'C' ? 'sel-ras' : '', onclick: safe(async () => {
+            if (v === 'C') delete rep[c.id]; else rep[c.id] = 'C';
+            await kvSet('ronde', ronde); rafraichir();
+          })
+        }, 'Conforme'),
+        v === 'NA' ? h('button', { class: 'sec', onclick: safe(async () => { delete rep[c.id]; await kvSet('ronde', ronde); rafraichir(); }) }, 'Annuler') :
+          h('button', { class: nc.length ? 'sel-ano' : '', onclick: () => go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }) }, nc.length ? '+ Non conforme' : 'Non conforme'),
+        c.opt && !nc.length && v !== 'NA' ? h('button', {
+          class: 'link mini', onclick: safe(async () => {
+            if (!confirm(`« ${c.lbl} » n’existe pas dans ce parking ?\nCe point ne sera plus proposé ici.`)) return;
+            rep[c.id] = 'NA'; await kvSet('ronde', ronde); rafraichir();
+          })
+        }, 'N’existe pas ici') : null));
+  });
+}
+async function emettreControle(ronde, niveau, points, sigsRonde) {
+  const rep = (ronde.ctl || {})[niveau] || {};
+  const items = {};
+  points.forEach(c => { items[c.id] = ncDe(sigsRonde, c.id).length ? 'NC' : (rep[c.id] || 'NF'); });
+  await appendEvent('controle', ronde, { niveau, items, libelles: Object.fromEntries(points.map(c => [c.id, c.lbl])), quand: new Date().toISOString() });
+  ronde.ctlEmis = { ...(ronde.ctlEmis || {}), [niveau]: true };
+  await kvSet('ronde', ronde);
+}
+function resumeControle(items, libelles) {
+  const par = v => Object.entries(items || {}).filter(([, x]) => x === v).map(([k]) => (libelles || {})[k] || k);
+  return { c: par('C').length, nc: par('NC'), na: par('NA'), nf: par('NF') };
+}
+
+/* ---------- Ronde ---------- */
 VIEWS.ronde = async () => {
   const ronde = await kvGet('ronde');
   if (!ronde) return agentHome();
   if (ronde.compte == null) ronde.compte = 0;
-  const cfg = state.cfg;
-  const sigs = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
-  const parCat = {};
-  sigs.forEach(s => { (parCat[s.cat] = parCat[s.cat] || []).push(s); });
+  ronde.ctlEmis = ronde.ctlEmis || {};
+  const st = await etatControles();
+  const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
   const rafraichir = () => go('ronde', {}, { noPush: true, keepScroll: true });
 
   // Comptage des véhicules : à valider ; une fois validé, il se replie
@@ -1185,48 +1319,75 @@ VIEWS.ronde = async () => {
       }, 'Valider le comptage'));
   }
 
-  // Contrôles : une ligne par catégorie
-  const rows = cfg.cats.map(c => {
-    const list = parCat[c.nom] || [];
-    const ras = ronde.checklist[c.nom] === 'RAS' && !list.length;
-    const etat = list.length ? h('span', { class: 'badge b-bad' }, `${list.length} signalement${list.length > 1 ? 's' : ''}`) : ras ? h('span', { class: 'badge b-ok' }, 'RAS') : h('span', { class: 'badge b-warn' }, 'à contrôler');
-    return h('div', { class: 'chk' },
-      h('span', { class: 'lbl' }, c.nom, ' ', etat),
-      list.length ? null : h('button', {
-        class: ras ? 'sel-ras' : '', onclick: safe(async () => {
-          if (ras) delete ronde.checklist[c.nom]; else ronde.checklist[c.nom] = 'RAS';
-          await kvSet('ronde', ronde); rafraichir();
-        })
-      }, 'RAS'),
-      h('button', { class: list.length ? 'sel-ano' : '', onclick: () => go('signalement', { from: 'ronde', cat: c.nom }) }, '+ Signaler'));
+  // Contrôle quotidien (le premier de la journée dans ce parking)
+  const ptsQ = pointsSite(st, ronde.site, 'quotidien');
+  let quotidien;
+  if (ronde.quotidienDu) {
+    const reste = restantControle(ronde, 'quotidien', ptsQ, sigsRonde);
+    quotidien = h('div', { class: 'card' }, h('h2', null, `Contrôle quotidien (${ptsQ.length - reste}/${ptsQ.length})`),
+      ...lignesControle(ronde, 'quotidien', ptsQ, sigsRonde, rafraichir));
+  } else {
+    const e = echeance(st, ronde.site, 'quotidien');
+    quotidien = h('div', { class: 'card muted small' }, `Contrôle quotidien déjà fait aujourd’hui${e.dernier ? ` par ${e.dernier.agent} à ${fmtHeure(e.dernier.at)}` : ''}.`);
+  }
+  // Contrôles mensuel et trimestriel : proposés quand ils arrivent à échéance
+  const periodiques = ['mensuel', 'trimestriel'].map(niv => {
+    if (ronde.ctlEmis[niv]) return h('div', { class: 'card small' }, h('span', { class: 'badge b-ok' }, 'fait'), ` ${NIVEAUX[niv].lbl} enregistré.`);
+    const e = echeance(st, ronde.site, niv);
+    if (!e.du) return null;
+    const pts = pointsSite(st, ronde.site, niv);
+    const fait = pts.length - restantControle(ronde, niv, pts, sigsRonde);
+    return h('div', { class: 'card', style: 'border-color:var(--accent)' },
+      h('h2', null, `${NIVEAUX[niv].lbl} à faire`),
+      h('p', { class: 'muted small' }, e.dernier ? `Dernier : il y a ${e.depuis} jours (${e.dernier.agent}).` : 'Jamais fait dans ce parking.', fait ? ` ${fait}/${pts.length} points déjà contrôlés.` : ''),
+      h('button', { class: 'accent', onclick: () => go('controle', { niveau: niv }) }, fait ? 'Reprendre' : 'Faire maintenant'));
   });
-  const restant = cfg.cats.filter(c => !(parCat[c.nom] || []).length && ronde.checklist[c.nom] !== 'RAS').length;
-  const autres = (parCat[CAT_AUTRE] || []).length;
 
+  const libres = sigsRonde.filter(s => !s.controle);
   return page(`Ronde : ${siteNom(ronde.site)}`, { back: () => go('home') },
     h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
     compteur,
-    h('div', { class: 'card' }, h('h2', null, `Contrôles (${cfg.cats.length - restant}/${cfg.cats.length})`),
-      h('p', { class: 'muted small' }, '« RAS » si rien à signaler. « + Signaler » autant de fois que nécessaire.'),
-      ...rows),
+    quotidien,
+    ...periodiques,
     h('div', { class: 'row' },
-      h('button', { class: 'sec', onclick: () => go('signalement', { from: 'ronde', cat: CAT_AUTRE }) }, `+ Autre signalement${autres ? ` (${autres})` : ''}`),
+      h('button', { class: 'sec', onclick: () => go('signalement', { from: 'ronde' }) }, `+ Signalement${libres.length ? ` (${libres.length})` : ''}`),
       h('button', { class: 'sec', onclick: () => go('barriere', { site: ronde.site, from: 'ronde' }) }, 'Barrière ouverte')),
     h('button', {
       class: 'ok big', onclick: safe(async () => {
         if (!ronde.compteValide) { toast('Validez d’abord le comptage des véhicules.', true); return; }
-        if (restant) { toast(`Encore ${restant} contrôle(s) à faire : « RAS » ou « + Signaler ».`, true); return; }
+        const reste = ronde.quotidienDu ? restantControle(ronde, 'quotidien', ptsQ, sigsRonde) : 0;
+        if (reste) { toast(`Contrôle quotidien : encore ${reste} point(s) à contrôler.`, true); return; }
         if (!confirm('Terminer la ronde ?')) return;
         await finishRonde(ronde);
       })
     }, 'Terminer la ronde'));
 };
+VIEWS.controle = async ({ niveau }) => {
+  const ronde = await kvGet('ronde');
+  if (!ronde) return agentHome();
+  const st = await etatControles();
+  const pts = pointsSite(st, ronde.site, niveau);
+  const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
+  const reste = restantControle(ronde, niveau, pts, sigsRonde);
+  return page(`${NIVEAUX[niveau].lbl} : ${siteNom(ronde.site)}`, { back: () => go('ronde', {}, { noPush: true }) },
+    h('div', { class: 'card' }, h('h2', null, `${pts.length - reste}/${pts.length} points contrôlés`),
+      ...lignesControle(ronde, niveau, pts, sigsRonde, () => go('controle', { niveau }, { noPush: true, keepScroll: true }))),
+    h('button', {
+      class: 'ok big', onclick: safe(async () => {
+        if (reste) { toast(`Encore ${reste} point(s) à contrôler.`, true); return; }
+        await emettreControle(ronde, niveau, pts, sigsRonde);
+        await fold();
+        toast(`${NIVEAUX[niveau].lbl} enregistré.`);
+        go('ronde', {}, { noPush: true });
+      })
+    }, `Valider le ${NIVEAUX[niveau].lbl.toLowerCase()}`),
+    h('button', { class: 'link', onclick: () => go('ronde', {}, { noPush: true }) }, 'Plus tard (les réponses sont gardées)'));
+};
 async function finishRonde(ronde, silent) {
   showBusy('Clôture de la ronde…');
-  const items = {};
-  const sigs = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
-  for (const c of state.cfg.cats) items[c.nom] = sigs.some(s => s.cat === c.nom) ? 'Anomalie' : (ronde.checklist[c.nom] || 'Non contrôlé');
-  await appendEvent('checklist', ronde, { items });
+  const st = await etatControles();
+  const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
+  if (ronde.quotidienDu && !(ronde.ctlEmis || {}).quotidien) await emettreControle(ronde, 'quotidien', pointsSite(st, ronde.site, 'quotidien'), sigsRonde);
   if (!ronde.compteValide) await appendEvent('comptage', ronde, { total: ronde.compte || 0, nonValide: true });
   await appendEvent('ronde_fin', ronde, { nbSig: ronde.sigsCrees.length, compte: ronde.compte || 0 });
   await kvDel('ronde');
@@ -1245,11 +1406,11 @@ async function finishRonde(ronde, silent) {
 
 /* ---------- Signalement (en ronde ou hors ronde) ---------- */
 let sigDraft = null;
-VIEWS.signalement = async ({ cat, from }) => {
+VIEWS.signalement = async ({ cat, from, ctl }) => {
   const ronde = from === 'ronde' ? await kvGet('ronde') : null;
   if (from === 'ronde' && !ronde) return agentHome();
   const cfg = state.cfg;
-  const cle = `${from}|${cat || ''}`;
+  const cle = `${from}|${cat || ''}|${ctl ? ctl.id : ''}`;
   if (!sigDraft || sigDraft.cle !== cle) {
     sigDraft = { cle, site: ronde ? ronde.site : (state.dernierSite || (cfg.sites.length === 1 ? cfg.sites[0].id : null)), agent: ronde ? ronde.agent : await agentPrefere(),
       cat: cat || null, sub: null, desc: '', plaque: '', emplacement: '', vehicule: '', photos: [], dests: [], urgent: false, destsTouche: false };
@@ -1298,7 +1459,7 @@ VIEWS.signalement = async ({ cat, from }) => {
   const drawThumbs = () => thumbs.replaceChildren(...d.photos.map((p, i) =>
     h('div', { class: 't' }, h('img', { src: p.thumb, alt: '' }), h('button', { onclick: () => { d.photos.splice(i, 1); drawThumbs(); } }, '×'))));
   drawThumbs();
-  const retour = () => { sigDraft = null; if (from === 'ronde') go('ronde', {}, { noPush: true }); else { geoStopSiLibre(); go('home'); } };
+  const retour = () => { sigDraft = null; if (ctl && ctl.niveau !== 'quotidien') go('controle', { niveau: ctl.niveau }, { noPush: true }); else if (from === 'ronde') go('ronde', {}, { noPush: true }); else { geoStopSiLibre(); go('home'); } };
   const back = () => { if (!d.photos.length && !d.desc || confirm('Abandonner ce signalement ?')) retour(); };
 
   const save = (encore) => safe(async () => {
@@ -1317,7 +1478,7 @@ VIEWS.signalement = async ({ cat, from }) => {
       {
         id, ref, cat: d.cat, sub: d.sub && d.sub !== SUB_AUTRE ? d.sub : (d.sub === SUB_AUTRE ? 'Autre' : ''), desc: d.desc.trim(),
         plaque: veh ? d.plaque.trim().toUpperCase() : '', emplacement: veh ? d.emplacement.trim() : '', vehicule: veh ? d.vehicule.trim() : '',
-        dests: [...d.dests], urgent: d.urgent, horsRonde: !ronde, thumb: d.photos[0] ? d.photos[0].thumb : null
+        dests: [...d.dests], urgent: d.urgent, horsRonde: !ronde, thumb: d.photos[0] ? d.photos[0].thumb : null, controle: ctl || null
       },
       { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
     if (ronde) { const r = await kvGet('ronde'); r.sigsCrees.push(id); await kvSet('ronde', r); }
@@ -1327,12 +1488,13 @@ VIEWS.signalement = async ({ cat, from }) => {
     sigDraft = null;
     hideBusy();
     toast(`Signalement ${ref} enregistré.`);
-    if (encore) go('signalement', { from, cat: catNom }, { noPush: true });
+    if (encore) go('signalement', { from, cat: catNom, ctl }, { noPush: true });
     else retour();
     if (urgent || !ronde) syncNow().then(refreshIfHome);   // urgent ou hors ronde : envoi immédiat
   });
 
-  return page(ronde ? 'Nouveau signalement' : 'Signalement hors ronde', { back },
+  return page(ctl ? 'Non conforme' : ronde ? 'Nouveau signalement' : 'Signalement hors ronde', { back },
+    ctl ? h('div', { class: 'banner warn' }, `${NIVEAUX[ctl.niveau].lbl} — ${ctl.lbl}`) : null,
     !ronde ? [h('label', { class: 'f' }, 'Parking'), chips(cfg.sites.map(s => ({ val: s.id, lbl: s.nom })), d.site, v => d.site = v),
       h('label', { class: 'f' }, 'Signalé par'), chips(cfg.agents, d.agent, v => d.agent = v)] : null,
     h('label', { class: 'f' }, 'Catégorie'), catBox,
@@ -1625,6 +1787,7 @@ async function agentExcel(jours) {
     if (ev.t === 'signalement') aoa.push([...base, ev.data.horsRonde ? 'Signalement hors ronde' : 'Signalement', ev.data.ref, ev.data.cat, ev.data.sub || '', ev.data.desc, ev.data.plaque || '', ev.data.emplacement || '', (ev.data.dests || []).join(', '), ev.data.urgent ? 'Oui' : '', '', '']);
     else if (ev.t === 'revue') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Constat de suivi', ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', '', '', VERDICTS[ev.data.verdict], ev.data.comment || '']); }
     else if (ev.t === 'checklist') { const an = Object.entries(ev.data.items || {}).filter(([, v]) => v !== 'RAS').map(([k, v]) => `${k} : ${v}`); aoa.push([...base, 'Contrôles', '', '', '', an.length ? an.join(' ; ') : 'Tout RAS', '', '', '', '', '', '']); }
+    else if (ev.t === 'controle') { const r = resumeControle(ev.data.items, ev.data.libelles); aoa.push([...base, NIVEAUX[ev.data.niveau].lbl, '', '', '', r.nc.length ? 'Non conforme : ' + r.nc.join(', ') : 'Tout conforme', '', '', '', '', `${r.c} conforme(s)`, r.na.length ? 'N’existe pas : ' + r.na.join(', ') : '']); }
     else if (ev.t === 'comptage') aoa.push([...base, 'Comptage des véhicules', '', '', '', '', '', '', '', '', ev.data.total, '']);
     else if (ev.t === 'barriere') aoa.push([...base, ev.data.action === 'ouverte' ? 'Barrière ouverte' : 'Barrière refermée', '', '', ev.data.barriere, ev.data.motif || '', '', '', '', '', fmtDT(ev.data.quand), ev.data.comment || '']);
     else if (ev.t === 'action') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Traitement : ' + ACTIONS[ev.data.type], ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', ev.data.dest || '', '', ev.data.prevu ? 'prévue le ' + fmtDT(ev.data.prevu) : '', ev.data.texte || '']); }
@@ -1923,6 +2086,7 @@ async function supHome() {
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'a_transmettre' }) }, h('div', { class: 'stat' }, h('span', null, 'À transmettre aux services'), h('b', null, ouverts.filter(s => suiviEtat(s) === 'À transmettre').length))),
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'clos' }) }, h('div', { class: 'stat' }, h('span', null, 'Clos'), h('b', null, sigs.length - ouverts.length))),
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'vehicules' }) }, h('div', { class: 'stat' }, h('span', null, 'Véhicules en attente de la PM'), h('b', null, vehPM)))),
+    await carteControlesSup(),
     h('div', { class: 'card' }, h('h2', null, 'Dernières rondes'),
       rondes.length ? rondes.map(rondeLigne) : h('p', { class: 'muted' }, 'Aucune ronde reçue.'),
       h('div', { class: 'row' },
@@ -1941,13 +2105,54 @@ async function supHome() {
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
+async function carteControlesSup() {
+  const st = await etatControles();
+  const etat = (site, n) => {
+    const e = echeance(st, site, n);
+    if (!e.dernier) return h('span', { class: 'badge b-bad' }, `${n} : jamais`);
+    if (n === 'quotidien') return h('span', { class: 'badge ' + (e.depuis <= 1 ? 'b-ok' : 'b-bad') }, `${n} : ${e.depuis === 0 ? 'aujourd’hui' : e.depuis === 1 ? 'hier' : `il y a ${e.depuis} j`}`);
+    return h('span', { class: 'badge ' + (e.du ? 'b-bad' : 'b-ok') }, `${n} : ${e.du ? `en retard (${e.depuis} j)` : e.depuis === 0 ? 'aujourd’hui' : `il y a ${e.depuis} j`}`);
+  };
+  return h('div', { class: 'card' }, h('h2', null, 'Contrôles'),
+    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...Object.keys(NIVEAUX).map(n => etat(s.id, n))))),
+    h('button', { class: 'sec', onclick: () => go('supControles') }, 'Détail des contrôles'));
+}
+VIEWS.supControles = async () => {
+  const st = await etatControles();
+  const hist = (await kvGet('controlesHist')) || [];
+  const tous = state.cfg.controles;
+  return page('Contrôles', { back: true },
+    ...state.cfg.sites.map(s => {
+      const na = ((st[s.id] || {}).na || []).map(id => tous.find(c => c.id === id)).filter(Boolean);
+      return h('div', { class: 'card' }, h('h2', null, s.nom),
+        ...Object.keys(NIVEAUX).map(n => {
+          const e = echeance(st, s.id, n);
+          const proch = e.dernier && n !== 'quotidien' ? new Date(new Date(e.dernier.at).getTime() + NIVEAUX[n].jours * 86400000) : null;
+          return h('div', { class: 'stat', style: 'display:block' }, h('b', null, NIVEAUX[n].lbl), ' ',
+            e.du ? h('span', { class: 'badge b-bad' }, n === 'quotidien' ? 'à faire aujourd’hui' : 'à faire') : h('span', { class: 'badge b-ok' }, 'à jour'),
+            h('div', { class: 'muted small' }, e.dernier ? `Dernier : ${fmtDT(e.dernier.at)} par ${e.dernier.agent}${proch ? ` — prochain avant le ${fmtJour(localDate(proch))}` : ''}` : 'Jamais fait'));
+        }),
+        na.length ? h('div', { style: 'margin-top:8px' }, h('p', { class: 'small', style: 'font-weight:600;margin:4px 0' }, 'Points qui n’existent pas dans ce parking'),
+          ...na.map(c => h('div', { class: 'stat' }, h('span', { class: 'small' }, `${c.lbl} (${NIVEAUX[c.niveau].titre.toLowerCase()})`),
+            h('button', { class: 'link mini', onclick: safe(async () => { await queueDec('d', { type: 'ctl_reactiver', id: uuid(), ts: new Date().toISOString(), site: s.id, item: c.id }); await fold(); syncNow(); toast('Point rétabli.'); go('supControles', {}, { noPush: true, keepScroll: true }); }) }, 'Rétablir')))) : null);
+    }),
+    h('div', { class: 'card' }, h('h2', null, 'Historique'),
+      hist.length ? hist.slice(0, 150).map(x => {
+        const r = resumeControle(x.items, x.libelles);
+        return h('div', { class: 'stat', style: 'display:block' },
+          h('div', null, h('b', null, `${siteNom(x.site)} — ${NIVEAUX[x.niveau].lbl}`), ` — ${fmtDT(x.ts || x.at)} — ${x.agent}`),
+          h('div', { class: 'small' }, `${r.c} conforme(s)`, r.nc.length ? h('span', { style: 'color:var(--bad)' }, ` · non conforme : ${r.nc.join(', ')}`) : null,
+            r.na.length ? ` · n’existe pas : ${r.na.join(', ')}` : '', r.nf.length ? ` · non faits : ${r.nf.join(', ')}` : ''));
+      }) : h('p', { class: 'muted' }, 'Aucun contrôle enregistré.')));
+};
 function rondeLigne(r) {
   const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
   const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => v === 'Anomalie' ? k : `${k} (${v.toLowerCase()})`) : [];
   return h('div', { class: 'stat', style: 'display:block' },
     h('div', null, h('b', null, `${siteNom(r.site)} — ${r.agent}`), !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null),
     h('div', { class: 'muted small' }, `${fmtDT(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${dur != null ? ` (${dur} min)` : ''} — ${r.compte != null ? r.compte + ' véhicule(s), ' : ''}${r.nbSig} signalement(s), ${r.nbRevue} constat(s)`),
-    anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null);
+    anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null,
+    (r.controles || []).length ? h('div', { class: 'small' }, (r.controles || []).map(c => `${NIVEAUX[c.niveau].lbl}${c.nc.length ? ' — non conforme : ' + c.nc.join(', ') : ' — conforme'}`).join(' ; ')) : null);
 }
 VIEWS.supAlertes = async () => {
   const al = (await kvGet('alertes')) || [];
@@ -2158,6 +2363,8 @@ const INDICS = {
   sig_statut: { lbl: 'Signalements en cours / clos', src: 'sig' },
   sig_delai: { lbl: 'Délai moyen de clôture (jours)', src: 'sig' },
   act_n: { lbl: 'Actions de traitement', src: 'act' },
+  ctl_n: { lbl: 'Contrôles réalisés', src: 'ctl' },
+  ctl_nc: { lbl: 'Non-conformités relevées', src: 'ctlnc' },
   ronde_n: { lbl: 'Nombre de rondes', src: 'ronde' },
   ronde_veh: { lbl: 'Véhicules comptés (moyenne par ronde)', src: 'ronde' },
   barr_n: { lbl: 'Ouvertures de barrière', src: 'barr' },
@@ -2166,19 +2373,21 @@ const INDICS = {
 const AXES = {
   cat: { lbl: 'Catégorie', src: ['sig', 'act'], key: r => r.cat },
   sub: { lbl: 'Sous-catégorie', src: ['sig'], key: r => r.sub ? `${r.sub}` : `${r.cat} (sans précision)` },
-  agent: { lbl: 'Agent', src: ['sig', 'act', 'ronde', 'barr'], key: r => r.agent || '?' },
-  site: { lbl: 'Parking', src: ['sig', 'act', 'ronde', 'barr'], key: r => siteNom(r.site) },
+  agent: { lbl: 'Agent', src: ['sig', 'act', 'ronde', 'barr', 'ctl', 'ctlnc'], key: r => r.agent || '?' },
+  site: { lbl: 'Parking', src: ['sig', 'act', 'ronde', 'barr', 'ctl', 'ctlnc'], key: r => siteNom(r.site) },
+  point: { lbl: 'Point de contrôle', src: ['ctlnc'], key: r => r.point },
+  niveau: { lbl: 'Type de contrôle', src: ['ctl', 'ctlnc'], key: r => NIVEAUX[r.niveau].lbl },
   dest: { lbl: 'Destinataire', src: ['sig', 'act'], key: r => r.dests && r.dests.length ? r.dests : ['(aucun)'] },
   type: { lbl: 'Type d’action', src: ['act'], key: r => ACTIONS[r.type] || r.type },
   barriere: { lbl: 'Barrière', src: ['barr'], key: r => `${siteNom(r.site)} — ${r.barriere}` },
   motif: { lbl: 'Motif d’ouverture', src: ['barr'], key: r => r.motif || '?' },
-  jour: { lbl: 'Jour', src: ['sig', 'act', 'ronde', 'barr'], temps: 'jour' },
-  semaine: { lbl: 'Semaine', src: ['sig', 'act', 'ronde', 'barr'], temps: 'semaine' },
-  mois: { lbl: 'Mois', src: ['sig', 'act', 'ronde', 'barr'], temps: 'mois' }
+  jour: { lbl: 'Jour', src: ['sig', 'act', 'ronde', 'barr', 'ctl', 'ctlnc'], temps: 'jour' },
+  semaine: { lbl: 'Semaine', src: ['sig', 'act', 'ronde', 'barr', 'ctl', 'ctlnc'], temps: 'semaine' },
+  mois: { lbl: 'Mois', src: ['sig', 'act', 'ronde', 'barr', 'ctl', 'ctlnc'], temps: 'mois' }
 };
 const TABLEAU_DEFAUT = [
   { i: 'sig_statut', a: 'cat' }, { i: 'sig_n', a: 'agent' }, { i: 'sig_n', a: 'semaine' },
-  { i: 'sig_delai', a: 'cat' }, { i: 'barr_h', a: 'barriere' }, { i: 'ronde_veh', a: 'site' }
+  { i: 'ctl_nc', a: 'point' }, { i: 'sig_delai', a: 'cat' }, { i: 'barr_h', a: 'barriere' }, { i: 'ronde_veh', a: 'site' }
 ];
 const MOIS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
 function dSig(s) { return new Date(s.ts || ((s.jour || '').slice(0, 10) + 'T12:00:00')); }
@@ -2216,7 +2425,9 @@ async function donneesStats({ du, au, site }) {
     const o = new Date(b.ouverte.quand), f = b.fermee ? new Date(b.fermee.quand) : new Date();
     return { date: o, site: b.site, barriere: b.barriere, agent: b.ouverte.agent, motif: b.ouverte.motif, heures: Math.max(0, (f - o) / 3600000), enCours: !b.fermee };
   }).filter(r => dans(r.date));
-  return { sig, act, ronde, barr };
+  const ctl = ((await kvGet('controlesHist')) || []).filter(okSite).map(x => ({ date: new Date(x.ts || x.at), site: x.site, agent: x.agent, niveau: x.niveau, items: x.items, libelles: x.libelles })).filter(r => dans(r.date));
+  const ctlnc = ctl.flatMap(x => resumeControle(x.items, x.libelles).nc.map(point => ({ ...x, point })));
+  return { sig, act, ronde, barr, ctl, ctlnc };
 }
 const moyenne = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
 const arrondi = (v, n = 1) => v == null ? null : Math.round(v * 10 ** n) / 10 ** n;
@@ -2277,7 +2488,7 @@ function carteGraphique(spec, D, onRetirer) {
       maxBarThickness: 22, pointRadius: 4, pointBackgroundColor: SERIES[j], pointBorderColor: '#ffffff', pointBorderWidth: 2, tension: 0, spanGaps: true
     }));
     const grille = { color: '#e8ebf0', drawTicks: false }, ticks = { color: '#5d6b7c', padding: 6, font: { size: 12 } };
-    const entier = ['sig_n', 'sig_statut', 'act_n', 'ronde_n', 'barr_n'].includes(spec.i);
+    const entier = ['sig_n', 'sig_statut', 'act_n', 'ronde_n', 'barr_n', 'ctl_n', 'ctl_nc'].includes(spec.i);
     const ticksValeur = { ...ticks, precision: entier ? 0 : undefined, callback: v => String(v).replace('.', ',') };
     const chart = new Chart(canvas, {
       type: ligne ? 'line' : 'bar',
@@ -2344,6 +2555,7 @@ VIEWS.supStats = async (p = {}) => {
       tuile(clos.length, 'clos', D.sig.length ? `${Math.round(clos.length / D.sig.length * 100)} %` : null),
       tuile(delai == null ? '—' : String(arrondi(delai)).replace('.', ',') + ' j', 'délai moyen de clôture'),
       tuile(D.ronde.length, 'rondes'),
+      tuile(D.ctl.length, 'contrôles réalisés', `${D.ctlnc.length} non-conformité(s)`),
       tuile(veh == null ? '—' : String(arrondi(veh)).replace('.', ','), 'véhicules par ronde (moy.)'),
       tuile(D.barr.length, 'ouvertures de barrière', D.barr.some(r => r.enCours) ? 'dont en cours' : null),
       tuile(String(arrondi(hBarr)).replace('.', ',') + ' h', 'barrières ouvertes (cumul)')),
@@ -2415,10 +2627,10 @@ async function supExcel() {
       s.statut === 'clos' ? 'Clos' : suiviEtat(s), (s.actions || []).map(a => `${a.quand ? fmtDT(a.quand) : fmtJour(a.jour)} ${ACTIONS[a.type]}${a.dest ? ' — ' + a.dest : ''}${a.texte ? ' : ' + a.texte : ''}`).join(' | '),
       isVehicule(s.cat) || s.pm ? pmEtat(s) : '', s.pm ? s.pm.hist.map(x => `${fmtJour(x.jour)} ${PM_STATUTS[x.statut]}${x.obs ? ' : ' + x.obs : ''}`).join(' | ') : '', s.notesAgents || '', s.notes || '']);
   });
-  const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Véhicules comptés', 'Contrôles non RAS', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
+  const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Véhicules comptés', 'Non-conformités', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
   rondes.forEach(r => {
     const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : '';
-    const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => `${k} (${v})`).join(', ') : '';
+    const anos = [...(r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => `${k} (${v})`) : []), ...(r.controles || []).flatMap(c => c.nc.map(x => `${x} (${NIVEAUX[c.niveau].lbl.toLowerCase()})`))].join(', ');
     A2.push([siteNom(r.site), r.agent, fmtDT(r.debut), fmtDT(r.fin), dur, r.compte != null ? r.compte : '', anos, r.nbSig, r.nbRevue, g(r.geoDebut, 'lat'), g(r.geoDebut, 'lon'), g(r.geoDebut, 'acc'), [...new Set(r.alertes || [])].join(' ; '), r.dev]);
   });
   const A3 = [['Parking', 'Barrière', 'Ouverte le', 'Par', 'Motif', 'Commentaire', 'Saisie de l’ouverture', 'Refermée le', 'Par', 'Commentaire', 'Saisie de la fermeture', 'Durée (min)', 'En cours']];
@@ -2426,7 +2638,7 @@ async function supExcel() {
     const fin = b.fermee ? new Date(b.fermee.quand) : new Date();
     A3.push([siteNom(b.site), b.barriere, fmtDT(b.ouverte.quand), b.ouverte.agent || '', b.ouverte.motif || '', b.ouverte.comment || '', fmtDT(b.ouverte.ts), b.fermee ? fmtDT(b.fermee.quand) : '', b.fermee ? b.fermee.agent || '' : '', b.fermee ? b.fermee.comment || '' : '', b.fermee ? fmtDT(b.fermee.ts) : '', Math.round((fin - new Date(b.ouverte.quand)) / 60000), b.fermee ? '' : 'Oui']);
   });
-  const TYPES = { action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
+  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
   const A4 = [['Appareil', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Reçu par le relais', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Empreinte']];
   evs.forEach(e => {
     const ev = e.ev; let det = '';
@@ -2434,6 +2646,7 @@ async function supExcel() {
     if (ev.t === 'revue') det = `${ev.data.ref} : ${VERDICTS[ev.data.verdict]}${ev.data.comment ? ' — ' + ev.data.comment : ''}`;
     if (ev.t === 'checklist') det = Object.entries(ev.data.items || {}).map(([k, v]) => `${k} : ${v}`).join(' ; ');
     if (ev.t === 'comptage') det = `${ev.data.total} véhicule(s)`;
+    if (ev.t === 'controle') { const r = resumeControle(ev.data.items, ev.data.libelles); det = `${NIVEAUX[ev.data.niveau].lbl} : ${r.c} conforme(s)${r.nc.length ? ', non conforme : ' + r.nc.join(', ') : ''}`; }
     if (ev.t === 'action') det = `${ev.data.ref} : ${ACTIONS[ev.data.type]}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''}`;
     if (ev.t === 'ronde_fin') det = `${ev.data.nbSig} signalement(s)`;
     if (ev.t === 'barriere') det = `${ev.data.barriere} ${ev.data.action} — déclaré ${fmtDT(ev.data.quand)}${ev.data.motif ? ' — ' + ev.data.motif : ''}`;
@@ -2448,6 +2661,9 @@ async function supExcel() {
     ['Traitement', [['Réf.', 'Parking', 'Signalement', 'Date', 'Action', 'Auprès de', 'Détail', 'Intervention prévue le', 'Par'],
       ...sigs.flatMap(s => (s.actions || []).map(a => [s.ref, siteNom(s.site), sigTitre(s), a.quand ? fmtDT(a.quand) : fmtJour(a.jour), ACTIONS[a.type], a.dest || '', a.texte || '', a.prevu ? fmtDT(a.prevu) : '', a.par || '']))],
       [11, 12, 40, 16, 26, 16, 50, 18, 12]],
+    ['Contrôles', [['Date', 'Parking', 'Contrôle', 'Agent', 'Conformes', 'Non conformes', 'N’existe pas ici', 'Non faits'],
+      ...((await kvGet('controlesHist')) || []).slice().reverse().map(x => { const r = resumeControle(x.items, x.libelles); return [fmtDT(x.ts || x.at), siteNom(x.site), NIVEAUX[x.niveau].lbl, x.agent, r.c, r.nc.join(', '), r.na.join(', '), r.nf.join(', ')]; })],
+      [16, 12, 20, 12, 10, 50, 30, 30]],
     ['Barrières', A3, [12, 12, 16, 12, 22, 25, 16, 16, 12, 25, 16, 10, 8]],
     ['Journal', A4, [10, 6, 16, 11, 16, 16, 12, 12, 55, 11, 11, 10, 10, 10]]
   ]), `rondes_parkings_complet_${fileStamp()}.xlsx`, 'Rondes parkings');
@@ -2507,6 +2723,7 @@ VIEWS.supConfig = async () => {
   const tAgents = ta(c.agents), tMotifs = ta(c.motifs);
   const tDests = ta(c.dests.map(d => { const k = c.contacts[d] || {}; return [d, k.tel || '', k.mail || ''].join(' | ').replace(/( \| )+$/, ''); }), 170);
   const tTaxo = h('textarea', { value: taxoToText(c.cats), style: 'min-height:420px;font-size:15px' });
+  const tCtl = h('textarea', { value: controlesToText(c.controles), style: 'min-height:420px;font-size:15px' });
   const sitesInputs = c.sites.map(s => ({ nom: h('input', { type: 'text', value: s.nom }), barr: h('input', { type: 'text', value: s.barrieres.join(', ') }) }));
   const tel = h('input', { type: 'tel', value: c.urgenceTel || '', placeholder: '01 …' });
   const mail = h('input', { type: 'email', value: c.urgenceMail || '', placeholder: 'prenom.nom@ville-cachan.fr' });
@@ -2519,7 +2736,10 @@ VIEWS.supConfig = async () => {
     h('label', { class: 'f' }, 'Destinataires et coordonnées'),
     h('p', { class: 'muted small' }, 'Une ligne par destinataire : nom | téléphone | courriel. Les coordonnées servent aux boutons « Appeler » et « Courriel » du traitement.'),
     tDests,
-    h('label', { class: 'f' }, 'Catégories et sous-catégories'),
+    h('label', { class: 'f' }, 'Points de contrôle'),
+    h('p', { class: 'muted small' }, 'Trois rubriques : [Quotidien] (une fois par jour et par parking), [Mensuel] (tous les 30 jours), [Trimestriel] (tous les 90 jours). Une ligne par point : « - Libellé : ce qu’il faut regarder | catégorie du signalement en cas de non-conformité ». Un « ? » devant le libellé permet à l’agent d’indiquer que ce point n’existe pas dans le parking.'),
+    tCtl,
+    h('label', { class: 'f' }, 'Catégories et sous-catégories des signalements'),
     h('p', { class: 'muted small' }, 'Une catégorie par ligne, suivie si besoin de « | » et des destinataires proposés par défaut. Puis ses sous-catégories, une par ligne commençant par « - ». Un « ! » en fin de ligne marque une sous-catégorie urgente par défaut. Chaque catégorie est une ligne de contrôle de la ronde. « Autre (préciser) » est ajouté automatiquement.'),
     tTaxo,
     h('label', { class: 'f' }, 'Motifs d’ouverture de barrière (un par ligne)'), tMotifs,
@@ -2530,6 +2750,8 @@ VIEWS.supConfig = async () => {
     h('button', {
       class: 'ok', onclick: safe(async () => {
         const cats = parseTaxo(tTaxo.value);
+        const controles = parseControles(tCtl.value);
+        if (!controles.some(x => x.niveau === 'quotidien')) throw new Error('Aucun point de contrôle quotidien.');
         if (!cats.length) throw new Error('Aucune catégorie.');
         const vides = cats.filter(x => !x.subs.length).map(x => x.nom);
         if (vides.length) throw new Error('Catégorie sans sous-catégorie : ' + vides.join(', '));
@@ -2544,7 +2766,7 @@ VIEWS.supConfig = async () => {
           const b = si.barr.value.split(',').map(x => x.trim()).filter(Boolean);
           if (b.length) c.sites[k].barrieres = b;
         });
-        Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, motifs: lines(tMotifs), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
+        Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, controles, motifs: lines(tMotifs), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
         await publishCfg(c);
         toast('Enregistré. Transmis à tous les appareils.');
         go('home');

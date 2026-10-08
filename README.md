@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.4.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.5.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -54,8 +54,13 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 ### Ronde (agents)
 **Commencer ma ronde** → parking → agent → revue des signalements en cours (« Résolu » clôt le signalement) → écran de ronde :
 - **comptage des véhicules** : « +1 véhicule » à chaque véhicule, « −1 » et « Corriger » en cas d'erreur, puis **Valider le comptage** ; le compteur se replie (« modifier » pour le rouvrir) ;
-- **contrôles** : une ligne par catégorie, « RAS » ou « + Signaler », autant de signalements que nécessaire ;
-- **Terminer la ronde** : possible une fois le comptage validé et toutes les catégories contrôlées.
+- **contrôle quotidien** (à la première ronde du jour dans le parking) : pour chaque point, « Conforme » ou « Non conforme » ; « Non conforme » ouvre un signalement prérempli, autant de fois que nécessaire ;
+- **contrôles mensuel et trimestriel** : proposés pendant la ronde quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking) ; « Plus tard » garde les réponses déjà données ;
+- **N'existe pas ici** (points facultatifs : caisses, ascenseurs, désenfumage, interphones, bornes de recharge, colonnes sèches, locaux techniques) : le point n'est plus proposé dans ce parking ; le superviseur peut le **rétablir** ;
+- **+ Signalement** pour tout autre constat ;
+- **Terminer la ronde** : une fois le comptage validé et le contrôle quotidien complet.
+
+L'accueil indique les **contrôles à faire** par parking.
 
 ### Signalement
 Catégorie → « Quoi ? » (sous-catégorie ou « Autre (préciser) ») → précisions, photos, destinataires (proposés selon la catégorie), urgence. Véhicules : plaque, emplacement (numéro de place, niveau), marque/modèle/couleur. **Signalement hors ronde** depuis l'accueil.
@@ -76,20 +81,25 @@ Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, e
 - **Signalements** : sur PC, liste et fiche côte à côte ; filtres par statut, parking, catégorie, recherche (plaque, référence, texte) ; photos en galerie, agrandies d'un clic (flèches du clavier, Échap) ; traitement, constats, suivi PM ; interventions facultatives (clore, rouvrir, modifier, écrire aux agents, notes internes).
 - **Statistiques et graphiques** :
   - période (7 jours à 12 mois, tout, ou dates) et parking ;
-  - indicateurs clés : signalements, en cours, clos, délai moyen de clôture, rondes, véhicules par ronde, ouvertures et durée cumulée des barrières ;
-  - graphiques prêts, et **Créer un graphique** : un indicateur (signalements, en cours / clos, délai de clôture, actions de traitement, rondes, véhicules comptés, ouvertures ou durée d'ouverture des barrières) par catégorie, sous-catégorie, agent, parking, destinataire, barrière, motif, jour, semaine ou mois ;
+  - indicateurs clés : signalements, en cours, clos, délai moyen de clôture, rondes, contrôles réalisés et non-conformités, véhicules par ronde, ouvertures et durée cumulée des barrières ;
+  - graphiques prêts, et **Créer un graphique** : un indicateur (signalements, en cours / clos, délai de clôture, actions de traitement, contrôles réalisés, non-conformités, rondes, véhicules comptés, ouvertures ou durée d'ouverture des barrières) par catégorie, sous-catégorie, point de contrôle, type de contrôle, agent, parking, destinataire, barrière, motif, jour, semaine ou mois ;
   - chaque graphique : vue tableau, image, Excel.
-- **Exports** : Excel complet (Signalements, Rondes, Traitement, Barrières, Journal) et archive avec photos.
+- **Contrôles** : par parking, dernier contrôle quotidien, mensuel et trimestriel, échéances et retards, points « n'existe pas ici » (avec « Rétablir »), historique avec les non-conformités.
+- **Exports** : Excel complet (Signalements, Rondes, Traitement, Contrôles, Barrières, Journal) et archive avec photos.
 - **Suppression** : un signalement (bouton dans sa fiche), tous les signalements affichés par les filtres, une ronde ou toutes les rondes (**Toutes les rondes**). Les éléments supprimés disparaissent de tous les appareils, des statistiques et des exports ; ils restent restaurables depuis **Corbeille** (Paramétrage).
 
-### Catégories
-Modifiables par le superviseur, sans toucher au programme :
+### Points de contrôle et catégories
+Modifiables par le superviseur, sans toucher au programme (**Listes, catégories et coordonnées**) :
 ```
-Sécurité incendie | Ateliers          ← catégorie | destinataires proposés
+[Mensuel]
+- Bac d’absorbant : rempli, pelle présente | Sécurité incendie     ← point : ce qu'on regarde | catégorie en cas de non-conformité
+- ?Bornes de recharge : en service, câbles intacts | Bornes de …   ← « ? » : l'agent peut indiquer qu'il n'existe pas ici
+```
+```
+Sécurité incendie | Ateliers          ← catégorie de signalement | destinataires proposés
 - Extincteur absent ou déplacé        ← sous-catégorie
 - Odeur de fumée ou de brûlé !        ← « ! » : urgent par défaut
 ```
-Chaque catégorie est une ligne de contrôle de la ronde.
 
 ## 6. Bon à savoir
 
