@@ -1,5 +1,5 @@
 /**
- * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 3
+ * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 4
  *
  * Journal partagé entre les téléphones des agents et les appareils superviseurs.
  * Tout ce qui est stocké ici est chiffré sur les appareils avant l'envoi :
@@ -12,10 +12,16 @@
  *   n_<n>.bin        notes internes du superviseur (chiffrées pour les seuls superviseurs)
  *   coffre.bin       clés du superviseur, chiffrées par sa phrase de passe
  *   index.json       liste des fichiers (numéros, types, tailles) — aucun contenu
+ *   abonnements.json adresses de notification des appareils (aucun contenu de message :
+ *                    la notification dit seulement « nouveau message », le texte reste chiffré)
  *
  * REPARTIR DE ZÉRO : dans la barre d'outils de l'éditeur, choisir la fonction
  * « reinitialiserRelais » puis cliquer sur « Exécuter ». Tout le contenu du relais
  * est mis à la corbeille et les codes d'accès sont effacés.
+ *
+ * NOTIFICATIONS (version 4) : après la mise à jour, choisir la fonction
+ * « autoriserNotifications » puis « Exécuter », et accepter l'autorisation
+ * « se connecter à un service externe ».
  */
 var DOSSIER = 'Relais rondes parkings (chiffré)';
 var TAILLE_MAX = 30000000;      // caractères par dépôt
@@ -23,7 +29,7 @@ var PULL_OCTETS = 8000000;      // volume maximal renvoyé par relève
 var PULL_NOMBRE = 150;          // nombre maximal d'éléments renvoyés par relève
 
 function doGet() {
-  return json_({ ok: true, service: 'relais-rondes', v: 3 });
+  return json_({ ok: true, service: 'relais-rondes', v: 4 });
 }
 
 function doPost(e) {
@@ -38,6 +44,12 @@ function doPost(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/** À exécuter une fois depuis l'éditeur après la mise à jour en version 4 (autorisation d'envoi des notifications). */
+function autoriserNotifications() {
+  UrlFetchApp.fetch('https://fcm.googleapis.com/', { muteHttpExceptions: true });
+  Logger.log('Notifications autorisées.');
 }
 
 /** À exécuter depuis l'éditeur pour repartir de zéro. */
@@ -127,6 +139,36 @@ function traiter_(req) {
       return { ok: true, entries: out, last: last, more: more };
     }
 
+    case 'abonner': { // adresse de notification d'un appareil (agents ou superviseur)
+      var ep = String(req.endpoint || '');
+      if (!pushAutorise_(ep) || (req.role !== 'agents' && req.role !== 'sup')) return { ok: false, err: 'abonnement invalide' };
+      if (req.role === 'sup' && !estSup) return { ok: false, err: 'interdit' };
+      var abos = lireAbos_().filter(function (a) { return a.e !== ep; });
+      abos.push({ e: ep, r: req.role, at: new Date().toISOString() });
+      ecrireAbos_(abos.slice(-40));
+      return { ok: true };
+    }
+
+    case 'notifier': { // « nouveau message » vers les appareils agents ou superviseurs (sans contenu)
+      if ((req.cible !== 'agents' && req.cible !== 'sup') || !chaine_(req.k) || !req.jwts || typeof req.jwts !== 'object') return { ok: false, err: 'notification invalide' };
+      var garder = [], envoyes = 0, liste2 = lireAbos_();
+      for (var j = 0; j < liste2.length; j++) {
+        var a = liste2[j];
+        var jwt = a.r === req.cible ? req.jwts[origine_(a.e)] : null;
+        if (!jwt || typeof jwt !== 'string') { garder.push(a); continue; }
+        var code = 0;
+        try {
+          code = UrlFetchApp.fetch(a.e, { method: 'post', payload: '', muteHttpExceptions: true,
+            headers: { Authorization: 'vapid t=' + jwt + ', k=' + req.k, TTL: '86400', Urgency: 'high' } }).getResponseCode();
+        } catch (err) { code = 0; }
+        if (code === 404 || code === 410) continue;   // appareil désabonné : adresse oubliée
+        if (code >= 200 && code < 300) envoyes++;
+        garder.push(a);
+      }
+      ecrireAbos_(garder);
+      return { ok: true, envoyes: envoyes };
+    }
+
     case 'media': { // photos d'un dépôt (équipe et superviseurs ; elles restent chiffrées)
       var m = lireIndex_().filter(function (x) { return x.n === parseInt(req.n, 10) && x.mid; })[0];
       if (!m) return { ok: false, err: 'photos introuvables' };
@@ -166,6 +208,15 @@ function remplacer_(d, nom, data) {
   while (it.hasNext()) it.next().setTrashed(true);
   d.createFile(nom, data, MimeType.PLAIN_TEXT);
 }
+function lireAbos_() {
+  var f = premier_(dossier_(), 'abonnements.json');
+  try { return f ? JSON.parse(f.getBlob().getDataAsString() || '[]') : []; } catch (e) { return []; }
+}
+function ecrireAbos_(l) { remplacer_(dossier_(), 'abonnements.json', JSON.stringify(l)); }
+function pushAutorise_(ep) {
+  return ep.length < 1000 && /^https:\/\/(fcm\.googleapis\.com|updates\.push\.services\.mozilla\.com|[a-z0-9.-]+\.push\.apple\.com|[a-z0-9.-]+\.notify\.windows\.com)\//.test(ep);
+}
+function origine_(ep) { var m = /^https:\/\/[^\/]+/.exec(ep); return m ? m[0] : ''; }
 function chaine_(s) { return typeof s === 'string' && s.length > 0 && s.length <= TAILLE_MAX; }
 function pad_(n) { return ('0000000000' + (parseInt(n, 10) || 0)).slice(-10); }
 function jetonValide_(t) { return typeof t === 'string' && /^[A-Za-z0-9]{20,64}$/.test(t); }

@@ -1,4 +1,4 @@
-/* Rondes parkings — Ville de Cachan, DPMS — version 1.6
+/* Rondes parkings — Ville de Cachan, DPMS — version 1.7
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : rondes, comptage des véhicules, signalements (catégories et
  *   sous-catégories, plusieurs par catégorie, en ronde ou hors ronde), barrières laissées ouvertes.
@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.7.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -743,10 +743,10 @@ async function fold() {
   for (const [id, d] of suppr) if (!annul.has(id)) { (d.sigs || []).forEach(x => del.sigs.add(x)); (d.rids || []).forEach(x => del.rids.add(x)); }
   const annulees = new Set();
   for (const { e } of items) if (e.kind === 'ev' && e.ev.t === 'ronde_annulee' && e.ev.rid) annulees.add(e.ev.rid);
-  const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
+  const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm', 'msg'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
 
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [], regs = [];
-  let cfg = null;
+  let cfg = null, vapid = null;
   const alertes = [];
   for (const { e } of items) {
     if (e.kind === 'ev') {
@@ -765,8 +765,11 @@ async function fold() {
           dests: ev.data.dests, urgent: ev.data.urgent, horsRonde: !!ev.data.horsRonde, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
           thumb: e.local && typeof ev.data.thumb === 'string' ? ev.data.thumb : null,
           photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), ts, geo: dec && dec.geo, dev: ev.dev, seq: ev.seq,
-          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], controle: ev.data.controle || null
+          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], messages: [], controle: ev.data.controle || null
         });
+      } else if (ev.t === 'msg') {
+        const s = sigs.get(ev.data.sig);
+        if (s) s.messages.push({ id: `${ev.dev}:${ev.seq}`, role: 'agent', de: ev.agent || 'Agent', quand: ev.data.quand || ts || ev.jour, texte: ev.data.texte || '', fait: !!ev.data.fait });
       } else if (ev.t === 'revue') {
         const s = sigs.get(ev.data.sig);
         if (s) {
@@ -817,6 +820,9 @@ async function fold() {
         const s = sigs.get(d.action.sig);
         if (s) s.actions.push({ ...d.action, quand: d.action.quand || d.ts, jour: (d.ts || '').slice(0, 10), par: d.par || 'DPMS' });
       }
+      else if (d.type === 'msg') { const s = sigs.get(d.sig); if (s) s.messages.push({ id: d.id, role: 'dpms', de: 'DPMS', quand: d.ts, texte: d.texte || '', demande: !!d.demande }); }
+      else if (d.type === 'demande_close') { const s = sigs.get(d.sig); if (s) s.messages.push({ id: d.id, role: 'dpms', de: 'DPMS', quand: d.ts, texte: '', cloture: true }); }
+      else if (d.type === 'vapid') { if (!vapid && d.pub && d.priv) vapid = { pub: d.pub, priv: d.priv }; }
       else if (d.type === 'registre') regs.push({ site: d.site, at: d.ts, note: d.note || '', par: d.par || 'DPMS' });
       else if (d.type === 'ctl_reactiver') { if (ctl[d.site]) ctl[d.site].na.delete(d.item); }
       else if (d.type === 'sig') {
@@ -858,7 +864,14 @@ async function fold() {
     await kvSet('alertes', alertes.sort((a, b) => (b.at || '').localeCompare(a.at || '')));
     await kvSet('devs', devs);
   }
+  for (const s of sigs.values()) {   // fil d'échanges : ordre chronologique, demande d'action en attente
+    s.messages = (s.messages || []).sort((a, b) => (a.quand || '').localeCompare(b.quand || ''));
+    let dem = null;
+    for (const m of s.messages) { if (m.demande) dem = m; else if (m.fait || m.cloture) dem = null; }
+    s.demande = dem ? dem.id : null;
+  }
   await dbReplaceAll('sigs', [...sigs.values()]);
+  if (vapid) await kvSet('vapid', vapid);
   await kvSet('barrieres', [...barr.values()]);
   await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
   await kvSet('controles', Object.fromEntries(Object.entries(ctl).map(([k, v]) => [k, { ...v, na: [...v.na] }])));
@@ -920,12 +933,15 @@ function syncNow() {
       const r = estEquipe() ? await agentSync() : await supSync();
       await kvDel('syncErr');
       await kvSet('lastSync', new Date().toISOString());
+      maintenirPush();
+      majBadge();
       return r;
     } catch (e) { await kvSet('syncErr', { at: new Date().toISOString(), msg: e.message }); return { err: e.message }; }
     finally { state.sync.busy = false; _syncP = null; }
   })();
   return _syncP;
 }
+let _notifSup = false, _notifAgents = false;
 async function agentSync() {
   const dev = await kvGet('dev');
   let sent = 0;
@@ -941,6 +957,7 @@ async function agentSync() {
       }
       if (bytes > LOT_MAX_OCTETS) break;
     }
+    if (batch.some(ev => ev.t === 'msg')) _notifSup = true;
     const data = await encJSON({ v: 3, dev, events: batch });
     const media = Object.keys(files).length ? b64u.enc(await teamEnc(fflate.zipSync(files))) : null;
     const r = await rel('put', { dev, data, media }, 180000);
@@ -952,6 +969,7 @@ async function agentSync() {
   }
   const got = await pullAll(['p', 'd']);
   if (sent || got) await fold();
+  if (_notifSup) { _notifSup = false; notifier('sup'); }
   return { sent, got };
 }
 async function pullAll(kinds) {
@@ -1156,6 +1174,7 @@ async function agentHome() {
   });
   const parSuivi = SUIVIS.map(e => [e, enCours.filter(s => suiviEtat(s) === e).length]).filter(([, n]) => n);
   return page('Rondes parkings', null,
+    await carteMessagesAccueil(),
     ronde ? h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
       h('h3', null, `Ronde en cours : ${siteNom(ronde.site)}`),
       h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
@@ -1166,6 +1185,7 @@ async function agentHome() {
     h('div', { class: 'row' },
       h('button', { class: 'sec', onclick: () => go('signalement', { from: 'hr' }) }, 'Signalement hors ronde'),
       h('button', { class: 'sec', onclick: () => go('barriere', {}) }, 'Barrière ouverte')),
+    await cartePush(),
     ouvertes.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
     h('div', { class: 'card' }, h('h2', null, 'Traitement des signalements'),
       parSuivi.length ? parSuivi.map(([e, n]) => h('button', { class: 'list-item', onclick: () => go('suivi', { f: e }) }, h('div', { class: 'stat' }, h('span', null, e), h('b', null, n))))
@@ -1265,6 +1285,9 @@ VIEWS.revue = async () => {
         : th ? h('div', { class: 'gallery grande' }, h('img', { src: th, alt: 'Photo du signalement', onclick: () => lightbox([th], 0) }))
         : h('p', { class: 'muted small' }, 'Pas de photo pour ce signalement.'),
       s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
+      bandeauDemande(s),
+      (s.messages || []).length ? h('button', { class: 'sec', style: 'display:flex;gap:8px;align-items:center;justify-content:center', onclick: () => go('echanges', { id: s.id }) },
+        icoCourrier(await nonLus(s), !!s.demande), 'Échanges avec le DPMS') : null,
       pmBanner(s),
       h('p', { style: 'margin:10px 0 6px;font-weight:600' }, 'Aujourd’hui :'),
       h('div', { class: 'verdicts' }, ...vbtns),
@@ -1805,6 +1828,192 @@ function lightbox(urls, i) {
   show(i);
 }
 
+/* ====================================================================== */
+/* ÉCHANGES DPMS ↔ AGENTS (un fil par signalement)                        */
+/* ====================================================================== */
+const ICO_COURRIER = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>';
+function icoCourrier(n, alerte) { return h('span', { class: 'courrier' + (alerte ? ' alerte' : ''), title: 'Échanges', html: ICO_COURRIER + (n ? `<b>${Number(n)}</b>` : '') }); }
+const cleLus = () => state.mode === 'superviseur' ? 'msgLusSup' : 'msgLus';
+const roleAutre = () => state.mode === 'superviseur' ? 'agent' : 'dpms';
+async function nonLus(s, lus) {
+  lus = lus || new Set((await kvGet(cleLus())) || []);
+  return (s.messages || []).filter(m => m.role === roleAutre() && !m.cloture && !lus.has(m.id)).length;
+}
+async function marquerLus(s) {
+  const lus = new Set((await kvGet(cleLus())) || []);
+  const avant = lus.size;
+  (s.messages || []).forEach(m => lus.add(m.id));
+  if (lus.size !== avant) await kvSet(cleLus(), [...lus]);
+}
+async function etatEchanges() {
+  const lus = new Set((await kvGet(cleLus())) || []);
+  const out = [];
+  for (const s of await dbAll('sigs')) {
+    if (!(s.messages || []).length) continue;
+    out.push({ s, n: await nonLus(s, lus), demande: !!s.demande, dernier: s.messages[s.messages.length - 1] });
+  }
+  return out.sort((a, b) => (b.n > 0) - (a.n > 0) || b.demande - a.demande || (b.dernier.quand || '').localeCompare(a.dernier.quand || ''));
+}
+function filMessages(s) {
+  const ms = s.messages || [];
+  if (!ms.length) return h('p', { class: 'muted small' }, 'Aucun échange pour l’instant.');
+  const moi = m => (state.mode === 'superviseur') === (m.role === 'dpms');
+  return h('div', { class: 'fil' }, ...ms.map(m => m.cloture
+    ? h('div', { class: 'fil-sys' }, `${fmtDT(m.quand)} — demande d’action close par le DPMS`)
+    : h('div', { class: 'bulle' + (moi(m) ? ' moi' : '') + (m.demande ? ' demande' : '') },
+      h('div', { class: 'bulle-tete' }, h('b', null, m.de), ` · ${fmtDT(m.quand)} `,
+        m.demande ? h('span', { class: 'badge b-warn' }, 'Demande d’action') : null, m.fait ? h('span', { class: 'badge b-ok' }, 'Action faite') : null),
+      m.texte ? h('div', { class: 'bulle-txt' }, m.texte) : null)));
+}
+async function formReponseAgent(s, apres) {
+  const d = { par: await agentPrefere(), texte: '' };
+  const ta = h('textarea', { placeholder: 'Votre réponse au DPMS (ce qui a été fait, ce qui reste à faire…)', oninput: e => d.texte = e.target.value });
+  const envoyer = fait => safe(async () => {
+    if (!d.par) throw new Error('Indiquez qui répond.');
+    if (!fait && !d.texte.trim()) throw new Error('Écrivez votre réponse.');
+    if (fait && !confirm('Indiquer au DPMS que l’action demandée est faite ?')) return;
+    await appendEvent('msg', { site: s.site, agent: d.par }, { sig: s.id, ref: s.ref, texte: d.texte.trim(), fait: !!fait, quand: new Date().toISOString() });
+    await fold();
+    await marquerLus(await dbGet('sigs', s.id));
+    toast(fait ? 'Action signalée comme faite au DPMS.' : 'Réponse envoyée au DPMS.');
+    syncNow().then(refreshIfHome);
+    apres();
+  });
+  return h('div', { class: 'reponse' },
+    h('label', { class: 'f' }, 'Qui répond ?'), chips(state.cfg.agents, d.par, v => d.par = v), ta,
+    h('div', { class: 'row' },
+      h('button', { class: 'ok', onclick: envoyer(false) }, 'Répondre'),
+      s.demande ? h('button', { class: 'accent', onclick: envoyer(true) }, 'Action faite') : null));
+}
+function bandeauDemande(s) {
+  if (!s.demande) return null;
+  const m = s.messages.find(x => x.id === s.demande);
+  return h('div', { class: 'banner warn', style: 'display:flex;gap:8px;align-items:flex-start' }, icoCourrier(0, true),
+    h('div', null, h('b', null, 'Demande d’action du DPMS'), m && m.texte ? h('div', null, m.texte) : null));
+}
+async function carteEchangesAgents(s, apres) {
+  await marquerLus(s);
+  return h('div', { class: 'card' }, h('h2', null, 'Échanges avec le DPMS'),
+    filMessages(s), await formReponseAgent(s, apres));
+}
+VIEWS.echanges = async ({ id }) => {
+  const s = await dbGet('sigs', id);
+  if (!s) return page('Échanges', { back: true }, h('p', null, 'Signalement introuvable.'));
+  const th = await thumbOf(s);
+  return page('Échanges', { back: true },
+    h('div', { class: 'card', style: 'display:flex;gap:10px;align-items:flex-start' },
+      th ? h('img', { src: th, alt: '', class: 'vignette', onclick: () => lightbox([th], 0) }) : null,
+      h('div', null, h('div', { class: 'l1' }, sigTitre(s)), h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${depuisJours(s.jour)}${s.emplacement ? ' — ' + s.emplacement : ''}`),
+        s.desc ? h('div', { class: 'small' }, s.desc) : null,
+        h('button', { class: 'link', style: 'width:auto;margin:0;min-height:32px', onclick: () => go('suiviSig', { id: s.id }) }, 'Voir la fiche complète'))),
+    bandeauDemande(s),
+    await carteEchangesAgents(s, () => go('echanges', { id }, { noPush: true })));
+};
+VIEWS.messagesAgents = async () => {
+  const l = await etatEchanges();
+  return page('Messages du DPMS', { back: true },
+    l.length ? l.map(({ s, n, demande, dernier }) => h('button', { class: 'list-item' + (n || demande ? ' msg-new' : ''), onclick: () => go('echanges', { id: s.id }) },
+      h('div', { style: 'display:flex;gap:10px;align-items:flex-start' }, icoCourrier(n, n > 0 || demande),
+        h('div', { style: 'flex:1;min-width:0' },
+          h('div', { class: 'l1' }, sigTitre(s), demande ? h('span', { class: 'badge b-warn' }, 'Action demandée') : null),
+          h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref}`),
+          h('div', { class: 'small' }, `${dernier.de} : ${dernier.cloture ? 'demande close' : dernier.texte || (dernier.fait ? 'action faite' : '')}`)))))
+      : h('p', { class: 'muted' }, 'Aucun échange.'));
+};
+async function carteMessagesAccueil() {
+  const l = await etatEchanges();
+  const nonlus = l.reduce((a, x) => a + x.n, 0), dem = l.filter(x => x.demande).length;
+  if (!nonlus && !dem) return null;
+  const sup = state.mode === 'superviseur';
+  return h('button', { class: 'list-item msg-new', onclick: () => sup ? go('supSigs', { f: 'echanges' }) : go('messagesAgents') },
+    h('div', { style: 'display:flex;gap:12px;align-items:center' }, icoCourrier(nonlus, true),
+      h('div', null, h('div', { class: 'l1' }, sup ? 'Échanges avec les agents' : 'Messages du DPMS'),
+        h('div', { class: 'small' }, [nonlus ? `${nonlus} ${sup ? 'réponse(s) non lue(s)' : 'message(s) non lu(s)'}` : null, dem ? `${dem} demande(s) d’action en attente` : null].filter(Boolean).join(' · ')))));
+}
+async function carteEchangesSup(s, recharger) {
+  await marquerLus(s);
+  const ta = h('textarea', { placeholder: 'Question ou consigne aux agents (ex. : quelles suites ont été données ?)' });
+  const envoyer = demande => safe(async () => {
+    const texte = ta.value.trim();
+    if (!texte) throw new Error('Écrivez le message.');
+    await queueDec('d', { type: 'msg', id: uuid(), ts: new Date().toISOString(), sig: s.id, ref: s.ref, texte, demande: !!demande, par: 'DPMS' });
+    await fold(); syncNow();
+    toast(demande ? 'Demande d’action envoyée aux agents.' : 'Message envoyé aux agents.');
+    recharger();
+  });
+  return h('div', { class: 'card' }, h('h2', null, 'Échanges avec les agents'),
+    filMessages(s), ta,
+    h('div', { class: 'row' },
+      h('button', { class: 'sec', onclick: envoyer(false) }, 'Envoyer'),
+      h('button', { class: 'accent', onclick: envoyer(true) }, 'Demande d’action')),
+    s.demande ? h('button', { class: 'link', onclick: safe(async () => {
+      await queueDec('d', { type: 'demande_close', id: uuid(), ts: new Date().toISOString(), sig: s.id, par: 'DPMS' });
+      await fold(); syncNow(); toast('Demande close.'); recharger();
+    }) }, 'Clore la demande sans réponse') : null);
+}
+
+/* Notifications sur l'appareil (Web Push, sans contenu : « nouveau message ») */
+async function majBadge() {
+  try { if (!navigator.setAppBadge || !state.cfg) return; const l = await etatEchanges(); const n = l.reduce((a, x) => a + x.n, 0) + l.filter(x => x.demande && state.mode !== 'superviseur').length; n ? navigator.setAppBadge(n) : navigator.clearAppBadge(); } catch (e) { }
+}
+const PUSH_AUDS = ['https://fcm.googleapis.com', 'https://updates.push.services.mozilla.com', 'https://web.push.apple.com'];
+const pushDispo = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+async function assurerVapid() {   // superviseur : clés de notification de l'équipe (la première publiée fait foi)
+  if (await kvGet('vapid')) return false;
+  if (((await kvGet('decQueue')) || []).some(q => q.d && q.d.type === 'vapid')) return false;
+  const k = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = b64u.enc(new Uint8Array(await crypto.subtle.exportKey('raw', k.publicKey)));
+  const priv = await crypto.subtle.exportKey('jwk', k.privateKey);
+  await queueDec('d', { type: 'vapid', id: uuid(), ts: new Date().toISOString(), pub, priv });
+  return true;
+}
+async function jwtVapid(aud, priv) {
+  const key = await crypto.subtle.importKey('jwk', { kty: priv.kty, crv: priv.crv, x: priv.x, y: priv.y, d: priv.d }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const enc = o => b64u.enc(te.encode(JSON.stringify(o)));
+  const t = enc({ typ: 'JWT', alg: 'ES256' }) + '.' + enc({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: appBaseURL() });
+  return t + '.' + b64u.enc(new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, te.encode(t))));
+}
+async function notifier(cible) {
+  try {
+    const v = await kvGet('vapid'); if (!v) return;
+    const jwts = {}; for (const a of PUSH_AUDS) jwts[a] = await jwtVapid(a, v.priv);
+    await rel('notifier', { cible, jwts, k: v.pub }, 30000);
+  } catch (e) { console.warn('notification non envoyée :', e.message); }
+}
+async function abonnerPush(v, force) {
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  const cle = sub && sub.options && sub.options.applicationServerKey ? b64u.enc(new Uint8Array(sub.options.applicationServerKey)) : null;
+  if (sub && cle !== v.pub) { await sub.unsubscribe(); sub = null; }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u.dec(v.pub) });
+  const prev = await kvGet('pushAbo');
+  if (force || !prev || prev.endpoint !== sub.endpoint || prev.pub !== v.pub || Date.now() - prev.at > 86400000) {
+    try { await rel('abonner', { endpoint: sub.endpoint, role: state.mode === 'superviseur' ? 'sup' : 'agents' }, 30000); }
+    catch (e) { if (/opération inconnue/.test(e.message)) throw new Error('le relais doit être mis à jour (version 4) pour les notifications'); throw e; }
+    await kvSet('pushAbo', { endpoint: sub.endpoint, pub: v.pub, at: Date.now() });
+  }
+}
+async function maintenirPush() {
+  try {
+    if (!pushDispo() || Notification.permission !== 'granted' || !['agent', 'superviseur'].includes(state.mode)) return;
+    const v = await kvGet('vapid');
+    if (v && (await kvGet('pushAbo'))) await abonnerPush(v);
+  } catch (e) { console.warn(e.message); }
+}
+async function cartePush() {
+  if (!pushDispo() || !['agent', 'superviseur'].includes(state.mode)) return null;
+  if (Notification.permission === 'granted' && (await kvGet('pushAbo'))) return null;
+  if (Notification.permission === 'denied') return h('p', { class: 'muted small' }, 'Notifications bloquées sur cet appareil : les autoriser pour ce site dans les réglages de Chrome.');
+  return h('button', { class: 'sec', onclick: safe(async () => {
+    const v = await kvGet('vapid');
+    if (!v) throw new Error('Notifications pas encore prêtes : un superviseur doit d’abord ouvrir son application connectée au réseau.');
+    if ((await Notification.requestPermission()) !== 'granted') throw new Error('Notifications refusées sur cet appareil.');
+    showBusy('Activation…');
+    try { await abonnerPush(v, true); } finally { hideBusy(); }
+    toast('Notifications activées sur cet appareil.'); render();
+  }) }, 'Activer les notifications sur cet appareil');
+}
+
 /* ---------- Vues de traitement (équipe : téléphone agents ou PC de la loge) ---------- */
 VIEWS.suivi = async ({ f = 'À transmettre' }) => {
   const enCours = (await dbAll('sigs')).filter(s => s.statut === 'ouvert');
@@ -1812,11 +2021,12 @@ VIEWS.suivi = async ({ f = 'À transmettre' }) => {
   const cards = [];
   for (const s of list) {
     const th = await thumbOf(s);
+    const nl = await nonLus(s);
     cards.push(h('button', { class: 'list-item', onclick: () => go('suiviSig', { id: s.id }) },
       h('div', { style: 'display:flex;gap:10px;align-items:flex-start' },
         th ? h('img', { src: th, alt: '', class: 'vignette' }) : null,
         h('div', { style: 'flex:1;min-width:0' },
-          h('div', { class: 'l1' }, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null),
+          h('div', { class: 'l1' }, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, (s.messages || []).length ? icoCourrier(nl, nl > 0 || !!s.demande) : null),
           h('div', { class: 'small' }, suiviBadge(s), ' ', (s.dests || []).join(', ')),
           h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — ${depuisJours(s.jour)}${s.plaque ? ' — ' + s.plaque : ''}`)))));
   }
@@ -1843,6 +2053,7 @@ VIEWS.suiviSig = async ({ id }) => {
   });
   const { photos, erreurs } = await photosDe([...(s.photos || []), ...(s.suivi || []).flatMap(v => v.photos || [])]);
   return page(s.ref, { back: () => go('suivi', { f: 'tous' }, { noPush: true }) },
+    bandeauDemande(s),
     h('div', { class: 'card' },
       h('h3', null, sigTitre(s), ' ', suiviBadge(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null),
       h('p', { class: 'muted small' }, `${siteNom(s.site)} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}${s.horsRonde ? ' (hors ronde)' : ''} — à signaler à : ${(s.dests || []).join(', ')}`),
@@ -1854,6 +2065,7 @@ VIEWS.suiviSig = async ({ id }) => {
       pmBanner(s),
       (s.suivi || []).length ? h('div', null, h('p', { class: 'small', style: 'font-weight:600;margin:10px 0 2px' }, 'Constats en ronde'),
         ...s.suivi.map(v => h('p', { class: 'small', style: 'margin:2px 0' }, `${fmtJour(v.jour)} — ${v.agent || ''} : ${VERDICTS[v.verdict]}${v.comment ? ' — ' + v.comment : ''}`))) : null),
+    (s.messages || []).length ? await carteEchangesAgents(s, recharger) : null,
     contactsBloc(s, form),
     h('div', { class: 'card' }, h('h2', null, 'Actions entreprises'), ...journalActions(s)),
     form);
@@ -1863,7 +2075,7 @@ VIEWS.suiviSig = async ({ id }) => {
 async function journalEquipe() {
   const sp = (await kvGet('supprimes')) || { sigs: [], rids: [] };
   const ds = new Set(sp.sigs), dr = new Set(sp.rids);
-  const garde = ev => !((ev.t === 'signalement' && ds.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && ds.has(ev.data.sig)) || (ev.rid && dr.has(ev.rid) && !['signalement', 'revue'].includes(ev.t)));
+  const garde = ev => !((ev.t === 'signalement' && ds.has(ev.data.id)) || (['revue', 'action', 'pm', 'msg'].includes(ev.t) && ds.has(ev.data.sig)) || (ev.rid && dr.has(ev.rid) && !['signalement', 'revue'].includes(ev.t)));
   return (await journalEquipeBrut()).filter(garde);
 }
 async function journalEquipeBrut() {
@@ -1887,6 +2099,7 @@ async function agentExcel(jours) {
     else if (ev.t === 'comptage') aoa.push([...base, 'Comptage des véhicules', '', '', '', '', '', '', '', '', ev.data.total, '']);
     else if (ev.t === 'barriere') aoa.push([...base, ev.data.action === 'ouverte' ? 'Barrière ouverte' : 'Barrière refermée', '', '', ev.data.barriere, ev.data.motif || '', '', '', '', '', fmtDT(ev.data.quand), ev.data.comment || '']);
     else if (ev.t === 'action') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Traitement : ' + ACTIONS[ev.data.type], ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', ev.data.dest || '', '', ev.data.prevu ? 'prévue le ' + fmtDT(ev.data.prevu) : '', ev.data.texte || '']); }
+    else if (ev.t === 'msg') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Message au DPMS', ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', '', '', ev.data.fait ? 'Action faite' : '', ev.data.texte || '']); }
     else if (ev.t === 'pm') { const s = refs.get(ev.data.sig) || {}; aoa.push([...base, 'Police municipale', ev.data.ref, s.cat || '', s.sub || '', s.desc || '', s.plaque || '', s.emplacement || '', '', '', PM_STATUTS[ev.data.statut], ev.data.obs || '']); }
   }
   if (aoa.length === 1) { toast('Aucune saisie sur la période.'); return; }
@@ -2137,9 +2350,18 @@ async function queueDec(kind, d) {
 async function supSync() {
   const vault = await kvGet('vaultPending');
   if (vault) { await rel('putVault', { data: vault }); await kvDel('vaultPending'); }
+  await viderFileSup();
+  const got = await pullAll(['p', 'd', 'n']);
+  await fold();
+  if (await assurerVapid()) { await viderFileSup(); await fold(); }
+  if (_notifAgents) { _notifAgents = false; notifier('agents'); }
+  return { got };
+}
+async function viderFileSup() {
   let q = (await kvGet('decQueue')) || [];
   while (q.length) {
     const it = q[0];
+    if (it.d && (it.d.type === 'msg')) _notifAgents = true;
     const data = it.kind === 'n'
       ? b64u.enc(await sealBytesFor(await getPubKey(), fflate.deflateSync(te.encode(JSON.stringify(it.d)))))
       : await encJSON(it.d);
@@ -2147,9 +2369,6 @@ async function supSync() {
     await dbPut('entries', { k: `${it.kind}:${r.n}`, kind: it.kind === 'n' ? 'note' : 'dec', n: r.n, at: r.at, dec: it.d });
     q = q.slice(1); await kvSet('decQueue', q);
   }
-  const got = await pullAll(['p', 'd', 'n']);
-  await fold();
-  return { got };
 }
 
 async function supHome() {
@@ -2175,6 +2394,7 @@ async function supHome() {
     alertes.length ? h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supAlertes') },
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
+    await carteMessagesAccueil(),
     await alerteRegistres(),
     barrOuv.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...barrOuv.map(b => barriereLigne(b, false))) : null,
     h('button', { class: 'big', onclick: () => go('supStats') }, 'Statistiques et graphiques'),
@@ -2196,7 +2416,8 @@ async function supHome() {
       h('button', { class: 'sec', onclick: () => go('supQR') }, 'Configurer les appareils (QR et liens)'),
       h('button', { class: 'sec', onclick: () => go('supConfig') }, 'Listes, catégories et coordonnées'),
       h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Relais et appareils'),
-      h('button', { class: 'sec', onclick: () => go('supCorbeille') }, 'Corbeille (éléments supprimés)')),
+      h('button', { class: 'sec', onclick: () => go('supCorbeille') }, 'Corbeille (éléments supprimés)'),
+      await cartePush()),
     Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Appareils de l’équipe'),
       ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', { style: 'white-space:nowrap;margin-right:8px' }, d + (v.role === 'pm' ? ' (PM)' : '')), h('span', { class: 'muted small', style: 'text-align:right' }, `${v.seq} saisies — dernier envoi ${fmtQuand(v.at)}`)))) : null,
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
@@ -2328,15 +2549,19 @@ VIEWS.supRelais = async () => page('Relais et appareils', { back: true },
 const ecranLarge = () => window.innerWidth >= 1000;
 VIEWS.supSigs = async ({ f = 'ouvert', site = '', cat = '', q = '', sel = null }) => {
   const all = await dbAll('sigs');
-  const tests = { ouvert: s => s.statut === 'ouvert', a_transmettre: s => s.statut === 'ouvert' && suiviEtat(s) === 'À transmettre', clos: s => s.statut === 'clos', vehicules: s => isVehicule(s.cat), tous: () => true };
+  const lus = new Set((await kvGet(cleLus())) || []);
+  const nl = new Map(); for (const x of all) nl.set(x.id, await nonLus(x, lus));
+  const tests = { ouvert: s => s.statut === 'ouvert', a_transmettre: s => s.statut === 'ouvert' && suiviEtat(s) === 'À transmettre', clos: s => s.statut === 'clos', vehicules: s => isVehicule(s.cat), echanges: s => (s.messages || []).length > 0, tous: () => true };
   const qq = (q || '').toLowerCase();
   const list = all.filter(s => tests[f](s) && (!site || s.site === site) && (!cat || s.cat === cat)
     && (!qq || [s.ref, s.cat, s.sub, s.desc, s.plaque, s.emplacement, s.agent, s.vehicule].join(' ').toLowerCase().includes(qq)))
-    .sort((a, b) => (b.urgent - a.urgent) || (b.ts || b.jour || '').localeCompare(a.ts || a.jour || ''));
+    .sort(f === 'echanges'
+      ? (a, b) => (nl.get(b.id) > 0) - (nl.get(a.id) > 0) || !!b.demande - !!a.demande || ((b.messages.slice(-1)[0] || {}).quand || '').localeCompare((a.messages.slice(-1)[0] || {}).quand || '')
+      : (a, b) => (b.urgent - a.urgent) || (b.ts || b.jour || '').localeCompare(a.ts || a.jour || ''));
   const nav = p => go('supSigs', { f, site, cat, q, sel, ...p }, { noPush: true, keepScroll: true });
   const large = ecranLarge();
   const filtres = h('div', { class: 'card' },
-    h('div', { class: 'chips' }, ...[['ouvert', 'En cours'], ['a_transmettre', 'À transmettre'], ['clos', 'Clos'], ['vehicules', 'Véhicules'], ['tous', 'Tous']].map(([k, l]) =>
+    h('div', { class: 'chips' }, ...[['ouvert', 'En cours'], ['a_transmettre', 'À transmettre'], ['clos', 'Clos'], ['vehicules', 'Véhicules'], ['echanges', 'Échanges'], ['tous', 'Tous']].map(([k, l]) =>
       h('button', { class: 'chip' + (f === k ? ' on' : ''), onclick: () => nav({ f: k, sel: null }) }, `${l} (${all.filter(tests[k]).length})`))),
     h('div', { class: 'filtres' },
       h('select', { onchange: e => nav({ site: e.target.value, sel: null }) }, h('option', { value: '' }, 'Tous les parkings'), ...state.cfg.sites.map(s => h('option', { value: s.id, selected: s.id === site ? true : null }, s.nom))),
@@ -2344,7 +2569,7 @@ VIEWS.supSigs = async ({ f = 'ouvert', site = '', cat = '', q = '', sel = null }
       h('input', { type: 'search', value: q, placeholder: 'Rechercher (plaque, réf., texte…)', onchange: e => nav({ q: e.target.value, sel: null }) })),
     list.length ? h('button', { class: 'link', style: 'color:var(--bad)', onclick: safe(async () => {
       if (prompt(`Supprimer les ${list.length} signalement(s) affiché(s) par ces filtres ?\nIls disparaîtront de tous les appareils, des statistiques et des exports (annulable depuis la corbeille).\nTapez SUPPRIMER pour confirmer.`) !== 'SUPPRIMER') return;
-      await supprimer({ sigs: list.map(x => x.id), quoi: `${list.length} signalement(s) (filtre : ${{ ouvert: 'en cours', a_transmettre: 'à transmettre', clos: 'clos', vehicules: 'véhicules', tous: 'tous' }[f]}${site ? ', ' + siteNom(site) : ''}${cat ? ', ' + cat : ''}${q ? ', « ' + q + ' »' : ''})` });
+      await supprimer({ sigs: list.map(x => x.id), quoi: `${list.length} signalement(s) (filtre : ${{ ouvert: 'en cours', a_transmettre: 'à transmettre', clos: 'clos', vehicules: 'véhicules', echanges: 'échanges', tous: 'tous' }[f]}${site ? ', ' + siteNom(site) : ''}${cat ? ', ' + cat : ''}${q ? ', « ' + q + ' »' : ''})` });
       toast(`${list.length} signalement(s) supprimé(s).`); nav({ sel: null });
     }) }, `Supprimer les ${list.length} signalement(s) affiché(s)…`) : null);
   const items = [];
@@ -2355,7 +2580,8 @@ VIEWS.supSigs = async ({ f = 'ouvert', site = '', cat = '', q = '', sel = null }
         th ? h('img', { src: th, alt: '', class: 'vignette' }) : h('div', { class: 'vignette vide' }),
         h('div', { style: 'flex:1;min-width:0' },
           h('div', { class: 'l1' }, sigTitre(s)),
-          h('div', { class: 'small' }, statutBadge(s.statut), s.statut === 'ouvert' ? suiviBadge(s) : null, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, isVehicule(s.cat) ? pmBadge(s) : null),
+          h('div', { class: 'small' }, statutBadge(s.statut), s.statut === 'ouvert' ? suiviBadge(s) : null, s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, isVehicule(s.cat) ? pmBadge(s) : null,
+            (s.messages || []).length ? icoCourrier(nl.get(s.id), nl.get(s.id) > 0) : null, s.demande ? h('span', { class: 'badge b-warn' }, 'Action demandée') : null),
           h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ts ? fmtDT(s.ts) : fmtJour(s.jour)} — ${s.agent || ''}${s.horsRonde ? ' (hors ronde)' : ''}`),
           s.plaque ? h('div', { class: 'small' }, h('span', { class: 'plaque' }, s.plaque), s.emplacement ? ' ' + s.emplacement : '') : null))));
   }
@@ -2426,6 +2652,7 @@ async function supSigDetail(s, recharger) {
         s.notesAgents ? [h('dt', null, 'Message aux agents'), h('dd', null, s.notesAgents)] : null),
       s.desc ? h('p', null, s.desc) : null,
       ...(await photoBlocks(s.photos))),
+    await carteEchangesSup(s, recharger),
     h('div', { class: 'card' }, h('h2', null, 'Traitement'), ...journalActions(s)),
     s.pm && s.pm.hist.length ? h('div', { class: 'card' }, h('h2', null, 'Police municipale'),
       ...s.pm.hist.map(x => h('p', { class: 'small' }, h('b', null, `${x.ts ? fmtDT(x.ts) : fmtJour(x.jour)} — ${PM_STATUTS[x.statut]}`), x.obs ? ' : ' + x.obs : ''))) : null,
@@ -2435,7 +2662,7 @@ async function supSigDetail(s, recharger) {
     h('div', { class: 'card' }, h('h2', null, 'Intervenir'),
       h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement aux agents, à la PM et aux autres superviseurs.'),
       s.statut === 'clos' ? h('button', { class: 'sec', onclick: safe(async () => { await supDecision(s, 'réouverture', { statut: 'ouvert', closLe: null, closPar: null }); done('Rouvert.'); }) }, 'Rouvrir') : null,
-      h('button', { class: 'sec', onclick: () => { state.retour = { view: state.view, params: { ...state.params } }; go('supSig', { id: s.id, edit: true }); } }, 'Modifier ou écrire aux agents'),
+      h('button', { class: 'sec', onclick: () => { state.retour = { view: state.view, params: { ...state.params } }; go('supSig', { id: s.id, edit: true }); } }, 'Modifier le signalement'),
       h('button', { class: 'danger', onclick: safe(async () => {
         if (!confirm(`Supprimer le signalement ${s.ref} (${sigTitre(s)}) ?\nIl disparaîtra de tous les appareils, des statistiques et des exports. Annulable depuis la corbeille.`)) return;
         await supprimer({ sigs: [s.id], quoi: `Signalement ${s.ref} — ${sigTitre(s)} (${siteNom(s.site)}, ${fmtJour(s.jour)})` });
@@ -2460,7 +2687,6 @@ VIEWS.supSig = async ({ id, edit }) => {
     const dests = [...(s.dests || [])];
     let urgent = !!s.urgent;
     const urg = h('button', { class: 'chip' + (urgent ? ' on-bad' : ''), onclick: e => { urgent = !urgent; e.target.className = 'chip' + (urgent ? ' on-bad' : ''); } }, 'Urgent');
-    const msg = h('input', { type: 'text', value: s.notesAgents || '', placeholder: 'Ex. : intervention Ateliers prévue mardi' });
     const retour = () => { const r = state.retour || { view: 'supSig', params: { id } }; state.retour = null; go(r.view, r.params, { noPush: true }); };
     return page(`Modifier ${s.ref}`, { back: retour },
       h('label', { class: 'f' }, 'Catégorie'), catSel,
@@ -2470,10 +2696,9 @@ VIEWS.supSig = async ({ id, edit }) => {
       h('label', { class: 'f' }, 'Emplacement'), empl,
       h('label', { class: 'f' }, 'À signaler à'), chips(state.cfg.dests, dests, () => { }, { multi: true }),
       h('label', { class: 'f' }, 'Priorité'), h('div', { class: 'chips' }, urg),
-      h('label', { class: 'f' }, 'Message affiché aux agents'), msg,
       h('button', {
         class: 'ok', onclick: safe(async () => {
-          await supDecision(s, 'modification', { cat: catSel.value, sub: sub.value.trim(), desc: desc.value.trim(), plaque: plaque.value.trim().toUpperCase(), emplacement: empl.value.trim(), dests: [...dests], urgent, notesAgents: msg.value.trim() });
+          await supDecision(s, 'modification', { cat: catSel.value, sub: sub.value.trim(), desc: desc.value.trim(), plaque: plaque.value.trim().toUpperCase(), emplacement: empl.value.trim(), dests: [...dests], urgent });
           toast('Modifié. Transmis aux agents.'); retour();
         })
       }, 'Enregistrer et transmettre aux agents'));
@@ -2744,16 +2969,17 @@ async function supExcel() {
   const barr = ((await kvGet('barrieres')) || []).sort((a, b) => a.ouverte.quand.localeCompare(b.ouverte.quand));
   const sp = (await kvGet('supprimes')) || { sigs: [], rids: [] };
   const ds = new Set(sp.sigs), dr = new Set(sp.rids);
-  const evs = (await dbAll('entries')).filter(e => e.kind === 'ev').filter(({ ev }) => !((ev.t === 'signalement' && ds.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && ds.has(ev.data.sig)) || (ev.rid && dr.has(ev.rid) && !['signalement', 'revue'].includes(ev.t)))).sort((a, b) => a.k.localeCompare(b.k));
+  const evs = (await dbAll('entries')).filter(e => e.kind === 'ev').filter(({ ev }) => !((ev.t === 'signalement' && ds.has(ev.data.id)) || (['revue', 'action', 'pm', 'msg'].includes(ev.t) && ds.has(ev.data.sig)) || (ev.rid && dr.has(ev.rid) && !['signalement', 'revue'].includes(ev.t)))).sort((a, b) => a.k.localeCompare(b.k));
   const g = (geo, k) => geo && !geo.err && geo[k] != null ? geo[k] : '';
-  const A1 = [['Réf.', 'Parking', 'Catégorie', 'Sous-catégorie', 'Description', 'Plaque', 'Emplacement', 'Véhicule', 'Destinataires', 'Urgent', 'Aggravé', 'Hors ronde', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Traitement', 'Actions', 'Suivi PM', 'Observations PM', 'Message aux agents', 'Notes DPMS']];
+  const A1 = [['Réf.', 'Parking', 'Catégorie', 'Sous-catégorie', 'Description', 'Plaque', 'Emplacement', 'Véhicule', 'Destinataires', 'Urgent', 'Aggravé', 'Hors ronde', 'Statut', 'Signalé le', 'Agent', 'Latitude', 'Longitude', 'Précision (m)', 'Photos', 'Dernier constat', 'Date dernier constat', 'Clos le', 'Clos par', 'Traitement', 'Actions', 'Suivi PM', 'Observations PM', 'Message aux agents', 'Échanges', 'Action demandée en attente', 'Notes DPMS']];
   sigs.forEach(s => {
     const last = (s.suivi || []).slice(-1)[0];
     A1.push([s.ref, siteNom(s.site), s.cat, s.sub || '', s.desc, s.plaque || '', s.emplacement || '', s.vehicule || '', (s.dests || []).join(', '), s.urgent ? 'Oui' : '', s.aggrave ? 'Oui' : '', s.horsRonde ? 'Oui' : '', STATUTS[s.statut] || s.statut, s.ts ? fmtDT(s.ts) : fmtJour(s.jour), s.agent || '',
       g(s.geo, 'lat'), g(s.geo, 'lon'), g(s.geo, 'acc'), (s.photos || []).length, last ? VERDICTS[last.verdict] : '', last ? (last.ts ? fmtDT(last.ts) : fmtJour(last.jour)) : '',
       s.closLe ? (s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)) : '', s.closPar || '',
       s.statut === 'clos' ? 'Clos' : suiviEtat(s), (s.actions || []).map(a => `${a.quand ? fmtDT(a.quand) : fmtJour(a.jour)} ${ACTIONS[a.type]}${a.dest ? ' — ' + a.dest : ''}${a.texte ? ' : ' + a.texte : ''}`).join(' | '),
-      isVehicule(s.cat) || s.pm ? pmEtat(s) : '', s.pm ? s.pm.hist.map(x => `${fmtJour(x.jour)} ${PM_STATUTS[x.statut]}${x.obs ? ' : ' + x.obs : ''}`).join(' | ') : '', s.notesAgents || '', s.notes || '']);
+      isVehicule(s.cat) || s.pm ? pmEtat(s) : '', s.pm ? s.pm.hist.map(x => `${fmtJour(x.jour)} ${PM_STATUTS[x.statut]}${x.obs ? ' : ' + x.obs : ''}`).join(' | ') : '', s.notesAgents || '',
+      (s.messages || []).map(m => `${fmtDT(m.quand)} ${m.de}${m.demande ? ' [demande d’action]' : ''}${m.fait ? ' [action faite]' : ''}${m.cloture ? ' [demande close]' : ''}${m.texte ? ' : ' + m.texte : ''}`).join(' | '), s.demande ? 'Oui' : '', s.notes || '']);
   });
   const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Véhicules comptés', 'Non-conformités', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
   rondes.forEach(r => {
@@ -2766,7 +2992,7 @@ async function supExcel() {
     const fin = b.fermee ? new Date(b.fermee.quand) : new Date();
     A3.push([siteNom(b.site), b.barriere, fmtDT(b.ouverte.quand), b.ouverte.agent || '', b.ouverte.motif || '', b.ouverte.comment || '', fmtDT(b.ouverte.ts), b.fermee ? fmtDT(b.fermee.quand) : '', b.fermee ? b.fermee.agent || '' : '', b.fermee ? b.fermee.comment || '' : '', b.fermee ? fmtDT(b.fermee.ts) : '', Math.round((fin - new Date(b.ouverte.quand)) / 60000), b.fermee ? '' : 'Oui']);
   });
-  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', ronde_annulee: 'Ronde annulée', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
+  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', ronde_annulee: 'Ronde annulée', msg: 'Message au DPMS', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
   const A4 = [['Appareil', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Reçu par le relais', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Empreinte']];
   evs.forEach(e => {
     const ev = e.ev; let det = '';
@@ -2777,6 +3003,7 @@ async function supExcel() {
     if (ev.t === 'controle') { const r = resumeControle(ev.data.items, ev.data.libelles); det = `${NIVEAUX[ev.data.niveau].lbl} : ${r.c} conforme(s)${r.nc.length ? ', non conforme : ' + r.nc.join(', ') : ''}`; }
     if (ev.t === 'action') det = `${ev.data.ref} : ${ACTIONS[ev.data.type]}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''}`;
     if (ev.t === 'ronde_fin') det = `${ev.data.nbSig} signalement(s)`;
+    if (ev.t === 'msg') det = `${ev.data.ref} : ${ev.data.fait ? '[action faite] ' : ''}${ev.data.texte || ''}`;
     if (ev.t === 'ronde_annulee') det = `annulée par l’agent${ev.data.nbSig ? ` (${ev.data.nbSig} signalement(s) conservé(s))` : ''}`;
     if (ev.t === 'barriere') det = `${ev.data.barriere} ${ev.data.action} — déclaré ${fmtDT(ev.data.quand)}${ev.data.motif ? ' — ' + ev.data.motif : ''}`;
     if (ev.t === 'pm') det = `${ev.data.ref} : ${PM_STATUTS[ev.data.statut]}${ev.data.obs ? ' — ' + ev.data.obs : ''}`;
@@ -2785,7 +3012,7 @@ async function supExcel() {
   });
   hideBusy();
   await shareOrDownload(xlsxBlob([
-    ['Signalements', A1, [11, 12, 22, 30, 45, 12, 16, 20, 24, 7, 7, 8, 8, 16, 12, 11, 11, 9, 7, 16, 16, 16, 14, 20, 60, 11, 40, 30, 40]],
+    ['Signalements', A1, [11, 12, 22, 30, 45, 12, 16, 20, 24, 7, 7, 8, 8, 16, 12, 11, 11, 9, 7, 16, 16, 16, 14, 20, 60, 11, 40, 30, 60, 10, 40]],
     ['Rondes', A2, [12, 12, 16, 16, 10, 10, 40, 12, 10, 11, 11, 10, 40, 10]],
     ['Traitement', [['Réf.', 'Parking', 'Signalement', 'Date', 'Action', 'Auprès de', 'Détail', 'Intervention prévue le', 'Par'],
       ...sigs.flatMap(s => (s.actions || []).map(a => [s.ref, siteNom(s.site), sigTitre(s), a.quand ? fmtDT(a.quand) : fmtJour(a.jour), ACTIONS[a.type], a.dest || '', a.texte || '', a.prevu ? fmtDT(a.prevu) : '', a.par || '']))],
@@ -2933,6 +3160,7 @@ window.addEventListener('hashchange', () => {
   const hash = location.hash;
   if (hash && /^#(join|site|cfg)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
 });
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'sync' && state.mode) syncNow().then(refreshIfHome); });
 window.addEventListener('online', () => { if (state.mode) syncNow().then(refreshIfHome); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); });
 setInterval(() => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); }, SYNC_PERIODE_MS);

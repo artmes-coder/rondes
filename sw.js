@@ -4,8 +4,9 @@
  * - Bibliothèques et icônes : copie locale (elles changent avec le numéro de version ci-dessous).
  * - À l'installation d'une nouvelle version, les pages ouvertes sont rechargées automatiquement.
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
+ * Notifications : le relais ne transmet aucun contenu ; la notification dit seulement qu'un message attend.
  */
-const CACHE = 'rondes-cachan-1.6.1';
+const CACHE = 'rondes-cachan-1.7.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
 const STATIC = ['./icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js'];
 const NET_TIMEOUT = 4000;
@@ -58,4 +59,19 @@ self.addEventListener('fetch', e => {
     return;
   }
   e.respondWith(caches.match(req, { ignoreSearch: true }).then(r => r || fetch(req)));
+});
+
+self.addEventListener('push', e => {
+  e.waitUntil(self.registration.showNotification('Rondes parkings', {
+    body: 'Nouveau message sur un signalement : ouvrez l’application pour le lire.',
+    icon: './icon-192.png', badge: './icon-192.png', tag: 'rondes-message', renotify: true
+  }));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const w of wins) { try { await w.focus(); w.postMessage('sync'); return; } catch (err) { } }
+    await self.clients.openWindow('./');
+  })());
 });
