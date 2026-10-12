@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -684,6 +684,8 @@ async function fold() {
   }
   const del = { sigs: new Set(), rids: new Set() };
   for (const [id, d] of suppr) if (!annul.has(id)) { (d.sigs || []).forEach(x => del.sigs.add(x)); (d.rids || []).forEach(x => del.rids.add(x)); }
+  const annulees = new Set();
+  for (const { e } of items) if (e.kind === 'ev' && e.ev.t === 'ronde_annulee' && e.ev.rid) annulees.add(e.ev.rid);
   const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
 
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [];
@@ -740,7 +742,7 @@ async function fold() {
         if (d.action === 'fermee' && !b.fermee) b.fermee = rec;
         if (b.ouverte) barr.set(d.bid, b);
       }
-      if (sup && ev.rid && !del.rids.has(ev.rid)) {
+      if (sup && ev.rid && !del.rids.has(ev.rid) && !annulees.has(ev.rid)) {
         const r = rondes.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: ev.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, compte: null, alertes: [] };
         if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; }
         if (ev.t === 'ronde_fin') { r.fin = ts; if (r.compte == null && ev.data.compte != null) r.compte = ev.data.compte; }
@@ -1099,7 +1101,8 @@ async function agentHome() {
     ronde ? h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
       h('h3', null, `Ronde en cours : ${siteNom(ronde.site)}`),
       h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
-      h('button', { class: 'accent big', onclick: () => resumeRonde(ronde) }, 'Reprendre la ronde'))
+      h('button', { class: 'accent big', onclick: () => resumeRonde(ronde) }, 'Reprendre la ronde'),
+      lienAnnuler())
       : h('button', { class: 'big', onclick: () => go('choixParking') }, 'Commencer ma ronde'),
     await carteControlesAFaire(),
     h('div', { class: 'row' },
@@ -1213,11 +1216,14 @@ VIEWS.revue = async () => {
       delete revueDraft[s.id];
     }
     await fold();
-    ronde.step = 'ronde'; await kvSet('ronde', ronde);
+    ronde.step = 'ronde'; ronde.revueFaite = open.length; await kvSet('ronde', ronde);
     hideBusy(); go('ronde');
   });
   refresh();
   return page(`Revue : ${siteNom(ronde.site)}`, null,
+    h('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:8px' },
+      h('span', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
+      h('button', { class: 'link', style: 'color:var(--bad);width:auto;margin:0', onclick: safe(annulerRonde) }, 'Annuler la ronde')),
     h('div', { class: 'banner info' }, `${open.length} signalement(s) en cours sur ce parking. Indiquez leur état aujourd’hui. « Résolu » clôt le signalement.`),
     ...cards, h('div', { style: 'height:70px' }),
     h('div', { class: 'sticky-bottom' }, h('div', null, btnValider)));
@@ -1360,7 +1366,8 @@ VIEWS.ronde = async () => {
         if (!confirm('Terminer la ronde ?')) return;
         await finishRonde(ronde);
       })
-    }, 'Terminer la ronde'));
+    }, 'Terminer la ronde'),
+    lienAnnuler());
 };
 VIEWS.controle = async ({ niveau }) => {
   const ronde = await kvGet('ronde');
@@ -1383,6 +1390,29 @@ VIEWS.controle = async ({ niveau }) => {
     }, `Valider le ${NIVEAUX[niveau].lbl.toLowerCase()}`),
     h('button', { class: 'link', onclick: () => go('ronde', {}, { noPush: true }) }, 'Plus tard (les réponses sont gardées)'));
 };
+async function annulerRonde() {
+  const ronde = await kvGet('ronde');
+  if (!ronde) { go('home'); return; }
+  const gardes = [];
+  const n = ronde.sigsCrees.length, r = ronde.revueFaite;
+  if (n) gardes.push(n > 1 ? `les ${n} signalements faits pendant la ronde` : 'le signalement fait pendant la ronde');
+  ['mensuel', 'trimestriel'].forEach(n => { if ((ronde.ctlEmis || {})[n]) gardes.push(`le ${NIVEAUX[n].lbl.toLowerCase()}`); });
+  if (r) gardes.push(r > 1 ? `l’état des ${r} signalements en cours` : 'l’état du signalement en cours');
+  if (!confirm(`Annuler la ronde (${siteNom(ronde.site)}, ${ronde.agent}) ?\n\nElle n’apparaîtra pas dans les rondes. Le comptage et les contrôles non validés sont effacés.`
+    + (gardes.length ? `\n\nDéjà enregistré et conservé : ${gardes.join(', ')}.` : ''))) return;
+  showBusy('Annulation…');
+  await appendEvent('ronde_annulee', ronde, { nbSig: ronde.sigsCrees.length });
+  await kvDel('ronde');
+  await kvDel('dernierAgent');
+  Object.keys(revueDraft).forEach(k => delete revueDraft[k]);
+  Geo.stop();
+  hideBusy();
+  toast('Ronde annulée.');
+  go('home');
+  syncNow().then(() => refreshIfHome());
+}
+const lienAnnuler = () => h('button', { class: 'link', style: 'color:var(--bad)', onclick: safe(annulerRonde) }, 'Annuler la ronde');
+
 async function finishRonde(ronde, silent) {
   showBusy('Clôture de la ronde…');
   const st = await etatControles();
@@ -2638,7 +2668,7 @@ async function supExcel() {
     const fin = b.fermee ? new Date(b.fermee.quand) : new Date();
     A3.push([siteNom(b.site), b.barriere, fmtDT(b.ouverte.quand), b.ouverte.agent || '', b.ouverte.motif || '', b.ouverte.comment || '', fmtDT(b.ouverte.ts), b.fermee ? fmtDT(b.fermee.quand) : '', b.fermee ? b.fermee.agent || '' : '', b.fermee ? b.fermee.comment || '' : '', b.fermee ? fmtDT(b.fermee.ts) : '', Math.round((fin - new Date(b.ouverte.quand)) / 60000), b.fermee ? '' : 'Oui']);
   });
-  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
+  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', ronde_annulee: 'Ronde annulée', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
   const A4 = [['Appareil', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Reçu par le relais', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Empreinte']];
   evs.forEach(e => {
     const ev = e.ev; let det = '';
@@ -2649,6 +2679,7 @@ async function supExcel() {
     if (ev.t === 'controle') { const r = resumeControle(ev.data.items, ev.data.libelles); det = `${NIVEAUX[ev.data.niveau].lbl} : ${r.c} conforme(s)${r.nc.length ? ', non conforme : ' + r.nc.join(', ') : ''}`; }
     if (ev.t === 'action') det = `${ev.data.ref} : ${ACTIONS[ev.data.type]}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''}`;
     if (ev.t === 'ronde_fin') det = `${ev.data.nbSig} signalement(s)`;
+    if (ev.t === 'ronde_annulee') det = `annulée par l’agent${ev.data.nbSig ? ` (${ev.data.nbSig} signalement(s) conservé(s))` : ''}`;
     if (ev.t === 'barriere') det = `${ev.data.barriere} ${ev.data.action} — déclaré ${fmtDT(ev.data.quand)}${ev.data.motif ? ' — ' + ev.data.motif : ''}`;
     if (ev.t === 'pm') det = `${ev.data.ref} : ${PM_STATUTS[ev.data.statut]}${ev.data.obs ? ' — ' + ev.data.obs : ''}`;
     const geo = e.dec && e.dec.geo;
