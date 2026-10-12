@@ -1,4 +1,4 @@
-/* Rondes parkings — Ville de Cachan, DPMS — version 1.7
+/* Rondes parkings — Ville de Cachan, DPMS — version 1.8
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : rondes, comptage des véhicules, signalements (catégories et
  *   sous-catégories, plusieurs par catégorie, en ronde ou hors ronde), barrières laissées ouvertes.
@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -271,7 +271,7 @@ function rel(op, extra = {}, timeout) {
 /* Configuration : parkings, agents, destinataires, catégories            */
 /* Format des catégories (modifiable par le superviseur) :                */
 /*   Catégorie | destinataire suggéré, …                                  */
-/*   - sous-catégorie            (« ! » final = urgent par défaut)        */
+/*   - sous-catégorie ! | destinataires propres (facultatifs)              */
 /* ====================================================================== */
 const TAXO_DEFAUT = `Sécurité incendie | Ateliers
 - Extincteur absent ou déplacé
@@ -327,7 +327,7 @@ Propreté et hygiène
 - Dépôt sauvage ou encombrants
 - Urine ou déjections
 - Seringues ou matériel de consommation (ne pas toucher) !
-- Tags ou graffitis
+- Tags ou graffitis | Ateliers, DPMS, Police municipale
 - Flaque d’huile ou d’hydrocarbures
 - Nuisibles (rats, pigeons)
 - Poubelles pleines
@@ -376,9 +376,9 @@ Sûreté et présences | Police municipale
 - Personnes installées (squat, regroupement)
 - Personne endormie ou en difficulté !
 - Comportement suspect
-- Trace d’effraction
-- Caméra de vidéoprotection dégradée ou masquée
-- Vandalisme en cours (appeler le 17) !`;
+- Trace d’effraction | Police municipale, DPMS, Ateliers
+- Caméra de vidéoprotection dégradée ou masquée | Police municipale, DPMS
+- Vandalisme en cours (appeler le 17) ! | Police municipale, DPMS`;
 const CONTROLES_DEFAUT = `[Quotidien]
 - Rampes et voies de circulation : dégagées ; en hiver, ni verglas ni neige | Accès et circulation
 - ?Portails : fonctionnent, boutons-poussoirs sur « on » | Accès et circulation
@@ -485,9 +485,10 @@ function parseTaxo(text) {
     if (!line) continue;
     if (/^[-•*]/.test(line)) {
       if (!cats.length) continue;
-      let lbl = line.replace(/^[-•*]\s*/, '').trim(), urgent = false;
+      const [corps, ds] = line.replace(/^[-•*]\s*/, '').split('|');
+      let lbl = corps.trim(), urgent = false;
       if (lbl.endsWith('!')) { urgent = true; lbl = lbl.slice(0, -1).trim(); }
-      if (lbl) cats[cats.length - 1].subs.push({ lbl, urgent });
+      if (lbl) cats[cats.length - 1].subs.push({ lbl, urgent, dests: (ds || '').split(',').map(x => x.trim()).filter(Boolean) });
     } else {
       const [nom, d] = line.split('|');
       cats.push({ nom: nom.trim(), dests: (d || '').split(',').map(x => x.trim()).filter(Boolean), subs: [] });
@@ -496,7 +497,7 @@ function parseTaxo(text) {
   return cats.filter(c => c.nom && c.nom !== CAT_AUTRE);
 }
 function taxoToText(cats) {
-  return cats.map(c => [c.nom + (c.dests.length ? ' | ' + c.dests.join(', ') : ''), ...c.subs.map(s => '- ' + s.lbl + (s.urgent ? ' !' : ''))].join('\n')).join('\n');
+  return cats.map(c => [c.nom + (c.dests.length ? ' | ' + c.dests.join(', ') : ''), ...c.subs.map(s => '- ' + s.lbl + (s.urgent ? ' !' : '') + ((s.dests || []).length ? ' | ' + s.dests.join(', ') : ''))].join('\n')).join('\n');
 }
 function defaultConfig() {
   return normalizeCfg({
@@ -523,6 +524,11 @@ function normalizeCfg(c) {
   if (!Array.isArray(n.controles) || !n.controles.length || JSON.stringify(n.controles) === JSON.stringify(parseControles(CONTROLES_DEFAUT_V15))) n.controles = parseControles(CONTROLES_DEFAUT);
   // Catégories utilisées par les points de contrôle mais absentes de la liste : reprises de la liste par défaut
   const taxo = parseTaxo(TAXO_DEFAUT);
+  n.cats.forEach(c => (c.subs || []).forEach(sc => {
+    if (Array.isArray(sc.dests)) return;
+    const dc = taxo.find(x => x.nom === c.nom), ds = dc && dc.subs.find(x => x.lbl === sc.lbl);
+    sc.dests = ds ? ds.dests.slice() : [];
+  }));
   [...new Set(n.controles.map(c => c.cat).filter(Boolean))].forEach(nom => {
     if (nom !== CAT_AUTRE && !n.cats.some(c => c.nom === nom)) { const d = taxo.find(c => c.nom === nom); if (d) n.cats.push(d); }
   });
@@ -1558,6 +1564,10 @@ VIEWS.signalement = async ({ cat, from, ctl }) => {
       d.sub = v;
       const s = c && c.subs.find(x => x.lbl === v);
       if (s && s.urgent) { d.urgent = true; d.urgentAuto = true; } else if (d.urgentAuto) { d.urgent = false; d.urgentAuto = false; }
+      if (!d.destsTouche) {   // destinataires propres à la sous-catégorie, sinon ceux de la catégorie
+        const ds = (s && s.dests && s.dests.length ? s.dests : (c && c.dests) || []).filter(x => cfg.dests.includes(x));
+        d.dests.splice(0, d.dests.length, ...ds); destBox.set(d.dests);
+      }
       urg.className = 'chip' + (d.urgent ? ' on-bad' : '');
       descLbl.textContent = v === SUB_AUTRE ? 'Description (obligatoire)' : 'Précisions (facultatif)';
     }));
@@ -1623,7 +1633,7 @@ VIEWS.signalement = async ({ cat, from, ctl }) => {
     h('label', { class: 'f' }, 'Photos'),
     thumbs,
     h('button', { class: 'sec', onclick: photoInput(async f => { if (d.photos.length >= 4) { toast('4 photos maximum.', true); return; } showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Prendre une photo'),
-    h('label', { class: 'f' }, 'À signaler à'), destBox,
+    h('label', { class: 'f' }, 'À signaler à ', h('span', { class: 'muted small', style: 'font-weight:400' }, '(un ou plusieurs : touchez pour ajouter ou retirer)')), destBox,
     h('label', { class: 'f' }, 'Priorité'), h('div', { class: 'chips' }, urg),
     h('div', { style: 'height:130px' }),
     h('div', { class: 'sticky-bottom' }, h('div', null,
@@ -1742,11 +1752,13 @@ async function partagerSig(s) {
   const files = photos.map((p, i) => new File([p.blob], `${s.ref}-${i + 1}.jpg`, { type: 'image/jpeg' }));
   const data = files.length ? { title: `Signalement ${s.ref}`, text: txt, files } : { title: `Signalement ${s.ref}`, text: txt };
   if (navigator.share && (!navigator.canShare || navigator.canShare(data))) {
-    try { await navigator.share(data); return; } catch (e) { if (e.name === 'AbortError') return; }
+    toast('Choisissez votre messagerie (Gmail, Outlook…).');
+    try { await navigator.share(data); return true; } catch (e) { if (e.name === 'AbortError') return false; }
   }
   try { await navigator.clipboard.writeText(txt); } catch (e) { }
   files.forEach(f => download(f, f.name));
-  toast('Texte copié' + (files.length ? ' et photos téléchargées' : '') + ' : collez-les dans votre message.');
+  toast('Texte copié' + (files.length ? ' et photos téléchargées' : '') + ' : collez-les dans votre courriel.');
+  return true;
 }
 function journalActions(s) {
   const a = s.actions || [];
@@ -1756,20 +1768,70 @@ function journalActions(s) {
     x.texte ? h('div', { class: 'small' }, x.texte) : null,
     h('div', { class: 'muted small' }, `${x.quand ? fmtDT(x.quand) : fmtJour(x.jour)}${x.par ? ' — ' + x.par : ''}`)));
 }
-function contactsBloc(s, form) {
+function contactsBloc(s) {
   const dests = s.dests || [];
   const sujet = `[Parking ${siteNom(s.site)}] ${sigTitre(s)} — ${s.ref}`;
+  const corps = encodeURIComponent(texteSignalement(s));
+  const avecMail = dests.filter(dn => ((state.cfg.contacts || {})[dn] || {}).mail);
   return h('div', { class: 'card' }, h('h2', null, 'Transmettre'),
     ...dests.map(dn => {
       const c = (state.cfg.contacts || {})[dn] || {};
       return h('div', { class: 'stat', style: 'gap:8px;flex-wrap:wrap' }, h('b', null, dn),
         h('span', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
-          c.tel ? h('a', { class: 'btn sec mini', href: 'tel:' + c.tel.replace(/\s/g, ''), onclick: () => form.preset('tel', dn) }, 'Appeler ' + c.tel) : null,
-          c.mail ? h('a', { class: 'btn sec mini', href: `mailto:${c.mail}?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(texteSignalement(s))}`, onclick: () => form.preset('mail', dn) }, 'Courriel') : null,
+          c.tel ? h('a', { class: 'btn sec mini', href: 'tel:' + c.tel.replace(/\s/g, ''), onclick: () => contactLance(s, 'tel', [dn]) }, 'Appeler ' + c.tel) : null,
+          c.mail ? h('a', { class: 'btn sec mini', href: `mailto:${c.mail}?subject=${encodeURIComponent(sujet)}&body=${corps}`, onclick: () => contactLance(s, 'mail', [dn]) }, 'Courriel') : null,
           !c.tel && !c.mail ? h('span', { class: 'muted small' }, 'coordonnées non renseignées') : null));
     }),
-    h('button', { class: 'sec', onclick: safe(async () => { await partagerSig(s); form.preset('autre', dests[0] || null); }) }, 'Partager avec les photos (WhatsApp, courriel…)'),
-    h('p', { class: 'muted small' }, 'Après l’envoi, complétez et enregistrez l’action ci-dessous.'));
+    avecMail.length > 1 ? h('a', { class: 'btn sec', href: `mailto:${avecMail.map(dn => state.cfg.contacts[dn].mail).join(',')}?subject=${encodeURIComponent(sujet)}&body=${corps}`, onclick: () => contactLance(s, 'mail', avecMail) }, `Un seul courriel à tous (${avecMail.join(', ')})`) : null,
+    h('button', { class: 'sec', onclick: safe(async () => { if (await partagerSig(s)) contactLance(s, 'mail', null); }) }, 'Courriel avec les photos'),
+    h('p', { class: 'muted small' }, 'Après l’appel ou l’envoi, l’application vous demande de le confirmer : l’action est alors enregistrée.'));
+}
+
+/* Confirmation au retour d'un appel ou d'un courriel : « avez-vous appelé… ? » */
+async function contactLance(s, type, dests) {
+  await kvSet('contactAttente', { sig: s.id, ref: s.ref, type, dests, at: Date.now() });
+  setTimeout(confirmerContact, 2500);
+}
+let _confirmOuverte = false;
+async function confirmerContact() {
+  if (_confirmOuverte || document.visibilityState !== 'visible' || !state.cfg) return;
+  const c = await kvGet('contactAttente');
+  if (!c) return;
+  if (Date.now() - c.at > 12 * 3600000) { await kvDel('contactAttente'); return; }
+  const s = await dbGet('sigs', c.sig);
+  if (!s) { await kvDel('contactAttente'); return; }
+  _confirmOuverte = true;
+  const equipe = state.mode !== 'superviseur';
+  const choisis = c.dests ? [...c.dests] : [];
+  const d = { par: equipe ? await agentPrefere() : null, texte: '' };
+  const qui = c.dests ? c.dests.join(', ') : null;
+  const question = c.type === 'tel' ? `Avez-vous pu joindre ${qui} ?` : qui ? `Avez-vous envoyé le courriel à ${qui} ?` : 'Avez-vous envoyé le courriel avec les photos ? À qui ?';
+  const fermer = async () => { await kvDel('contactAttente'); box.remove(); _confirmOuverte = false; };
+  const enregistrer = (type, suffixe) => safe(async () => {
+    if (!choisis.length) throw new Error('Indiquez à qui.');
+    if (equipe && !d.par) throw new Error('Indiquez qui a appelé ou écrit.');
+    const texte = [suffixe, d.texte.trim()].filter(Boolean).join(' — ');
+    for (const dest of choisis) {
+      const a = { sig: s.id, ref: s.ref, type, dest, texte, prevu: null, quand: new Date().toISOString() };
+      if (equipe) await appendEvent('action', { site: s.site, agent: d.par }, a);
+      else await queueDec('d', { type: 'action', id: uuid(), ts: new Date().toISOString(), par: 'DPMS', action: a });
+    }
+    await fermer(); await fold(); syncNow();
+    toast('Action enregistrée dans le traitement.');
+    render();
+  });
+  const box = h('div', { class: 'confirm-contact' }, h('div', { class: 'sheet' },
+    h('h3', null, c.type === 'tel' ? 'Appel' : 'Courriel', ` — ${s.ref}`),
+    h('p', { class: 'muted small' }, sigTitre(s)),
+    h('p', { style: 'font-weight:600' }, question),
+    c.dests ? null : chips(s.dests || [], choisis, () => { }, { multi: true }),
+    equipe ? [h('label', { class: 'f' }, 'Qui ?'), chips(state.cfg.agents, d.par, v => d.par = v)] : null,
+    h('textarea', { placeholder: c.type === 'tel' ? 'Ce qui a été dit ou convenu (facultatif)' : 'Précisions (facultatif)', oninput: e => d.texte = e.target.value }),
+    c.type === 'tel'
+      ? [h('button', { class: 'ok', onclick: enregistrer('tel') }, 'Oui, appel passé'), h('button', { class: 'sec', onclick: enregistrer('tel', 'pas de réponse') }, 'Pas de réponse (à relancer)')]
+      : h('button', { class: 'ok', onclick: enregistrer('mail') }, 'Oui, courriel envoyé'),
+    h('button', { class: 'link', onclick: safe(fermer) }, c.type === 'tel' ? 'Non, je n’ai pas appelé' : 'Non, pas envoyé')));
+  document.body.append(box);
 }
 /* Formulaire d'action ; agents = liste des noms (équipe) ou null (superviseur) */
 function actionForm(s, { onSave, onClore, agents, parDefaut }) {
@@ -2066,7 +2128,7 @@ VIEWS.suiviSig = async ({ id }) => {
       (s.suivi || []).length ? h('div', null, h('p', { class: 'small', style: 'font-weight:600;margin:10px 0 2px' }, 'Constats en ronde'),
         ...s.suivi.map(v => h('p', { class: 'small', style: 'margin:2px 0' }, `${fmtJour(v.jour)} — ${v.agent || ''} : ${VERDICTS[v.verdict]}${v.comment ? ' — ' + v.comment : ''}`))) : null),
     (s.messages || []).length ? await carteEchangesAgents(s, recharger) : null,
-    contactsBloc(s, form),
+    contactsBloc(s),
     h('div', { class: 'card' }, h('h2', null, 'Actions entreprises'), ...journalActions(s)),
     form);
 };
@@ -2657,7 +2719,7 @@ async function supSigDetail(s, recharger) {
     s.pm && s.pm.hist.length ? h('div', { class: 'card' }, h('h2', null, 'Police municipale'),
       ...s.pm.hist.map(x => h('p', { class: 'small' }, h('b', null, `${x.ts ? fmtDT(x.ts) : fmtJour(x.jour)} — ${PM_STATUTS[x.statut]}`), x.obs ? ' : ' + x.obs : ''))) : null,
     suivi.length ? h('div', { class: 'card' }, h('h2', null, 'Constats des agents'), ...suivi) : null,
-    s.statut === 'ouvert' ? contactsBloc(s, form) : null,
+    s.statut === 'ouvert' ? contactsBloc(s) : null,
     form,
     h('div', { class: 'card' }, h('h2', null, 'Intervenir'),
       h('p', { class: 'muted small' }, 'Toute intervention est transmise automatiquement aux agents, à la PM et aux autres superviseurs.'),
@@ -3098,7 +3160,7 @@ VIEWS.supConfig = async () => {
     h('p', { class: 'muted small' }, 'Trois rubriques : [Quotidien] (une fois par jour et par parking), [Mensuel] (tous les 30 jours), [Trimestriel] (tous les 90 jours). Une ligne par point : « - Libellé : ce qu’il faut regarder | catégorie du signalement en cas de non-conformité ». Un « ? » devant le libellé permet à l’agent d’indiquer que ce point n’existe pas dans le parking.'),
     tCtl,
     h('label', { class: 'f' }, 'Catégories et sous-catégories des signalements'),
-    h('p', { class: 'muted small' }, 'Une catégorie par ligne, suivie si besoin de « | » et des destinataires proposés par défaut. Puis ses sous-catégories, une par ligne commençant par « - ». Un « ! » en fin de ligne marque une sous-catégorie urgente par défaut. Chaque catégorie est une ligne de contrôle de la ronde. « Autre (préciser) » est ajouté automatiquement.'),
+    h('p', { class: 'muted small' }, 'Une catégorie par ligne, suivie si besoin de « | » et des destinataires proposés par défaut. Puis ses sous-catégories, une par ligne commençant par « - ». Un « ! » en fin de ligne marque une sous-catégorie urgente par défaut. Une sous-catégorie peut avoir ses propres destinataires : « - Tags ou graffitis | Ateliers, DPMS, Police municipale ». Chaque catégorie est une ligne de contrôle de la ronde. « Autre (préciser) » est ajouté automatiquement.'),
     tTaxo,
     h('label', { class: 'f' }, 'Motifs d’ouverture de barrière (un par ligne)'), tMotifs,
     h('label', { class: 'f' }, 'Téléphone d’urgence affiché aux agents'), tel,
@@ -3160,6 +3222,8 @@ window.addEventListener('hashchange', () => {
   const hash = location.hash;
   if (hash && /^#(join|site|cfg)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
 });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(confirmerContact, 600); });
+setTimeout(confirmerContact, 1500);
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'sync' && state.mode) syncNow().then(refreshIfHome); });
 window.addEventListener('online', () => { if (state.mode) syncNow().then(refreshIfHome); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); });

@@ -115,6 +115,11 @@ body.large main{max-width:1320px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:10px}
 .gallery img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;cursor:zoom-in;border:1px solid var(--line)}
 .gallery.grande{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.confirm-contact{position:fixed;inset:0;background:rgba(10,18,32,.55);z-index:60;display:flex;align-items:flex-end;justify-content:center}
+.confirm-contact .sheet{background:#fff;width:100%;max-width:560px;max-height:92vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px 16px 20px;box-shadow:0 -6px 24px rgba(0,0,0,.2)}
+.confirm-contact h3{margin:0 0 2px}
+body.large .confirm-contact{align-items:center}
+body.large .confirm-contact .sheet{border-radius:16px}
 .courrier{display:inline-flex;align-items:center;gap:3px;color:var(--navy);vertical-align:middle;margin-left:4px}
 .courrier b{font-size:12px;background:var(--bad);color:#fff;border-radius:99px;min-width:18px;height:18px;padding:0 5px;display:inline-flex;align-items:center;justify-content:center}
 .courrier.alerte{color:var(--accent)}

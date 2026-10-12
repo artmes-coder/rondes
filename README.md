@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.7.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.8.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -70,14 +70,14 @@ L'accueil indique les **contrôles à faire** par parking.
 Le contrôle trimestriel comprend la vérification des **dates d'entretien** affichées (extincteurs, portails et barrières, ascenseurs, désenfumage, éclairage de sécurité, bornes de recharge) : une maintenance non faite à temps se signale en « Entretien et maintenance », adressé au DPMS.
 
 ### Signalement
-Catégorie → « Quoi ? » (sous-catégorie ou « Autre (préciser) ») → précisions, photos, destinataires (proposés selon la catégorie), urgence. Véhicules : plaque, emplacement (numéro de place, niveau), marque/modèle/couleur. **Signalement hors ronde** depuis l'accueil.
+Catégorie → « Quoi ? » (sous-catégorie ou « Autre (préciser) ») → précisions, photos, destinataires (un ou plusieurs, proposés selon la sous-catégorie ou la catégorie), urgence. Véhicules : plaque, emplacement (numéro de place, niveau), marque/modèle/couleur. **Signalement hors ronde** depuis l'accueil.
 
 ### Barrière ouverte
 Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'oubli). La barrière reste affichée en rouge sur l'accueil de tous les appareils jusqu'à **Barrière refermée** (maintenant ou plus tôt).
 
 ### Traitement des signalements (téléphone ou PC de la loge)
 Accueil → **Traitement des signalements** : signalements classés en *À transmettre*, *En attente de réponse*, *Réponse reçue*, *Intervention prévue*, *Intervention réalisée*. Dans chaque fiche :
-- **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, et « Partager avec les photos » (WhatsApp, messagerie…) ;
+- **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous » quand il y a plusieurs destinataires, et « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ;
 - **Ajouter une action** : appel, courriel, relance, réponse reçue, intervention prévue (date), intervention réalisée, note, avec le destinataire, le détail et l'agent ;
 - **Problème résolu : clore le signalement**.
 
@@ -112,6 +112,7 @@ Modifiables par le superviseur, sans toucher au programme (**Listes, catégories
 Sécurité incendie | Ateliers          ← catégorie de signalement | destinataires proposés
 - Extincteur absent ou déplacé        ← sous-catégorie
 - Odeur de fumée ou de brûlé !        ← « ! » : urgent par défaut
+- Tags ou graffitis | Ateliers, DPMS, Police municipale   ← destinataires propres à la sous-catégorie
 ```
 
 ## 6. Bon à savoir
