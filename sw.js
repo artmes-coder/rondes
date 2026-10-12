@@ -6,9 +6,9 @@
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
  * Notifications : texte chiffré par l'appareil émetteur pour cet appareil ; le relais et Google ne peuvent pas le lire.
  */
-const CACHE = 'rondes-cachan-2.3.2';
+const CACHE = 'rondes-cachan-2.4.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
-const STATIC = ['./logo-cachan.png', './notif-icon.png', './notif-badge.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js'];
+const STATIC = ['./logo-cachan.png', './notif-icon.png', './notif-badge.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js', './lib/jspdf.umd.min.js'];
 const NET_TIMEOUT = 4000;
 
 self.addEventListener('install', e => {
@@ -67,14 +67,16 @@ self.addEventListener('push', e => {
   try { d = e.data ? e.data.json() : null; } catch (err) { d = null; }   // texte chiffré pour cet appareil, déchiffré par le navigateur
   e.waitUntil(self.registration.showNotification(d && d.titre ? d.titre : 'Rondes parkings', {
     body: d && d.corps ? d.corps : 'Nouvelle information : ouvrez l’application.',
-    icon: './notif-icon.png', badge: './notif-badge.png', tag: 'rondes-' + (d && d.type ? d.type : 'message') + '-' + Date.now(), renotify: true
+    icon: './notif-icon.png', badge: './notif-badge.png', tag: 'rondes-' + (d && d.type ? d.type : 'message') + '-' + Date.now(), renotify: true,
+    data: { lien: d && typeof d.lien === 'string' && /^#[a-z]+$/.test(d.lien) ? d.lien : '' }
   }));
 });
 self.addEventListener('notificationclick', e => {
   e.notification.close();
   e.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const w of wins) { try { await w.focus(); w.postMessage('sync'); return; } catch (err) { } }
-    await self.clients.openWindow('./');
+    const lien = (e.notification.data && e.notification.data.lien) || '';
+    for (const w of wins) { try { await w.focus(); w.postMessage(lien ? 'lien:' + lien : 'sync'); return; } catch (err) { } }
+    await self.clients.openWindow('./' + lien);
   })());
 });

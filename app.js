@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.3.2';
+const APP_VERSION = '2.4.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -518,6 +518,7 @@ function controlesToText(list) {
 }
 const MOTIFS_DEFAUT = ['Panne de la barrière', 'Panne de borne ou de caisse', 'Intervention technique', 'Forte affluence', 'Consigne de la hiérarchie', 'Autre'];
 const CAT_AUTRE = 'Autre';
+const JOURS = ['L', 'M', 'M', 'J', 'V', 'S', 'D'], JOURS_LONGS = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
 const SUB_AUTRE = 'Autre (préciser)';
 const VEHICULE_RE = /v[ée]hicule/i;
 const PM_RE = /police/i;
@@ -577,6 +578,8 @@ function normalizeCfg(c) {
     if (nom !== CAT_AUTRE && !n.cats.some(c => c.nom === nom)) { const d = taxo.find(c => c.nom === nom); if (d) n.cats.push(d); }
   });
   n.contacts = n.contacts && typeof n.contacts === 'object' ? n.contacts : {};
+  n.rondeMatin = { actif: true, heure: '12:00', jours: [1, 2, 3, 4, 5, 6, 7], ...(n.rondeMatin || {}) };
+  n.synthese = { actif: true, jour: 1, heure: '08:00', ...(n.synthese || {}) };
   n.v = 3;
   return n;
 }
@@ -1002,6 +1005,49 @@ function syncNow() {
   return _syncP;
 }
 let _notifSup = [], _notifAgents = [];
+const NOTIF_TYPES = {
+  superviseur: [['urgent', 'Signalements urgents'], ['sig', 'Autres nouveaux signalements'], ['aggrave', 'Signalements aggravés'], ['clos', 'Signalements clos'],
+    ['action', 'Traitement (appels, courriels, interventions)'], ['pm', 'Suites de la police municipale'], ['msg', 'Réponses des agents'],
+    ['barriere_ouverte', 'Barrière ouverte'], ['barriere_fermee', 'Barrière refermée'], ['ronde_fin', 'Ronde terminée'], ['ronde_annulee', 'Ronde annulée'],
+    ['alerte_ronde', 'Aucune ronde ce matin'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire']],
+  agent: [['msg', 'Messages et demandes d’action du DPMS']]
+};
+const GROUPES_NOTIF = { urgent: 'Signalements', barriere_ouverte: 'Barrières', ronde_fin: 'Rondes', alerte_ronde: 'Alertes programmées (envoyées par le relais)' };
+const typesNotif = () => NOTIF_TYPES[state.mode === 'superviseur' ? 'superviseur' : 'agent'];
+async function prefsNotif() { return (await kvGet('notifPrefs')) || typesNotif().map(x => x[0]); }
+/* Alertes tenues par le relais : « une ronde a commencé ici aujourd'hui » et « ronde pas finie au bout d'1 h » */
+async function opsPourRelais(batch) {
+  const ops = (await kvGet('opsRelais')) || [];
+  const finies = new Set(batch.filter(ev => ev.t === 'ronde_fin' || ev.t === 'ronde_annulee').map(ev => ev.rid));
+  for (const ev of batch) {
+    if (ev.t === 'ronde_debut') {
+      ops.push({ op: 'pointer', site: ev.site });
+      if (!finies.has(ev.rid)) ops.push({ op: 'differer', rid: ev.rid, site: ev.site, agent: ev.agent, debut: (ev.data && ev.data.debut) || new Date().toISOString() });
+    }
+    if ((ev.t === 'ronde_fin' || ev.t === 'ronde_annulee') && ev.rid) ops.push({ op: 'annuler', rid: ev.rid });
+  }
+  await kvSet('opsRelais', ops.slice(-50));
+}
+let _opsEnCours = false;
+async function traiterOpsRelais() {
+  if (_opsEnCours) return; _opsEnCours = true;
+  try {
+    let ops = (await kvGet('opsRelais')) || [];
+    while (ops.length) {
+      const o = ops[0];
+      try {
+        if (o.op === 'pointer') await rel('pointer', { jetons: [await jeton('site', o.site)] }, 20000);
+        else if (o.op === 'annuler') await rel('annulerDiffere', { id: await jeton('ronde', o.rid) }, 20000);
+        else if (o.op === 'differer') {
+          const r = await rel('abos', { cible: 'sup' }, 20000);
+          const messages = await chiffrerPour(r.abos, 'ronde_longue', { type: 'ronde_longue', titre: `Ronde de plus d’1 h — ${siteNom(o.site)}`, corps: `${o.agent || ''} : commencée à ${fmtHeure(o.debut)}, toujours pas terminée.` });
+          if (Object.keys(messages).length) await rel('differer', { id: await jeton('ronde', o.rid), apres: new Date(new Date(o.debut).getTime() + 3600000).toISOString(), messages }, 20000);
+        }
+      } catch (e) { if (!/opération inconnue|invalide/.test(e.message)) break; }   // relais ancien : opération ignorée
+      ops = ops.slice(1); await kvSet('opsRelais', ops);
+    }
+  } finally { _opsEnCours = false; }
+}
 async function notifPourSup(ev) {
   const lieu = siteNom(ev.site), qui = ev.agent || '';
   const sig = ev.data && ev.data.sig ? await dbGet('sigs', ev.data.sig) : null;
@@ -1010,11 +1056,11 @@ async function notifPourSup(ev) {
   if (ev.t === 'revue' && ev.data.verdict === 'aggrave') return { type: 'aggrave', titre: `Signalement aggravé — ${lieu}`, corps: `${quoi} — ${qui}${ev.data.comment ? ' : ' + ev.data.comment : ''}` };
   if (ev.t === 'action') return { type: 'action', titre: `${ACTIONS[ev.data.type] || 'Traitement'} — ${lieu}`, corps: `${quoi}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.prevu ? ' — le ' + fmtDT(ev.data.prevu) : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''} (${qui})` };
   if (ev.t === 'pm') return { type: 'pm', titre: `Police municipale — ${PM_STATUTS[ev.data.statut] || ''}`, corps: `${quoi}${ev.data.obs ? ' : ' + ev.data.obs : ''}` };
-  if (ev.t === 'barriere' && ev.data.action === 'fermee') return { type: 'barriere', titre: `Barrière refermée — ${lieu}`, corps: `${ev.data.barriere} — ${qui}` };
-  if (ev.t === 'ronde_annulee') return { type: 'ronde', titre: `Ronde annulée — ${lieu}`, corps: qui };
-  if (ev.t === 'signalement') return { type: 'sig', titre: `${ev.data.urgent ? 'URGENT — ' : ''}Signalement — ${lieu}`, corps: `${ev.data.cat}${ev.data.sub ? ' — ' + ev.data.sub : ''}${ev.data.horsRonde ? ' (hors ronde)' : ''} — ${qui}` };
-  if (ev.t === 'barriere' && ev.data.action === 'ouverte') return { type: 'barriere', titre: `Barrière ouverte — ${lieu}`, corps: `${ev.data.barriere} : ${ev.data.motif || ''} — ${qui}` };
-  if (ev.t === 'ronde_fin') return { type: 'ronde', titre: `Ronde terminée — ${lieu}`, corps: `${qui} : ${ev.data.compte} véhicule(s), ${ev.data.nbSig} signalement(s)` };
+  if (ev.t === 'barriere' && ev.data.action === 'fermee') return { type: 'barriere_fermee', titre: `Barrière refermée — ${lieu}`, corps: `${ev.data.barriere} — ${qui}` };
+  if (ev.t === 'ronde_annulee') return { type: 'ronde_annulee', titre: `Ronde annulée — ${lieu}`, corps: qui };
+  if (ev.t === 'signalement') return { type: ev.data.urgent ? 'urgent' : 'sig', titre: `${ev.data.urgent ? 'URGENT — ' : ''}Signalement — ${lieu}`, corps: `${ev.data.cat}${ev.data.sub ? ' — ' + ev.data.sub : ''}${ev.data.horsRonde ? ' (hors ronde)' : ''} — ${qui}` };
+  if (ev.t === 'barriere' && ev.data.action === 'ouverte') return { type: 'barriere_ouverte', titre: `Barrière ouverte — ${lieu}`, corps: `${ev.data.barriere} : ${ev.data.motif || ''} — ${qui}` };
+  if (ev.t === 'ronde_fin') return { type: 'ronde_fin', titre: `Ronde terminée — ${lieu}`, corps: `${qui} : ${ev.data.compte} véhicule(s), ${ev.data.nbSig} signalement(s)` };
   if (ev.t === 'msg') return { type: 'msg', titre: `Réponse d’un agent — ${ev.data.ref}`, corps: `${qui} : ${ev.data.fait ? '[action faite] ' : ''}${ev.data.texte || ''}` };
   return null;
 }
@@ -1033,10 +1079,11 @@ async function agentSync() {
       }
       if (bytes > LOT_MAX_OCTETS) break;
     }
-    for (const ev of batch) { const n = await notifPourSup(ev); if (n) _notifSup.push(n); }
     const data = await encJSON({ v: 3, dev, events: batch });
     const media = Object.keys(files).length ? b64u.enc(await teamEnc(fflate.zipSync(files))) : null;
     const r = await rel('put', { dev, data, media }, 180000);
+    for (const ev of batch) { const n = await notifPourSup(ev); if (n) _notifSup.push(n); }   // seulement une fois le dépôt accepté
+    await opsPourRelais(batch);
     for (let i = 0; i < batch.length; i++) await storeEvEntry(batch[i], r.n, i, r.at, { media: !!media });
     const d = await openDB(); const t = d.transaction(['events', 'photos'], 'readwrite');
     batch.forEach(ev => { t.objectStore('events').delete(ev.seq); ev.photos.forEach(p => t.objectStore('photos').delete(p.id)); });
@@ -1046,6 +1093,7 @@ async function agentSync() {
   const got = await pullAll(['p', 'd']);
   if (sent || got) await fold();
   if (_notifSup.length) { const l = _notifSup; _notifSup = []; notifier('sup', l); }
+  traiterOpsRelais();
   return { sent, got };
 }
 async function pullAll(kinds) {
@@ -1350,7 +1398,7 @@ async function beginRonde(site, agent) {
   etapes.push({ id: 'fin', lbl: 'Fin de ronde' });
   const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), etapes, step: etapes[0].id, pos: {}, revus: [], reporte: {}, lance: {},
     checklist: {}, sigsCrees: [], compte: 0, compteValide: false, quotidienDu: true, ctl: {}, ctlEmis: {} };
-  await appendEvent('ronde_debut', ronde, {});
+  await appendEvent('ronde_debut', ronde, { debut: ronde.debut });
   await kvSet('ronde', ronde);
   await kvSet('dernierAgent', { nom: agent, at: Date.now() });
   hideBusy();
@@ -2265,22 +2313,37 @@ async function chiffrerPush(abo, texte) {
   let bin = ''; tout.forEach(x => bin += String.fromCharCode(x));
   return btoa(bin);
 }
+function composerNotif(items) {
+  const coupe = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t;
+  return items.length === 1 ? { ...items[0], corps: coupe(items[0].corps || '', 600) }
+    : { type: 'plusieurs', titre: `Rondes parkings : ${items.length} nouveautés`, corps: coupe(items.map(i => `${i.titre} — ${i.corps}`).join('\n'), 1500) };
+}
+async function chiffrerPour(abos, type, message) {
+  const out = {};
+  for (const a of abos || []) if (!a.prefs || a.prefs.includes(type)) { try { out[a.e] = await chiffrerPush(a, JSON.stringify(message)); } catch (e) { } }
+  return out;
+}
+async function jeton(type, id) {   // identifiant anonyme pour le relais (il ne peut pas retrouver le parking ni la ronde)
+  const hsh = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(`${state.conn.team}|${type}|${id}`)));
+  return b64u.enc(hsh).slice(0, 32);
+}
 async function notifier(cible, items) {
   try {
     const v = await kvGet('vapid'); if (!v) return;
     const jwts = {}; for (const a of PUSH_AUDS) jwts[a] = await jwtVapid(a, v.priv);
     let corps = null;
     if (items && items.length) {
-      const coupe = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t;
-      const msg = items.length === 1 ? { ...items[0], corps: coupe(items[0].corps || '', 600) }
-        : { type: 'plusieurs', titre: `Rondes parkings : ${items.length} nouveautés`, corps: coupe(items.map(i => `${i.titre} — ${i.corps}`).join('\n'), 1500) };
       try {
         const r = await rel('abos', { cible }, 20000);
         corps = {};
-        for (const a of r.abos || []) { try { corps[a.e] = await chiffrerPush(a, JSON.stringify(msg)); } catch (e) { } }
+        for (const a of r.abos || []) {
+          const retenus = items.filter(i => !a.prefs || a.prefs.includes(i.type));   // préférences de l'appareil destinataire
+          if (!retenus.length) continue;
+          try { corps[a.e] = await chiffrerPush(a, JSON.stringify(composerNotif(retenus))); } catch (e) { }
+        }
       } catch (e) { corps = null; }
     }
-    await rel('notifier', { cible, jwts, k: v.pub, corps }, 30000);
+    await rel('notifier', { cible, jwts, k: v.pub, corps, seulsChiffres: !!corps }, 30000);
   } catch (e) { console.warn('notification non envoyée :', e.message); }
 }
 async function abonnerPush(v, force) {
@@ -2291,10 +2354,11 @@ async function abonnerPush(v, force) {
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u.dec(v.pub) });
   const prev = await kvGet('pushAbo');
   const cles = (sub.toJSON && sub.toJSON().keys) || {};
-  if (force || !prev || !prev.cles || prev.endpoint !== sub.endpoint || prev.pub !== v.pub || Date.now() - prev.at > 86400000) {
-    try { await rel('abonner', { endpoint: sub.endpoint, role: state.mode === 'superviseur' ? 'sup' : 'agents', p256dh: cles.p256dh, auth: cles.auth }, 30000); }
+  const prefs = await prefsNotif(), pj = prefs.join(',');
+  if (force || !prev || !prev.cles || prev.prefs !== pj || prev.endpoint !== sub.endpoint || prev.pub !== v.pub || Date.now() - prev.at > 86400000) {
+    try { await rel('abonner', { endpoint: sub.endpoint, role: state.mode === 'superviseur' ? 'sup' : 'agents', p256dh: cles.p256dh, auth: cles.auth, prefs }, 30000); }
     catch (e) { if (/opération inconnue/.test(e.message)) throw new Error('le relais doit être mis à jour (version 4) pour les notifications'); throw e; }
-    await kvSet('pushAbo', { endpoint: sub.endpoint, pub: v.pub, at: Date.now(), cles: !!cles.p256dh });
+    await kvSet('pushAbo', { endpoint: sub.endpoint, pub: v.pub, at: Date.now(), cles: !!cles.p256dh, prefs: pj });
   }
 }
 async function maintenirPush() {
@@ -2303,6 +2367,34 @@ async function maintenirPush() {
     const v = await kvGet('vapid');
     if (v && (await kvGet('pushAbo'))) await abonnerPush(v);
   } catch (e) { console.warn(e.message); }
+}
+/* Réglages : choix des notifications reçues sur cet appareil */
+async function carteNotifPrefs() {
+  if (!['agent', 'superviseur'].includes(state.mode)) return null;
+  const prefs = await prefsNotif();
+  const abo = await kvGet('pushAbo');
+  const actives = pushDispo() && Notification.permission === 'granted' && abo;
+  const ligne = ([type, lbl]) => h('button', {
+    class: 'case' + (prefs.includes(type) ? ' on' : ''), onclick: safe(async () => {
+      const i = prefs.indexOf(type); if (i >= 0) prefs.splice(i, 1); else prefs.push(type);
+      await kvSet('notifPrefs', [...prefs]);
+      render();
+      const v = await kvGet('vapid');
+      if (actives && v) {
+        try {
+          await abonnerPush(v);
+          if (state.mode === 'superviseur') await programmerAlertes(true);
+          toast('Choix enregistré.');
+        } catch (e) { toast('Choix enregistré sur l’appareil ; il sera transmis au relais à la prochaine connexion.', true); }
+      } else toast('Choix enregistré.');
+    })
+  }, h('span', { class: 'coche' }, prefs.includes(type) ? '✓' : ''), lbl);
+  return h('div', { class: 'card' }, h('h2', null, 'Notifications reçues sur cet appareil'),
+    actives ? null : h('p', { class: 'muted small' }, 'Les notifications ne sont pas encore activées sur cet appareil (carte « Cet appareil » de l’accueil). Vos choix seront appliqués dès leur activation.'),
+    h('div', { class: 'cases' }, ...typesNotif().flatMap(x => [GROUPES_NOTIF[x[0]] && state.mode === 'superviseur' ? h('p', { class: 'muted small', style: 'margin:14px 0 0;font-weight:700' }, GROUPES_NOTIF[x[0]]) : null, ligne(x)])),
+    h('div', { class: 'row' },
+      h('button', { class: 'sec', onclick: safe(async () => { await kvSet('notifPrefs', typesNotif().map(x => x[0])); await maintenirPush(); if (state.mode === 'superviseur') programmerAlertes(true).catch(() => { }); render(); }) }, 'Tout cocher'),
+      h('button', { class: 'sec', onclick: safe(async () => { await kvSet('notifPrefs', []); await maintenirPush(); if (state.mode === 'superviseur') programmerAlertes(true).catch(() => { }); render(); }) }, 'Tout décocher')));
 }
 /* Installation sur l'écran d'accueil et notifications : carte « Cet appareil », affichée tant qu'il reste quelque chose à faire */
 let _installEvt = null;
@@ -2620,6 +2712,7 @@ VIEWS.reglages = async () => {
       h('dt', null, 'Version'), h('dd', null, APP_VERSION))),
     persisted === false ? h('button', { class: 'sec', onclick: safe(async () => { const ok = await requestPersist(); toast(ok ? 'Stockage protégé.' : 'Refusé par le navigateur.', !ok); render(); }) }, 'Demander la protection du stockage') : null,
     estEquipe() ? h('button', { class: 'sec', onclick: () => go('scan') }, 'Scanner un nouveau QR de configuration') : null,
+    await carteNotifPrefs(),
     h('hr'),
     h('div', { class: 'card' }, h('h2', null, 'Réinitialiser cet appareil'),
       h('p', { class: 'muted small' }, estEquipe()
@@ -2740,8 +2833,34 @@ async function supSync() {
   const got = await pullAll(['p', 'd', 'n']);
   await fold();
   if (await assurerVapid()) { await viderFileSup(); await fold(); }
+  try { await programmerAlertes(); } catch (e) { console.warn('alertes non programmées :', e.message); }
   if (_notifAgents.length) { const l = _notifAgents; _notifAgents = []; notifier('agents', l); }
   return { got };
+}
+async function programmerAlertes(force) {
+  const v = await kvGet('vapid'); const cfg = state.cfg;
+  if (!v || !cfg) return;
+  const r = await rel('abos', { cible: 'sup' }, 20000);
+  const rm = cfg.rondeMatin, sy = cfg.synthese;
+  const empreinte = JSON.stringify({ a: (r.abos || []).map(a => [a.e, a.prefs]), rm, sy, s: cfg.sites.map(x => [x.id, x.nom]), k: v.pub });
+  const prev = await kvGet('programme');
+  if (!force && prev && prev.empreinte === empreinte && Date.now() - prev.at < 6 * 86400000) return;
+  if (!force && prev && prev.ancien && Date.now() - prev.at < 6 * 3600000) return;   // relais pas encore mis à jour
+  const quotidiennes = [], hebdo = [];
+  if (rm.actif !== false && cfg.sites.length <= 6) {
+    const jetons = []; for (const x of cfg.sites) jetons.push(await jeton('site', x.id));
+    const messages = {};
+    for (let m = 1; m < (1 << cfg.sites.length); m++) {   // un message chiffré par combinaison de parkings sans ronde
+      const idx = cfg.sites.map((x, i) => i).filter(i => m & (1 << i));
+      messages[idx.join(',')] = await chiffrerPour(r.abos, 'alerte_ronde', { type: 'alerte_ronde', titre: 'Aucune ronde ce matin', corps: `${idx.map(i => cfg.sites[i].nom).join(', ')} — heure limite ${rm.heure.replace(':', ' h ')}` });
+    }
+    quotidiennes.push({ id: 'ronde-matin', heure: rm.heure, jours: rm.jours, jetons, messages });
+  }
+  if (sy.actif !== false) hebdo.push({ id: 'synthese', jour: sy.jour, heure: sy.heure,
+    messages: await chiffrerPour(r.abos, 'synthese', { type: 'synthese', titre: 'Synthèse de la semaine', corps: 'Rondes, contrôles, signalements, barrières : touchez pour ouvrir le PDF.', lien: '#synthese' }) });
+  try { await rel('programmer', { vapid: { d: v.priv.d, pub: v.pub, sub: appBaseURL() }, quotidiennes, hebdo }, 30000); }
+  catch (e) { if (/opération inconnue/.test(e.message)) { await kvSet('programme', { ancien: true, at: Date.now() }); return; } throw e; }
+  await kvSet('programme', { empreinte, at: Date.now() });
 }
 async function viderFileSup() {
   let q = (await kvGet('decQueue')) || [];
@@ -2780,6 +2899,7 @@ async function supHome() {
     alertes.length ? h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supAlertes') },
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
+    await carteRondesJour(),
     await carteMessagesAccueil(),
     await carteAppareil(),
     await alerteRegistres(),
@@ -2797,6 +2917,7 @@ async function supHome() {
         rondes.length ? h('button', { class: 'sec', onclick: () => go('supRondes') }, 'Toutes les rondes') : null,
         h('button', { class: 'sec', onclick: () => go('supBarrieres') }, 'Barrières'))),
     h('div', { class: 'card' }, h('h2', null, 'Exports'),
+      h('button', { class: 'sec', onclick: () => go('synthese') }, 'Synthèse hebdomadaire (PDF)'),
       h('button', { class: 'sec', onclick: safe(supExcel) }, 'Excel complet (heures et positions)'),
       h('button', { class: 'sec', onclick: safe(supArchive) }, 'Archive complète avec photos (.zip)')),
     h('div', { class: 'card' }, h('h2', null, 'Paramétrage'),
@@ -2809,6 +2930,31 @@ async function supHome() {
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
     h('img', { class: 'logo-ville', src: 'logo-cachan.png', alt: 'Ville de Cachan — parkings' }),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
+}
+/* Une ronde par jour et par parking ; ronde ouverte depuis plus d'1 h */
+const jourIso = (d = new Date()) => (d.getDay() || 7);
+const minutesDe = hm => { const [a, b] = String(hm || '12:00').split(':').map(Number); return a * 60 + (b || 0); };
+async function carteRondesJour() {
+  const rm = state.cfg.rondeMatin || {}, auj = localDate(), now = new Date();
+  const rondes = await dbAll('rondes');
+  const duJour = rondes.filter(r => r.debut && localDate(new Date(r.debut)) === auj);
+  const longues = rondes.filter(r => r.debut && !r.fin && now - new Date(r.debut) > 3600000 && now - new Date(r.debut) < 86400000);
+  const attendu = rm.actif !== false && (rm.jours || []).includes(jourIso(now));
+  const limite = attendu && now.getHours() * 60 + now.getMinutes() >= minutesDe(rm.heure);
+  const lignes = state.cfg.sites.map(x => {
+    const l = duJour.filter(r => r.site === x.id).sort((a, b) => a.debut.localeCompare(b.debut));
+    const badge = l.length ? h('span', { class: 'badge b-ok' }, `${l.length > 1 ? l.length + ' rondes, ' : ''}${fmtHeure(l[0].debut)}`)
+      : !attendu ? h('span', { class: 'badge' }, 'pas de ronde prévue')
+        : limite ? h('span', { class: 'badge b-bad' }, 'aucune ronde') : h('span', { class: 'badge b-warn' }, `pas encore (limite ${rm.heure.replace(':', ' h ')})`);
+    return h('div', { class: 'stat' }, h('span', null, x.nom), badge);
+  });
+  const manquants = state.cfg.sites.filter(x => !duJour.some(r => r.site === x.id));
+  const alerte = (limite && manquants.length) || longues.length;
+  return h('div', { class: 'card', style: alerte ? 'border-color:var(--bad)' : null },
+    h('h2', null, 'Rondes du jour'),
+    limite && manquants.length ? h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 6px' }, `Aucune ronde ce matin à ${manquants.map(x => x.nom).join(', ')}.`) : null,
+    ...longues.map(r => h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 6px' }, `Ronde de plus d’1 h — ${siteNom(r.site)} : ${r.agent}, commencée à ${fmtHeure(r.debut)}, toujours pas terminée.`)),
+    ...lignes);
 }
 /* Registres de sécurité : contrôle mensuel par le DPMS (30 jours glissants) */
 async function etatRegistres() {
@@ -3414,6 +3560,199 @@ async function supExcel() {
     ['Journal', A4, [10, 6, 16, 11, 16, 16, 12, 12, 55, 11, 11, 10, 10, 10]]
   ]), `rondes_parkings_complet_${fileStamp()}.xlsx`, 'Rondes parkings');
 }
+/* ---------- Synthèse hebdomadaire (PDF) ---------- */
+function chargerScript(src, globale) {
+  if (window[globale]) return Promise.resolve(window[globale]);
+  return new Promise((ok, ko) => {
+    const s = document.createElement('script'); s.src = src;
+    s.onload = () => window[globale] ? ok(window[globale]) : ko(new Error('bibliothèque PDF illisible'));
+    s.onerror = () => ko(new Error('bibliothèque PDF non chargée (réseau ?)'));
+    document.head.appendChild(s);
+  });
+}
+function periodeSemaine(decalage) {   // decalage 0 = semaine en cours, -1 = semaine précédente (lundi → dimanche)
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (jourIso(d) - 1) + 7 * decalage);
+  const fin = new Date(d); fin.setDate(fin.getDate() + 7);
+  const jours = []; for (let i = 0; i < 7; i++) { const x = new Date(d); x.setDate(x.getDate() + i); jours.push(x); }
+  return { debut: d, fin, jours };
+}
+const JOUR_COURT = ['dim.', 'lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.'];
+const MOIS_LONGS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+const dateLongue = d => `${JOURS_LONGS[jourIso(d) - 1]} ${d.getDate()} ${MOIS_LONGS[d.getMonth()]} ${d.getFullYear()}`;
+function libellePeriode(p) {
+  const der = p.jours[6];
+  return `du ${dateLongue(p.debut)} au ${dateLongue(der)}`;
+}
+const dureeTxt = min => min == null ? '—' : min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')}`;
+async function donneesSynthese(p) {
+  const dans = iso => { if (!iso) return false; const d = new Date(iso.length === 10 ? iso + 'T12:00:00' : iso); return d >= p.debut && d < p.fin; };
+  const cfg = state.cfg, rm = cfg.rondeMatin || {};
+  const maintenant = new Date(), finEff = p.fin < maintenant ? p.fin : maintenant;
+  const rondes = (await dbAll('rondes')).filter(r => dans(r.debut));
+  const sigs = await dbAll('sigs');
+  const barr = ((await kvGet('barrieres')) || []);
+  const hist = ((await kvGet('controlesHist')) || []).filter(x => dans(x.ts || x.at));
+  const st = await etatControles();
+  const regs = await etatRegistres();
+  const joursAttendus = p.jours.filter(j => (rm.jours || [1, 2, 3, 4, 5, 6, 7]).includes(jourIso(j)) && j < finEff);
+  const parSite = cfg.sites.map(x => {
+    const rs = rondes.filter(r => r.site === x.id);
+    const durees = rs.filter(r => r.fin).map(r => Math.round((new Date(r.fin) - new Date(r.debut)) / 60000));
+    const comptes = rs.filter(r => r.compte != null).map(r => r.compte);
+    const sans = rm.actif === false ? [] : joursAttendus.filter(j => !rs.some(r => localDate(new Date(r.debut)) === localDate(j)));
+    const ctl = hist.filter(c => c.site === x.id);
+    const nc = {};
+    ctl.forEach(c => resumeControle(c.items, c.libelles).nc.forEach(l => { nc[l] = (nc[l] || 0) + 1; }));
+    const b = barr.filter(y => y.site === x.id && (dans(y.ouverte.quand) || (new Date(y.ouverte.quand) < p.debut && (!y.fermee || new Date(y.fermee.quand) >= p.debut))));
+    const dureeB = b.reduce((t, y) => {
+      const a = Math.max(new Date(y.ouverte.quand), p.debut), z = Math.min(y.fermee ? new Date(y.fermee.quand) : maintenant, finEff);
+      return t + Math.max(0, Math.round((z - a) / 60000));
+    }, 0);
+    return {
+      site: x, rondes: rs.length, nonTerminees: rs.filter(r => !r.fin).length, sans,
+      dureeMoy: durees.length ? Math.round(durees.reduce((a, b) => a + b, 0) / durees.length) : null,
+      vehMoy: comptes.length ? Math.round(comptes.reduce((a, b) => a + b, 0) / comptes.length) : null,
+      ctlQuot: ctl.filter(c => c.niveau === 'quotidien').length,
+      nc, mensuel: echeance(st, x.id, 'mensuel'), trimestriel: echeance(st, x.id, 'trimestriel'), registre: regs.find(r => r.site === x.id),
+      barrieres: b.filter(y => dans(y.ouverte.quand)).length, dureeB, barrOuvertes: barr.filter(y => y.site === x.id && !y.fermee)
+    };
+  });
+  const cree = s => s.ts || s.jour;
+  const nouveaux = sigs.filter(s => dans(cree(s)));
+  const clos = sigs.filter(s => s.statut === 'clos' && dans(s.closLe));
+  const ouverts = sigs.filter(s => s.statut !== 'clos');
+  const age = s => joursDepuis(cree(s));
+  const parCat = {};
+  nouveaux.forEach(s => { const k = s.cat; parCat[k] = parCat[k] || { n: 0, u: 0 }; parCat[k].n++; if (s.urgent) parCat[k].u++; });
+  const parEtat = {};
+  ouverts.forEach(s => { const e = suiviEtat(s); parEtat[e] = (parEtat[e] || 0) + 1; });
+  return {
+    p, parSite, nouveaux, clos, ouverts, parCat, parEtat, joursAttendus,
+    urgentsOuverts: ouverts.filter(s => s.urgent),
+    anciens: ouverts.filter(s => age(s) > 30).sort((a, b) => cree(a).localeCompare(cree(b))),
+    demandes: ouverts.filter(s => s.demande),
+    age, edite: maintenant, releve: await kvGet('lastSync')
+  };
+}
+async function pdfSynthese(D) {
+  const { jsPDF } = await chargerScript('lib/jspdf.umd.min.js', 'jspdf');
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const W = 210, M = 16, L = W - 2 * M, BAS = 282;
+  const txt = t => String(t == null ? '' : t).replace(/[  ]/g, ' ').replace(/→/g, '->').replace(/[^\x00-\xff‘’“”–—•…€Œœ]/g, '?');
+  let y = M;
+  const saut = n => { if (y + n > BAS) { doc.addPage(); y = M; } };
+  const couleur = (r, g, b) => doc.setTextColor(r, g, b);
+  const titre = t => { saut(32); y += 3; doc.setFont('helvetica', 'bold'); doc.setFontSize(13); couleur(29, 79, 145); doc.text(txt(t), M, y); y += 2; doc.setDrawColor(29, 79, 145); doc.setLineWidth(0.5); doc.line(M, y, W - M, y); y += 6; couleur(20, 20, 20); };
+  const para = (t, o = {}) => {
+    doc.setFont('helvetica', o.gras ? 'bold' : 'normal'); doc.setFontSize(o.taille || 10);
+    if (o.rouge) couleur(179, 38, 30); else if (o.gris) couleur(90, 96, 105); else couleur(20, 20, 20);
+    const l = doc.splitTextToSize(txt(t), (o.largeur || L) - (o.retrait || 0));
+    for (const x of l) { saut(5); doc.text(x, M + (o.retrait || 0), y); y += (o.taille || 10) * 0.45; }
+    y += 1; couleur(20, 20, 20);
+  };
+  const tableau = (entetes, lignes, largeurs, o = {}) => {
+    const tot = largeurs.reduce((a, b) => a + b, 0), ws = largeurs.map(w => w / tot * L);
+    const ligne = (cells, gras, fond) => {
+      doc.setFont('helvetica', gras ? 'bold' : 'normal'); doc.setFontSize(9);
+      const parts = cells.map((c, i) => doc.splitTextToSize(txt(c), ws[i] - 2));
+      const hgt = Math.max(...parts.map(x => x.length)) * 4 + 2;
+      if (y + hgt > BAS) { doc.addPage(); y = M; if (!gras) { ligne(entetes, true, [238, 243, 250]); doc.setFont('helvetica', 'normal'); doc.setFontSize(9); } }
+      if (fond) { doc.setFillColor(...fond); doc.rect(M, y - 3.6, L, hgt, 'F'); }
+      let x = M;
+      parts.forEach((pp, i) => { pp.forEach((s, k) => doc.text(s, x + 1, y + k * 4)); x += ws[i]; });
+      y += hgt;
+      doc.setDrawColor(201, 206, 214); doc.setLineWidth(0.2); doc.line(M, y - 3.6, W - M, y - 3.6);
+    };
+    saut(16);
+    ligne(entetes, true, [238, 243, 250]);
+    if (!lignes.length) ligne([o.vide || 'Aucun élément.', ...entetes.slice(1).map(() => '')], false);
+    lignes.forEach(l => ligne(l, false));
+    y += 3;
+  };
+  // en-tête
+  try {
+    const img = await new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = 'logo-cachan.png'; });
+    const cv = document.createElement('canvas'); cv.width = 360; cv.height = Math.round(360 * img.naturalHeight / img.naturalWidth);
+    const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
+    doc.addImage(cv.toDataURL('image/jpeg', 0.88), 'JPEG', W - M - 24, M - 5, 24, 24 * cv.height / cv.width);
+  } catch (e) { }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); couleur(29, 79, 145); doc.text(txt('VILLE DE CACHAN — DPMS'), M, y); y += 8;
+  doc.setFontSize(19); couleur(20, 20, 20); doc.text(txt('Parkings — synthèse hebdomadaire'), M, y); y += 7;
+  para(`Semaine ${libellePeriode(D.p)}`, { taille: 12, gras: true, largeur: L - 28 });
+  para(`Éditée le ${fmtDT(D.edite.toISOString())} — données relevées ${D.releve ? 'le ' + fmtDT(D.releve) : '(jamais relevées)'}. Parkings : ${state.cfg.sites.map(x => x.nom).join(', ')}.`, { gris: true, taille: 9, largeur: L - 28 });
+  y += 2;
+  // en bref
+  titre('En bref');
+  const totR = D.parSite.reduce((a, x) => a + x.rondes, 0), totSans = D.parSite.reduce((a, x) => a + x.sans.length, 0);
+  const attendues = D.joursAttendus.length * D.parSite.length;
+  const urgN = D.nouveaux.filter(s => s.urgent).length;
+  const totB = D.parSite.reduce((a, x) => a + x.barrieres, 0), totBd = D.parSite.reduce((a, x) => a + x.dureeB, 0);
+  const encoreOuv = D.parSite.flatMap(x => x.barrOuvertes);
+  [`Rondes : ${totR} réalisée(s)${state.cfg.rondeMatin.actif !== false ? ` ; ${totSans} journée(s)-parking sans ronde sur ${attendues} attendue(s)` : ''}.`,
+   `Signalements : ${D.nouveaux.length} nouveau(x)${urgN ? ` dont ${urgN} urgent(s)` : ''}, ${D.clos.length} clos dans la semaine ; ${D.ouverts.length} en cours à ce jour, dont ${D.parEtat['À transmettre'] || 0} à transmettre et ${D.anciens.length} ouvert(s) depuis plus de 30 jours.`,
+   `Barrières : ${totB} ouverture(s), ${dureeTxt(totBd)} d’ouverture cumulée${encoreOuv.length ? ` ; ${encoreOuv.length} encore ouverte(s) à l’édition` : ''}.`,
+   D.demandes.length ? `Demandes d’action aux agents sans réponse : ${D.demandes.length}.` : null]
+    .filter(Boolean).forEach(t => para('•  ' + t, { retrait: 2 }));
+  // rondes
+  titre('Rondes');
+  tableau(['Parking', 'Rondes', 'Durée moyenne', 'Véhicules (moy.)', 'Non terminées', 'Jours sans ronde'],
+    D.parSite.map(x => [x.site.nom, x.rondes, dureeTxt(x.dureeMoy), x.vehMoy == null ? '—' : x.vehMoy, x.nonTerminees || '—', x.sans.length ? x.sans.map(j => `${JOUR_COURT[j.getDay()]} ${j.getDate()}`).join(', ') : 'aucun']),
+    [22, 12, 18, 16, 15, 40]);
+  // contrôles
+  titre('Contrôles');
+  tableau(['Parking', 'Contrôles quotidiens', 'Mensuel', 'Trimestriel', 'Registre de sécurité (DPMS)'],
+    D.parSite.map(x => {
+      const e = (v, n) => !v.dernier ? 'jamais fait' : `${fmtJour(localDate(new Date(v.dernier.at)))}${v.du ? ' — EN RETARD' : ''}`;
+      return [x.site.nom, x.ctlQuot, e(x.mensuel), e(x.trimestriel), x.registre && x.registre.dernier ? `${fmtJour(localDate(new Date(x.registre.dernier.at)))}${x.registre.du ? ' — à faire' : ''}` : 'jamais contrôlé'];
+    }), [22, 18, 24, 24, 30]);
+  const ncl = D.parSite.flatMap(x => Object.entries(x.nc).map(([l, n]) => [x.site.nom, l, n])).sort((a, b) => b[2] - a[2]);
+  para('Points relevés non conformes dans la semaine :', { gras: true });
+  tableau(['Parking', 'Point de contrôle', 'Nombre de rondes'], ncl.slice(0, 15), [22, 60, 18], { vide: 'Aucune non-conformité.' });
+  // signalements
+  titre('Signalements');
+  tableau(['Catégorie', 'Nouveaux', 'dont urgents'], Object.entries(D.parCat).sort((a, b) => b[1].n - a[1].n).map(([c, v]) => [c, v.n, v.u || '—']), [60, 20, 20], { vide: 'Aucun nouveau signalement.' });
+  para('Signalements en cours, par état du traitement :', { gras: true });
+  tableau(['État', 'Nombre'], Object.entries(D.parEtat).sort((a, b) => b[1] - a[1]), [60, 20], { vide: 'Aucun signalement en cours.' });
+  const ligneSig = s => [s.ref, siteNom(s.site), sigTitre(s), `${D.age(s)} j`, suiviEtat(s)];
+  if (D.urgentsOuverts.length) { para('Urgents encore ouverts :', { gras: true, rouge: true }); tableau(['Réf.', 'Parking', 'Signalement', 'Âge', 'Traitement'], D.urgentsOuverts.map(ligneSig), [17, 14, 41, 7, 21]); }
+  if (D.anciens.length) { para('Ouverts depuis plus de 30 jours :', { gras: true }); tableau(['Réf.', 'Parking', 'Signalement', 'Âge', 'Traitement'], D.anciens.slice(0, 20).map(ligneSig), [17, 14, 41, 7, 21]); if (D.anciens.length > 20) para(`… et ${D.anciens.length - 20} autre(s) (voir l’Excel complet).`, { gris: true, taille: 9 }); }
+  if (D.demandes.length) { para('Demandes d’action aux agents en attente :', { gras: true }); tableau(['Réf.', 'Parking', 'Signalement', 'Demandée le'], D.demandes.map(s => { const m = s.messages.find(x => x.id === s.demande); return [s.ref, siteNom(s.site), sigTitre(s), m ? fmtDT(m.quand) : '']; }), [17, 14, 47, 22]); }
+  // barrières
+  titre('Barrières');
+  tableau(['Parking', 'Ouvertures', 'Durée cumulée', 'Encore ouvertes'],
+    D.parSite.map(x => [x.site.nom, x.barrieres, dureeTxt(x.dureeB), x.barrOuvertes.length ? x.barrOuvertes.map(b => `${b.barriere} (depuis ${fmtDT(b.ouverte.quand)})`).join(', ') : '—']), [22, 14, 18, 46]);
+  // pied de page
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) {
+    doc.setPage(i); doc.setFont('helvetica', 'normal'); doc.setFontSize(8); couleur(90, 96, 105);
+    doc.text(txt(`Ville de Cachan — DPMS — rondes parkings — semaine ${libellePeriode(D.p)}`), M, 291);
+    doc.text(`${i} / ${n}`, W - M, 291, { align: 'right' });
+  }
+  return doc.output('blob');
+}
+VIEWS.synthese = async (params = {}) => {
+  if (state.mode !== 'superviseur') return VIEWS.home();
+  const dec = params.dec != null ? params.dec : (new Date().getDay() === 1 && new Date().getHours() < 12 ? -1 : (jourIso() === state.cfg.synthese.jour ? -1 : 0));
+  const p = periodeSemaine(dec);
+  const D = await donneesSynthese(p);
+  const totR = D.parSite.reduce((a, x) => a + x.rondes, 0);
+  const nomFichier = `synthese_parkings_${localDate(p.debut)}.pdf`;
+  const lastSync = await kvGet('lastSync');
+  return page('Synthèse hebdomadaire', { back: true },
+    h('div', { class: 'card' },
+      chips([{ val: -1, lbl: 'Semaine dernière' }, { val: 0, lbl: 'Semaine en cours' }], dec, v => go('synthese', { dec: v })),
+      h('p', { style: 'margin:10px 0 4px;font-weight:700' }, `Semaine ${libellePeriode(p)}`),
+      h('p', { class: 'muted small' }, `Données relevées ${lastSync ? fmtQuand(lastSync) : '— jamais'}.`),
+      h('div', { class: 'stat' }, h('span', null, 'Rondes réalisées'), h('b', null, totR)),
+      h('div', { class: 'stat' }, h('span', null, 'Journées-parking sans ronde'), h('b', null, D.parSite.reduce((a, x) => a + x.sans.length, 0))),
+      h('div', { class: 'stat' }, h('span', null, 'Nouveaux signalements'), h('b', null, D.nouveaux.length)),
+      h('div', { class: 'stat' }, h('span', null, 'Signalements clos'), h('b', null, D.clos.length)),
+      h('div', { class: 'stat' }, h('span', null, 'En cours (dont + de 30 jours)'), h('b', null, `${D.ouverts.length} (${D.anciens.length})`)),
+      h('div', { class: 'stat' }, h('span', null, 'Ouvertures de barrière'), h('b', null, D.parSite.reduce((a, x) => a + x.barrieres, 0)))),
+    h('button', { class: 'ok big', onclick: safe(async () => { showBusy('Préparation du PDF…'); try { const b = await pdfSynthese(await donneesSynthese(p)); hideBusy(); await shareOrDownload(b, nomFichier, 'Synthèse hebdomadaire des parkings'); } finally { hideBusy(); } }) }, 'Ouvrir / partager le PDF'),
+    h('button', { class: 'sec', onclick: safe(async () => { const r = await syncNow(); toast(r && r.err ? 'Relève impossible : ' + r.err : 'Données à jour.', !!(r && r.err)); render(); }) }, 'Actualiser les données'),
+    h('p', { class: 'muted small' }, 'Le PDF est fabriqué sur ce téléphone à partir des données relevées : le relais ne peut pas lire les données, il ne peut donc pas l’envoyer lui-même par courriel.'));
+};
 /* ---------- Archive complète ---------- */
 async function supArchive() {
   showBusy('Téléchargement des photos…');
@@ -3484,6 +3823,9 @@ VIEWS.supConfig = async () => {
   const sitesInputs = c.sites.map(s => ({ nom: h('input', { type: 'text', value: s.nom }), barr: h('input', { type: 'text', value: s.barrieres.join(', ') }) }));
   const tel = h('input', { type: 'tel', value: c.urgenceTel || '', placeholder: '01 …' });
   const mail = h('input', { type: 'email', value: c.urgenceMail || '', placeholder: 'prenom.nom@ville-cachan.fr' });
+  const hMatin = h('input', { type: 'time', value: c.rondeMatin.heure });
+  const jSynth = h('select', null, ...JOURS_LONGS.map((j, i) => h('option', { value: String(i + 1), selected: c.synthese.jour === i + 1 ? true : null }, j)));
+  const hSynth = h('input', { type: 'time', value: c.synthese.heure });
   const lines = t => t.value.split('\n').map(x => x.trim()).filter(Boolean);
   return page('Listes et catégories', { back: true },
     h('div', { class: 'banner info' }, 'Les modifications sont transmises automatiquement à tous les appareils.'),
@@ -3504,6 +3846,13 @@ VIEWS.supConfig = async () => {
     h('label', { class: 'f' }, 'Courriel d’urgence'), mail,
     h('label', { class: 'f' }, 'Géolocalisation GPS des saisies'),
     chips([{ val: false, lbl: 'Désactivée' }, { val: true, lbl: 'Activée' }], c.gps, v => c.gps = v),
+    h('label', { class: 'f' }, 'Une ronde par jour et par parking : alerte si aucune ronde avant'),
+    chips([{ val: true, lbl: 'Activée' }, { val: false, lbl: 'Désactivée' }], c.rondeMatin.actif !== false, v => c.rondeMatin.actif = v),
+    hMatin, h('p', { class: 'muted small' }, 'Jours où une ronde est attendue :'),
+    chips(JOURS.map((j, i) => ({ val: i + 1, lbl: j })), c.rondeMatin.jours, () => { }, { multi: true }),
+    h('label', { class: 'f' }, 'Synthèse hebdomadaire (notification, puis PDF)'),
+    chips([{ val: true, lbl: 'Activée' }, { val: false, lbl: 'Désactivée' }], c.synthese.actif !== false, v => c.synthese.actif = v),
+    h('div', { class: 'row' }, jSynth, hSynth),
     h('button', {
       class: 'ok', onclick: safe(async () => {
         const cats = parseTaxo(tTaxo.value);
@@ -3523,7 +3872,8 @@ VIEWS.supConfig = async () => {
           const b = si.barr.value.split(',').map(x => x.trim()).filter(Boolean);
           if (b.length) c.sites[k].barrieres = b;
         });
-        Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, controles, motifs: lines(tMotifs), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8) });
+        Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, controles, motifs: lines(tMotifs), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8),
+          rondeMatin: { ...c.rondeMatin, heure: hMatin.value || '12:00', jours: [...c.rondeMatin.jours].sort() }, synthese: { ...c.synthese, jour: parseInt(jSynth.value, 10), heure: hSynth.value || '08:00' } });
         await publishCfg(c);
         toast('Enregistré. Transmis à tous les appareils.');
         go('home');
@@ -3552,16 +3902,23 @@ async function boot() {
     history.replaceState(null, '', location.pathname + location.search);
     await handleLink(hash, false);
     if (state.view === 'home') render();
+  } else if (hash === '#synthese' && state.mode === 'superviseur') {
+    history.replaceState(null, '', location.pathname + location.search);
+    go('synthese');
   } else render();
   if (state.mode) syncNow().then(refreshIfHome);
 }
 window.addEventListener('hashchange', () => {
   const hash = location.hash;
   if (hash && /^#(join|site|cfg|sup)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
+  else if (hash === '#synthese' && state.mode === 'superviseur') { history.replaceState(null, '', location.pathname + location.search); go('synthese'); }
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(confirmerContact, 600); });
 setTimeout(confirmerContact, 1500);
-if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'sync' && state.mode) syncNow().then(refreshIfHome); });
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+  if (e.data === 'lien:#synthese' && state.mode === 'superviseur') { go('synthese'); syncNow().then(() => { if (state.view === 'synthese') render(); }); return; }
+  if ((e.data === 'sync' || String(e.data).startsWith('lien:')) && state.mode) syncNow().then(refreshIfHome);
+});
 window.addEventListener('online', () => { if (state.mode) syncNow().then(refreshIfHome); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); });
 setInterval(() => { if (document.visibilityState === 'visible' && state.mode) syncNow().then(refreshIfHome); }, SYNC_PERIODE_MS);

@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.3.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.4.0.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -25,6 +25,8 @@ Sur un ordinateur, avec un **compte Google dédié au service**.
 **Mettre à jour le relais** (sans rien perdre) : coller le nouveau code, enregistrer, puis **Déployer → Gérer les déploiements → crayon → Version : Nouvelle version → Déployer**. L'adresse ne change pas.
 
 **Notifications (relais version 4 et plus)** : après la première mise à jour en version 4, choisir la fonction **`autoriserNotifications`** dans la barre d'outils, **Exécuter**, puis accepter l'autorisation demandée (connexion à un service externe : c'est elle qui permet d'envoyer les notifications). La version 5 ne demande pas de nouvelle autorisation.
+
+**Alertes programmées (relais version 6)** : après la mise à jour en version 6, choisir la fonction **`installerAlertes`** dans la barre d'outils, **Exécuter**, puis accepter la nouvelle autorisation (exécution automatique toutes les 5 minutes). C'est ce déclencheur qui envoie « Aucune ronde ce matin », « Ronde de plus d'1 h » et l'annonce de la synthèse du lundi, même si aucun téléphone n'est allumé. Ouvrir ensuite une fois l'application superviseur pour transmettre la programmation au relais.
 
 **Repartir de zéro** (efface tout) : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la barre d'outils, puis **Exécuter**. Chaque appareil doit ensuite être réinitialisé (Réglages) et reconfiguré.
 
@@ -87,7 +89,9 @@ Chaque signalement a son fil d'échanges.
 - **Agents** : l'accueil affiche **Messages du DPMS** (icône courrier, nombre de messages non lus, demandes en attente) ; la demande apparaît aussi sur le signalement pendant la revue de ronde. L'agent choisit son nom puis **Répondre** ou **Action faite** (qui clôt la demande).
 - **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (carte **Cet appareil** : page **Plus** des agents, haut de l'accueil superviseur), puis accepter.
   - appareils **superviseurs** : barrière ouverte et refermée ; nouveau signalement (« URGENT » en tête s'il l'est) ; signalement aggravé ou clos ; traitement (appel, courriel, réponse reçue, intervention prévue ou réalisée, note) ; suite donnée par la police municipale ; ronde terminée (véhicules, signalements) ou annulée ; réponse d'un agent ;
-  - **téléphone des agents** : message ou demande d'action du DPMS.
+  - **téléphone des agents** : message ou demande d'action du DPMS ;
+  - **alertes programmées** (relais version 6), sur les appareils superviseurs : « Aucune ronde ce matin à … » (heure limite réglable), « Ronde de plus d'1 h » (ronde commencée, pas terminée ni annulée une heure après), « Synthèse de la semaine » (touchez : l'application ouvre la synthèse).
+  - **Choisir ses notifications** : **Réglages → Notifications reçues sur cet appareil**, type par type (urgents, autres signalements, aggravés, clos, traitement, PM, réponses des agents, barrière ouverte, barrière refermée, ronde terminée, ronde annulée, alertes programmées). Chaque appareil a ses propres choix.
 
   Le texte de la notification est chiffré par l'appareil qui l'envoie, pour l'appareil qui la reçoit : le relais et le service de notification ne voient qu'un bloc illisible. Les signalements faits pendant une ronde partent à la fin de la ronde (une seule notification), sauf s'ils sont urgents.
 
@@ -96,13 +100,15 @@ Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, e
 
 ### Superviseur
 - **Signalements** : sur PC, liste et fiche côte à côte ; filtres par statut, parking, catégorie, recherche (plaque, référence, texte) ; photos en galerie, agrandies d'un clic (flèches du clavier, Échap) ; traitement, constats, suivi PM ; interventions facultatives (clore, rouvrir, modifier, écrire aux agents, notes internes).
+- **Rondes du jour** (haut de l'accueil) : une ronde attendue par jour et par parking ; heure de la ronde pour chaque parking, « Aucune ronde ce matin à … » passée l'heure limite, rondes ouvertes depuis plus d'1 h. Heure limite et jours concernés : **Listes, catégories et coordonnées**. Une ronde annulée ne compte pas.
+- **Synthèse hebdomadaire (PDF)** (Exports, ou touchez la notification du lundi) : semaine dernière ou en cours ; rondes par parking (nombre, durée et véhicules moyens, rondes non terminées, jours sans ronde), contrôles (quotidiens, mensuel, trimestriel, registres, points non conformes), signalements (nouveaux par catégorie, urgents ouverts, en cours par état, ouverts depuis plus de 30 jours, demandes d'action sans réponse), barrières (ouvertures, durée cumulée, encore ouvertes). Jour et heure de l'annonce réglables. Le PDF est fabriqué sur l'appareil du superviseur : le relais ne peut pas lire les données, il ne l'envoie donc pas par courriel.
 - **Statistiques et graphiques** :
   - période (7 jours à 12 mois, tout, ou dates) et parking ;
   - indicateurs clés : signalements, en cours, clos, délai moyen de clôture, rondes, contrôles réalisés et non-conformités, véhicules par ronde, ouvertures et durée cumulée des barrières ;
   - graphiques prêts, et **Créer un graphique** : un indicateur (signalements, en cours / clos, délai de clôture, actions de traitement, contrôles réalisés, non-conformités, rondes, véhicules comptés, ouvertures ou durée d'ouverture des barrières) par catégorie, sous-catégorie, point de contrôle, type de contrôle, agent, parking, destinataire, barrière, motif, jour, semaine ou mois ;
   - chaque graphique : vue tableau, image, Excel.
 - **Contrôles** : par parking, dernier contrôle quotidien, mensuel et trimestriel, **registre de sécurité** (contrôle mensuel par le DPMS : rappel sur l'accueil après 30 jours, bouton « Registre contrôlé » avec observations), échéances et retards, points « n'existe pas ici » (avec « Rétablir »), historique avec les non-conformités.
-- **Exports** : Excel complet (Signalements, Rondes, Traitement, Contrôles, Barrières, Journal) et archive avec photos.
+- **Exports** : synthèse hebdomadaire (PDF), Excel complet (Signalements, Rondes, Traitement, Contrôles, Barrières, Journal) et archive avec photos.
 - **Suppression** : un signalement (bouton dans sa fiche), tous les signalements affichés par les filtres, une ronde ou toutes les rondes (**Toutes les rondes**). Les éléments supprimés disparaissent de tous les appareils, des statistiques et des exports ; ils restent restaurables depuis **Corbeille** (Paramétrage).
 
 ### Points de contrôle et catégories
@@ -124,8 +130,8 @@ Sécurité incendie | Ateliers          ← catégorie de signalement | destinat
 
 - Ne jamais vider les données du navigateur sur un téléphone agents : les saisies pas encore envoyées n'existent que sur lui.
 - Si deux personnes modifient le même signalement, la dernière modification reçue l'emporte ; l'historique reste dans le journal.
-- Le relais n'alerte pas en temps réel : pour une urgence, utiliser les boutons d'appel de l'accueil.
+- Les notifications et alertes ne remplacent pas l'appel : pour une urgence, utiliser les boutons d'appel de l'accueil.
 
 ## Bibliothèques incluses (licences libres)
 
-fflate (MIT), qrcode-generator (MIT), jsQR (Apache 2.0), SheetJS Community Edition 0.18.5 (Apache 2.0), Chart.js 4.5 (MIT).
+fflate (MIT), qrcode-generator (MIT), jsQR (Apache 2.0), SheetJS Community Edition 0.18.5 (Apache 2.0), Chart.js 4.5 (MIT), jsPDF 4.2.1 (MIT).
