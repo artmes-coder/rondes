@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.2.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -24,7 +24,7 @@ Sur un ordinateur, avec un **compte Google dédié au service**.
 
 **Mettre à jour le relais** (sans rien perdre) : coller le nouveau code, enregistrer, puis **Déployer → Gérer les déploiements → crayon → Version : Nouvelle version → Déployer**. L'adresse ne change pas.
 
-**Notifications (relais version 4)** : après la mise à jour, choisir la fonction **`autoriserNotifications`** dans la barre d'outils, **Exécuter**, puis accepter l'autorisation demandée (connexion à un service externe : c'est elle qui permet d'envoyer les notifications).
+**Notifications (relais version 4 et plus)** : après la première mise à jour en version 4, choisir la fonction **`autoriserNotifications`** dans la barre d'outils, **Exécuter**, puis accepter l'autorisation demandée (connexion à un service externe : c'est elle qui permet d'envoyer les notifications). La version 5 ne demande pas de nouvelle autorisation.
 
 **Repartir de zéro** (efface tout) : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la barre d'outils, puis **Exécuter**. Chaque appareil doit ensuite être réinitialisé (Réglages) et reconfiguré.
 
@@ -85,7 +85,11 @@ Accueil → **Plus** → **Traitement des signalements** : liste regroupée par 
 Chaque signalement a son fil d'échanges.
 - **Superviseur** (fiche du signalement, « Échanges avec les agents ») : **Envoyer** (question, information) ou **Demande d'action** (consigne à exécuter) ; « Clore la demande sans réponse » si besoin. Filtre **Échanges** dans la liste des signalements ; l'accueil signale les réponses non lues.
 - **Agents** : l'accueil affiche **Messages du DPMS** (icône courrier, nombre de messages non lus, demandes en attente) ; la demande apparaît aussi sur le signalement pendant la revue de ronde. L'agent choisit son nom puis **Répondre** ou **Action faite** (qui clôt la demande).
-- **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (page **Plus** des agents ; Paramétrage pour le superviseur), puis accepter. Un message du DPMS fait alors sonner le téléphone des agents, une réponse d'agent fait sonner les appareils superviseurs. La notification ne contient que « nouveau message » : le texte reste chiffré et se lit dans l'application.
+- **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (page **Plus** des agents ; Paramétrage pour le superviseur), puis accepter.
+  - appareils **superviseurs** : barrière ouverte, signalement (« URGENT » en tête s'il l'est), ronde terminée (véhicules, signalements), réponse d'un agent ;
+  - **téléphone des agents** : message ou demande d'action du DPMS.
+
+  Le texte de la notification est chiffré par l'appareil qui l'envoie, pour l'appareil qui la reçoit : le relais et le service de notification ne voient qu'un bloc illisible. Les signalements faits pendant une ronde partent à la fin de la ronde (une seule notification), sauf s'ils sont urgents.
 
 ### Police municipale
 Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, emplacement, photos et constats. Observations, puis **Traité** (clôt le signalement) ou **Non traité** (le laisse ouvert, observation visible des agents). Export Excel.

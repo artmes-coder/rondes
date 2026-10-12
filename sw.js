@@ -4,9 +4,9 @@
  * - Bibliothèques et icônes : copie locale (elles changent avec le numéro de version ci-dessous).
  * - À l'installation d'une nouvelle version, les pages ouvertes sont rechargées automatiquement.
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
- * Notifications : le relais ne transmet aucun contenu ; la notification dit seulement qu'un message attend.
+ * Notifications : texte chiffré par l'appareil émetteur pour cet appareil ; le relais et Google ne peuvent pas le lire.
  */
-const CACHE = 'rondes-cachan-2.1.1';
+const CACHE = 'rondes-cachan-2.2.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
 const STATIC = ['./logo-cachan.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js'];
 const NET_TIMEOUT = 4000;
@@ -62,9 +62,11 @@ self.addEventListener('fetch', e => {
 });
 
 self.addEventListener('push', e => {
-  e.waitUntil(self.registration.showNotification('Rondes parkings', {
-    body: 'Nouveau message sur un signalement : ouvrez l’application pour le lire.',
-    icon: './icon-192.png', badge: './icon-192.png', tag: 'rondes-message', renotify: true
+  let d = null;
+  try { d = e.data ? e.data.json() : null; } catch (err) { d = null; }   // texte chiffré pour cet appareil, déchiffré par le navigateur
+  e.waitUntil(self.registration.showNotification(d && d.titre ? d.titre : 'Rondes parkings', {
+    body: d && d.corps ? d.corps : 'Nouvelle information : ouvrez l’application.',
+    icon: './icon-192.png', badge: './icon-192.png', tag: 'rondes-' + (d && d.type ? d.type : 'message') + '-' + Date.now(), renotify: true
   }));
 });
 self.addEventListener('notificationclick', e => {

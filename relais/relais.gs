@@ -1,5 +1,5 @@
 /**
- * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 4
+ * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 5
  *
  * Journal partagé entre les téléphones des agents et les appareils superviseurs.
  * Tout ce qui est stocké ici est chiffré sur les appareils avant l'envoi :
@@ -12,8 +12,9 @@
  *   n_<n>.bin        notes internes du superviseur (chiffrées pour les seuls superviseurs)
  *   coffre.bin       clés du superviseur, chiffrées par sa phrase de passe
  *   index.json       liste des fichiers (numéros, types, tailles) — aucun contenu
- *   abonnements.json adresses de notification des appareils (aucun contenu de message :
- *                    la notification dit seulement « nouveau message », le texte reste chiffré)
+ *   abonnements.json adresses de notification des appareils et leurs clés publiques ;
+ *                    le texte des notifications est chiffré par l'appareil qui l'envoie,
+ *                    pour l'appareil qui le reçoit : ni ce script ni Google ne peuvent le lire
  *
  * REPARTIR DE ZÉRO : dans la barre d'outils de l'éditeur, choisir la fonction
  * « reinitialiserRelais » puis cliquer sur « Exécuter ». Tout le contenu du relais
@@ -29,7 +30,7 @@ var PULL_OCTETS = 8000000;      // volume maximal renvoyé par relève
 var PULL_NOMBRE = 150;          // nombre maximal d'éléments renvoyés par relève
 
 function doGet() {
-  return json_({ ok: true, service: 'relais-rondes', v: 4 });
+  return json_({ ok: true, service: 'relais-rondes', v: 5 });
 }
 
 function doPost(e) {
@@ -144,9 +145,16 @@ function traiter_(req) {
       if (!pushAutorise_(ep) || (req.role !== 'agents' && req.role !== 'sup')) return { ok: false, err: 'abonnement invalide' };
       if (req.role === 'sup' && !estSup) return { ok: false, err: 'interdit' };
       var abos = lireAbos_().filter(function (a) { return a.e !== ep; });
-      abos.push({ e: ep, r: req.role, at: new Date().toISOString() });
+      var cle = function (x) { return typeof x === 'string' && /^[A-Za-z0-9_-]{16,120}$/.test(x) ? x : null; };
+      abos.push({ e: ep, r: req.role, p256dh: cle(req.p256dh), auth: cle(req.auth), at: new Date().toISOString() });
       ecrireAbos_(abos.slice(-40));
       return { ok: true };
+    }
+
+    case 'abos': { // clés publiques des appareils à notifier (pour chiffrer le texte sur l'appareil émetteur)
+      if (req.cible !== 'agents' && req.cible !== 'sup') return { ok: false, err: 'cible invalide' };
+      return { ok: true, abos: lireAbos_().filter(function (a) { return a.r === req.cible && a.p256dh && a.auth; })
+        .map(function (a) { return { e: a.e, p256dh: a.p256dh, auth: a.auth }; }) };
     }
 
     case 'notifier': { // « nouveau message » vers les appareils agents ou superviseurs (sans contenu)
@@ -156,11 +164,19 @@ function traiter_(req) {
         var a = liste2[j];
         var jwt = a.r === req.cible ? req.jwts[origine_(a.e)] : null;
         if (!jwt || typeof jwt !== 'string') { garder.push(a); continue; }
-        var code = 0;
-        try {
-          code = UrlFetchApp.fetch(a.e, { method: 'post', payload: '', muteHttpExceptions: true,
-            headers: { Authorization: 'vapid t=' + jwt + ', k=' + req.k, TTL: '86400', Urgency: 'high' } }).getResponseCode();
-        } catch (err) { code = 0; }
+        var code = 0, entetes = { Authorization: 'vapid t=' + jwt + ', k=' + req.k, TTL: '86400', Urgency: 'high' };
+        var corps = req.corps && typeof req.corps[a.e] === 'string' && req.corps[a.e].length < 8000 ? req.corps[a.e] : null;
+        if (corps) {   // texte chiffré pour cet appareil (RFC 8291)
+          try {
+            var chiffre = { Authorization: entetes.Authorization, TTL: entetes.TTL, Urgency: entetes.Urgency, 'Content-Encoding': 'aes128gcm' };
+            code = UrlFetchApp.fetch(a.e, { method: 'post', contentType: 'application/octet-stream', payload: Utilities.base64Decode(corps), muteHttpExceptions: true, headers: chiffre }).getResponseCode();
+          } catch (err) { code = 0; }
+        }
+        if (!corps || (code >= 400 && code !== 404 && code !== 410) || code === 0) {   // sans texte : « nouveau message »
+          try {
+            code = UrlFetchApp.fetch(a.e, { method: 'post', payload: '', muteHttpExceptions: true, headers: entetes }).getResponseCode();
+          } catch (err) { code = 0; }
+        }
         if (code === 404 || code === 410) continue;   // appareil désabonné : adresse oubliée
         if (code >= 200 && code < 300) envoyes++;
         garder.push(a);

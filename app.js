@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1001,7 +1001,15 @@ function syncNow() {
   })();
   return _syncP;
 }
-let _notifSup = false, _notifAgents = false;
+let _notifSup = [], _notifAgents = [];
+function notifPourSup(ev) {
+  const lieu = siteNom(ev.site), qui = ev.agent || '';
+  if (ev.t === 'signalement') return { type: 'sig', titre: `${ev.data.urgent ? 'URGENT — ' : ''}Signalement — ${lieu}`, corps: `${ev.data.cat}${ev.data.sub ? ' — ' + ev.data.sub : ''}${ev.data.horsRonde ? ' (hors ronde)' : ''} — ${qui}` };
+  if (ev.t === 'barriere' && ev.data.action === 'ouverte') return { type: 'barriere', titre: `Barrière ouverte — ${lieu}`, corps: `${ev.data.barriere} : ${ev.data.motif || ''} — ${qui}` };
+  if (ev.t === 'ronde_fin') return { type: 'ronde', titre: `Ronde terminée — ${lieu}`, corps: `${qui} : ${ev.data.compte} véhicule(s), ${ev.data.nbSig} signalement(s)` };
+  if (ev.t === 'msg') return { type: 'msg', titre: `Réponse d’un agent — ${ev.data.ref}`, corps: `${qui} : ${ev.data.fait ? '[action faite] ' : ''}${ev.data.texte || ''}` };
+  return null;
+}
 async function agentSync() {
   const dev = await kvGet('dev');
   let sent = 0;
@@ -1017,7 +1025,7 @@ async function agentSync() {
       }
       if (bytes > LOT_MAX_OCTETS) break;
     }
-    if (batch.some(ev => ev.t === 'msg')) _notifSup = true;
+    batch.forEach(ev => { const n = notifPourSup(ev); if (n) _notifSup.push(n); });
     const data = await encJSON({ v: 3, dev, events: batch });
     const media = Object.keys(files).length ? b64u.enc(await teamEnc(fflate.zipSync(files))) : null;
     const r = await rel('put', { dev, data, media }, 180000);
@@ -1029,7 +1037,7 @@ async function agentSync() {
   }
   const got = await pullAll(['p', 'd']);
   if (sent || got) await fold();
-  if (_notifSup) { _notifSup = false; notifier('sup'); }
+  if (_notifSup.length) { const l = _notifSup; _notifSup = []; notifier('sup', l); }
   return { sent, got };
 }
 async function pullAll(kinds) {
@@ -2221,11 +2229,44 @@ async function jwtVapid(aud, priv) {
   const t = enc({ typ: 'JWT', alg: 'ES256' }) + '.' + enc({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: appBaseURL() });
   return t + '.' + b64u.enc(new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, te.encode(t))));
 }
-async function notifier(cible) {
+/* Texte de la notification chiffré pour l'appareil destinataire (RFC 8291, aes128gcm) :
+   le relais et le service de notification ne voient qu'un bloc chiffré */
+async function chiffrerPush(abo, texte) {
+  const uaPub = b64u.dec(abo.p256dh), auth = b64u.dec(abo.auth);
+  const eph = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const secret = await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, eph.privateKey, 256);
+  const hkdf = async (sel, ikm, info, n) => new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: sel, info },
+    await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']), n * 8));
+  const cat = (...l) => { const o = new Uint8Array(l.reduce((t, x) => t + x.length, 0)); let i = 0; l.forEach(x => { o.set(x, i); i += x.length; }); return o; };
+  const ikm = await hkdf(auth, new Uint8Array(secret), cat(te.encode('WebPush: info\0'), uaPub, asPub), 32);
+  const sel = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(sel, ikm, te.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(sel, ikm, te.encode('Content-Encoding: nonce\0'), 12);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce },
+    await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']), cat(te.encode(texte), new Uint8Array([2]))));
+  const rs = new Uint8Array([0, 0, 16, 0]);
+  const tout = cat(sel, rs, new Uint8Array([asPub.length]), asPub, ct);
+  let bin = ''; tout.forEach(x => bin += String.fromCharCode(x));
+  return btoa(bin);
+}
+async function notifier(cible, items) {
   try {
     const v = await kvGet('vapid'); if (!v) return;
     const jwts = {}; for (const a of PUSH_AUDS) jwts[a] = await jwtVapid(a, v.priv);
-    await rel('notifier', { cible, jwts, k: v.pub }, 30000);
+    let corps = null;
+    if (items && items.length) {
+      const coupe = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t;
+      const msg = items.length === 1 ? { ...items[0], corps: coupe(items[0].corps || '', 600) }
+        : { type: 'plusieurs', titre: `Rondes parkings : ${items.length} nouveautés`, corps: coupe(items.map(i => `${i.titre} — ${i.corps}`).join('\n'), 1500) };
+      try {
+        const r = await rel('abos', { cible }, 20000);
+        corps = {};
+        for (const a of r.abos || []) { try { corps[a.e] = await chiffrerPush(a, JSON.stringify(msg)); } catch (e) { } }
+      } catch (e) { corps = null; }
+    }
+    await rel('notifier', { cible, jwts, k: v.pub, corps }, 30000);
   } catch (e) { console.warn('notification non envoyée :', e.message); }
 }
 async function abonnerPush(v, force) {
@@ -2235,10 +2276,11 @@ async function abonnerPush(v, force) {
   if (sub && cle !== v.pub) { await sub.unsubscribe(); sub = null; }
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u.dec(v.pub) });
   const prev = await kvGet('pushAbo');
-  if (force || !prev || prev.endpoint !== sub.endpoint || prev.pub !== v.pub || Date.now() - prev.at > 86400000) {
-    try { await rel('abonner', { endpoint: sub.endpoint, role: state.mode === 'superviseur' ? 'sup' : 'agents' }, 30000); }
+  const cles = (sub.toJSON && sub.toJSON().keys) || {};
+  if (force || !prev || !prev.cles || prev.endpoint !== sub.endpoint || prev.pub !== v.pub || Date.now() - prev.at > 86400000) {
+    try { await rel('abonner', { endpoint: sub.endpoint, role: state.mode === 'superviseur' ? 'sup' : 'agents', p256dh: cles.p256dh, auth: cles.auth }, 30000); }
     catch (e) { if (/opération inconnue/.test(e.message)) throw new Error('le relais doit être mis à jour (version 4) pour les notifications'); throw e; }
-    await kvSet('pushAbo', { endpoint: sub.endpoint, pub: v.pub, at: Date.now() });
+    await kvSet('pushAbo', { endpoint: sub.endpoint, pub: v.pub, at: Date.now(), cles: !!cles.p256dh });
   }
 }
 async function maintenirPush() {
@@ -2664,14 +2706,14 @@ async function supSync() {
   const got = await pullAll(['p', 'd', 'n']);
   await fold();
   if (await assurerVapid()) { await viderFileSup(); await fold(); }
-  if (_notifAgents) { _notifAgents = false; notifier('agents'); }
+  if (_notifAgents.length) { const l = _notifAgents; _notifAgents = []; notifier('agents', l); }
   return { got };
 }
 async function viderFileSup() {
   let q = (await kvGet('decQueue')) || [];
   while (q.length) {
     const it = q[0];
-    if (it.d && (it.d.type === 'msg')) _notifAgents = true;
+    if (it.d && it.d.type === 'msg') _notifAgents.push({ type: 'msg', titre: `${it.d.demande ? 'Demande d’action' : 'Message'} du DPMS — ${it.d.ref || ''}`, corps: it.d.texte || '' });
     const data = it.kind === 'n'
       ? b64u.enc(await sealBytesFor(await getPubKey(), fflate.deflateSync(te.encode(JSON.stringify(it.d)))))
       : await encJSON(it.d);
