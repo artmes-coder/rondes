@@ -1,4 +1,4 @@
-/* Rondes parkings — Ville de Cachan, DPMS — version 1.5
+/* Rondes parkings — Ville de Cachan, DPMS — version 1.6
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : rondes, comptage des véhicules, signalements (catégories et
  *   sous-catégories, plusieurs par catégorie, en ronde ou hors ronde), barrières laissées ouvertes.
@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.6.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -359,6 +359,19 @@ Bornes de recharge électrique | Ateliers
 - Câble de recharge arraché ou dégradé
 - Extincteur à proximité absent
 - Chaleur, fumée ou odeur de brûlé !
+Accès et circulation | Ateliers
+- Rampe ou voie de circulation encombrée
+- Verglas ou neige sur la rampe ou les voies !
+- Chaussée dégradée (trou, plaque soulevée)
+- Portail en panne ou bouton-poussoir désactivé
+Entretien et maintenance | DPMS
+- Vérification des extincteurs dépassée
+- Entretien des portails, barrières ou portes automatiques dépassé
+- Visite de l’ascensoriste dépassée
+- Vérification du désenfumage dépassée
+- Vérification de l’éclairage de sécurité dépassée
+- Maintenance des bornes de recharge dépassée
+- Date d’entretien absente ou illisible
 Sûreté et présences | Police municipale
 - Personnes installées (squat, regroupement)
 - Personne endormie ou en difficulté !
@@ -367,6 +380,45 @@ Sûreté et présences | Police municipale
 - Caméra de vidéoprotection dégradée ou masquée
 - Vandalisme en cours (appeler le 17) !`;
 const CONTROLES_DEFAUT = `[Quotidien]
+- Rampes et voies de circulation : dégagées ; en hiver, ni verglas ni neige | Accès et circulation
+- ?Portails : fonctionnent, boutons-poussoirs sur « on » | Accès et circulation
+- Barrières et bornes : fonctionnent, en bon état, bornes à ticket en service, réserve de tickets suffisante | Barrières, bornes et caisses
+- ?Caisses automatiques : en service, pas de trace d’effraction | Barrières, bornes et caisses
+- ?Ascenseurs : en service | Accès piétons et ascenseurs
+- Éclairage : lumières et interrupteurs fonctionnent | Éclairage et électricité
+- Blocs de sécurité : allumés | Issues de secours et évacuation
+- Eau : grilles de drainage dégagées, pas d’eau stagnante, pas de trace d’infiltration (taches, suintements) aux plafonds, parois et sols | Bâtiment et infiltrations
+- Extincteurs : tous en place (aucun manquant), non utilisés, accès libre | Sécurité incendie
+- Issues de secours : balisées, portes fermées et non verrouillées | Issues de secours et évacuation
+- Portes coupe-feu : fermées, non calées ouvertes | Sécurité incendie
+- Plans d’évacuation et consignes : en place, lisibles, non dégradés | Issues de secours et évacuation
+- Propreté : déchets, dépôts, urine, seringues, tags | Propreté et hygiène
+- Sûreté : présences, squat, effraction, caméra masquée ou arrachée | Sûreté et présences
+- Véhicules : épave, véhicule gênant, sur place PMR, ventouse, entré sans ticket | Véhicules
+[Mensuel]
+- Extincteurs (un par un) : goupille et scellé présents, support fixé, panneau au-dessus | Sécurité incendie
+- Bac d’absorbant : rempli, pelle présente | Sécurité incendie
+- ?Déclencheurs manuels d’alarme : intacts, non masqués, accessibles (sans les actionner) | Sécurité incendie
+- Blocs d’éclairage de sécurité (un par un) : voyant de charge allumé, bloc non arraché | Issues de secours et évacuation
+- Ferme-portes des portes coupe-feu : la porte lâchée se referme complètement seule | Sécurité incendie
+- ?Commandes de désenfumage : accessibles, boîtier fermé et intact, signalées (sans les actionner) | Sécurité incendie
+- Bouches de ventilation : dégagées, rien stationné ni stocké devant | Ventilation et qualité de l’air
+- Signalétique d’évacuation : panneaux en place et visibles | Issues de secours et évacuation
+- ?Interphones et appel d’urgence : essai d’appel depuis chaque borne et depuis la cabine d’ascenseur | Barrières, bornes et caisses
+- Signalisation routière : hauteur maximale à l’entrée, gabarit, marquage au sol, places PMR, numérotation | Signalisation et marquage
+- ?Bornes de recharge : en service, câbles intacts, extincteur à proximité | Bornes de recharge électrique
+- Issues côté extérieur : rien stationné ni entreposé devant les sorties et les accès pompiers | Issues de secours et évacuation
+[Trimestriel]
+- Entretien des extincteurs : sur chaque extincteur, étiquette de vérification de moins d’un an | Entretien et maintenance
+- ?Entretien des portails, barrières et portes automatiques : dernière visite d’entretien datée de moins de 6 mois | Entretien et maintenance
+- ?Entretien des ascenseurs : passage de l’ascensoriste noté, dernière visite de moins de 6 semaines | Entretien et maintenance
+- ?Entretien du désenfumage : dernière vérification datée, échéance indiquée non dépassée | Entretien et maintenance
+- Entretien de l’éclairage de sécurité : dernière vérification datée, échéance indiquée non dépassée | Entretien et maintenance
+- ?Entretien des bornes de recharge : dernière maintenance datée, échéance indiquée non dépassée | Entretien et maintenance
+- ?Colonnes sèches : prises accessibles, capots et bouchons présents, signalétique en place | Sécurité incendie
+- ?Locaux techniques : portes fermées à clé, signalées, aucun stockage | Bâtiment et infiltrations
+- Clés, badges et télécommandes d’exploitation : inventaire | Autre`;
+const CONTROLES_DEFAUT_V15 = `[Quotidien]
 - Barrières et bornes : entrée et sortie fonctionnent, lisses intactes, bornes de ticket en service | Barrières, bornes et caisses
 - ?Caisses automatiques : en service, écran allumé, pas de trace d’effraction | Barrières, bornes et caisses
 - Issues de secours : dégagées, portes fermées mais pas verrouillées | Issues de secours et évacuation
@@ -468,7 +520,12 @@ function normalizeCfg(c) {
   n.sites = (n.sites || []).map(s => ({ ...s, barrieres: Array.isArray(s.barrieres) && s.barrieres.length ? s.barrieres : ['Entrée', 'Sortie'] }));
   if (!Array.isArray(n.motifs) || !n.motifs.length) n.motifs = MOTIFS_DEFAUT.slice();
   n.gps = n.gps === true;
-  if (!Array.isArray(n.controles) || !n.controles.length) n.controles = parseControles(CONTROLES_DEFAUT);
+  if (!Array.isArray(n.controles) || !n.controles.length || JSON.stringify(n.controles) === JSON.stringify(parseControles(CONTROLES_DEFAUT_V15))) n.controles = parseControles(CONTROLES_DEFAUT);
+  // Catégories utilisées par les points de contrôle mais absentes de la liste : reprises de la liste par défaut
+  const taxo = parseTaxo(TAXO_DEFAUT);
+  [...new Set(n.controles.map(c => c.cat).filter(Boolean))].forEach(nom => {
+    if (nom !== CAT_AUTRE && !n.cats.some(c => c.nom === nom)) { const d = taxo.find(c => c.nom === nom); if (d) n.cats.push(d); }
+  });
   n.contacts = n.contacts && typeof n.contacts === 'object' ? n.contacts : {};
   n.v = 3;
   return n;
@@ -688,7 +745,7 @@ async function fold() {
   for (const { e } of items) if (e.kind === 'ev' && e.ev.t === 'ronde_annulee' && e.ev.rid) annulees.add(e.ev.rid);
   const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
 
-  const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [];
+  const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [], regs = [];
   let cfg = null;
   const alertes = [];
   for (const { e } of items) {
@@ -760,6 +817,7 @@ async function fold() {
         const s = sigs.get(d.action.sig);
         if (s) s.actions.push({ ...d.action, quand: d.action.quand || d.ts, jour: (d.ts || '').slice(0, 10), par: d.par || 'DPMS' });
       }
+      else if (d.type === 'registre') regs.push({ site: d.site, at: d.ts, note: d.note || '', par: d.par || 'DPMS' });
       else if (d.type === 'ctl_reactiver') { if (ctl[d.site]) ctl[d.site].na.delete(d.item); }
       else if (d.type === 'sig') {
         const s = sigs.get(d.sig);
@@ -805,6 +863,7 @@ async function fold() {
   await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
   await kvSet('controles', Object.fromEntries(Object.entries(ctl).map(([k, v]) => [k, { ...v, na: [...v.na] }])));
   if (sup) await kvSet('controlesHist', ctlHist.sort((a, b) => b.at.localeCompare(a.at)));
+  if (sup) await kvSet('registres', regs.sort((a, b) => b.at.localeCompare(a.at)));
   if (sup) await kvSet('corbeille', [...suppr.values()].map(d => ({ ...d, annule: annul.has(d.id) })).sort((a, b) => b.ts.localeCompare(a.ts)));
   if (cfg && JSON.stringify(cfg) !== JSON.stringify(state.cfg)) { state.cfg = cfg; await kvSet('cfg', cfg); }
 }
@@ -2108,6 +2167,7 @@ async function supHome() {
     alertes.length ? h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supAlertes') },
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
+    await alerteRegistres(),
     barrOuv.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...barrOuv.map(b => barriereLigne(b, false))) : null,
     h('button', { class: 'big', onclick: () => go('supStats') }, 'Statistiques et graphiques'),
     h('div', { class: 'card' }, h('h2', null, 'Signalements'),
@@ -2134,6 +2194,29 @@ async function supHome() {
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
+/* Registres de sécurité : contrôle mensuel par le DPMS (30 jours glissants) */
+async function etatRegistres() {
+  const r = (await kvGet('registres')) || [];
+  return state.cfg.sites.map(s => {
+    const d = r.find(x => x.site === s.id) || null;
+    const j = d ? joursDepuis(d.at) : null;
+    return { site: s.id, nom: s.nom, dernier: d, depuis: j, du: !d || j >= 30, hist: r.filter(x => x.site === s.id) };
+  });
+}
+async function registreControle(site) {
+  const note = prompt(`Registre de sécurité — ${siteNom(site)}\nObservations (facultatif) :`, '');
+  if (note === null) return false;
+  await queueDec('d', { type: 'registre', id: uuid(), ts: new Date().toISOString(), site, note: note.trim(), par: 'DPMS' });
+  await fold(); syncNow(); toast('Contrôle du registre enregistré.');
+  return true;
+}
+async function alerteRegistres() {
+  const dus = (await etatRegistres()).filter(r => r.du);
+  if (!dus.length) return null;
+  return h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supControles') },
+    h('div', { class: 'l1' }, 'Registres de sécurité à contrôler', h('span', { class: 'badge b-warn' }, 'mensuel')),
+    h('div', { class: 'muted small' }, dus.map(r => `${r.nom} (${r.dernier ? `dernier contrôle il y a ${r.depuis} jours` : 'jamais contrôlé'})`).join(' · ')));
+}
 async function carteControlesSup() {
   const st = await etatControles();
   const etat = (site, n) => {
@@ -2142,18 +2225,26 @@ async function carteControlesSup() {
     if (n === 'quotidien') return h('span', { class: 'badge ' + (e.depuis <= 1 ? 'b-ok' : 'b-bad') }, `${n} : ${e.depuis === 0 ? 'aujourd’hui' : e.depuis === 1 ? 'hier' : `il y a ${e.depuis} j`}`);
     return h('span', { class: 'badge ' + (e.du ? 'b-bad' : 'b-ok') }, `${n} : ${e.du ? `en retard (${e.depuis} j)` : e.depuis === 0 ? 'aujourd’hui' : `il y a ${e.depuis} j`}`);
   };
+  const regs = await etatRegistres();
+  const etatReg = r => h('span', { class: 'badge ' + (r.du ? 'b-bad' : 'b-ok') }, `registre : ${!r.dernier ? 'à contrôler' : r.du ? `à contrôler (${r.depuis} j)` : r.depuis === 0 ? 'aujourd’hui' : `il y a ${r.depuis} j`}`);
   return h('div', { class: 'card' }, h('h2', null, 'Contrôles'),
-    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...Object.keys(NIVEAUX).map(n => etat(s.id, n))))),
+    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...Object.keys(NIVEAUX).map(n => etat(s.id, n)), etatReg(regs.find(r => r.site === s.id))))),
     h('button', { class: 'sec', onclick: () => go('supControles') }, 'Détail des contrôles'));
 }
 VIEWS.supControles = async () => {
   const st = await etatControles();
   const hist = (await kvGet('controlesHist')) || [];
   const tous = state.cfg.controles;
+  const regs = await etatRegistres();
   return page('Contrôles', { back: true },
     ...state.cfg.sites.map(s => {
       const na = ((st[s.id] || {}).na || []).map(id => tous.find(c => c.id === id)).filter(Boolean);
+      const rg = regs.find(r => r.site === s.id);
       return h('div', { class: 'card' }, h('h2', null, s.nom),
+        h('div', { class: 'stat', style: 'display:block' }, h('b', null, 'Registre de sécurité (DPMS, mensuel)'), ' ',
+          rg.du ? h('span', { class: 'badge b-bad' }, 'à contrôler') : h('span', { class: 'badge b-ok' }, 'à jour'),
+          h('div', { class: 'muted small' }, rg.dernier ? `Dernier : ${fmtDT(rg.dernier.at)}${rg.dernier.note ? ' — ' + rg.dernier.note : ''} — prochain avant le ${fmtJour(localDate(new Date(new Date(rg.dernier.at).getTime() + 30 * 86400000)))}` : 'Jamais contrôlé'),
+          h('button', { class: 'sec', style: 'margin-top:6px', onclick: safe(async () => { if (await registreControle(s.id)) go('supControles', {}, { noPush: true, keepScroll: true }); }) }, 'Registre contrôlé')),
         ...Object.keys(NIVEAUX).map(n => {
           const e = echeance(st, s.id, n);
           const proch = e.dernier && n !== 'quotidien' ? new Date(new Date(e.dernier.at).getTime() + NIVEAUX[n].jours * 86400000) : null;
@@ -2691,9 +2782,11 @@ async function supExcel() {
     ['Traitement', [['Réf.', 'Parking', 'Signalement', 'Date', 'Action', 'Auprès de', 'Détail', 'Intervention prévue le', 'Par'],
       ...sigs.flatMap(s => (s.actions || []).map(a => [s.ref, siteNom(s.site), sigTitre(s), a.quand ? fmtDT(a.quand) : fmtJour(a.jour), ACTIONS[a.type], a.dest || '', a.texte || '', a.prevu ? fmtDT(a.prevu) : '', a.par || '']))],
       [11, 12, 40, 16, 26, 16, 50, 18, 12]],
-    ['Contrôles', [['Date', 'Parking', 'Contrôle', 'Agent', 'Conformes', 'Non conformes', 'N’existe pas ici', 'Non faits'],
-      ...((await kvGet('controlesHist')) || []).slice().reverse().map(x => { const r = resumeControle(x.items, x.libelles); return [fmtDT(x.ts || x.at), siteNom(x.site), NIVEAUX[x.niveau].lbl, x.agent, r.c, r.nc.join(', '), r.na.join(', '), r.nf.join(', ')]; })],
-      [16, 12, 20, 12, 10, 50, 30, 30]],
+    ['Contrôles', [['Date', 'Parking', 'Contrôle', 'Agent', 'Conformes', 'Non conformes', 'N’existe pas ici', 'Non faits', 'Observations'],
+      ...[...((await kvGet('controlesHist')) || []).map(x => { const r = resumeControle(x.items, x.libelles); return { at: x.ts || x.at, row: [fmtDT(x.ts || x.at), siteNom(x.site), NIVEAUX[x.niveau].lbl, x.agent, r.c, r.nc.join(', '), r.na.join(', '), r.nf.join(', '), ''] }; }),
+        ...((await kvGet('registres')) || []).map(x => ({ at: x.at, row: [fmtDT(x.at), siteNom(x.site), 'Registre de sécurité', x.par, '', '', '', '', x.note] }))]
+        .sort((a, b) => a.at.localeCompare(b.at)).map(x => x.row)],
+      [16, 12, 20, 12, 10, 50, 30, 30, 40]],
     ['Barrières', A3, [12, 12, 16, 12, 22, 25, 16, 16, 12, 25, 16, 10, 8]],
     ['Journal', A4, [10, 6, 16, 11, 16, 16, 12, 12, 55, 11, 11, 10, 10, 10]]
   ]), `rondes_parkings_complet_${fileStamp()}.xlsx`, 'Rondes parkings');

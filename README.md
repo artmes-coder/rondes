@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.5.2.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.6.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -56,12 +56,14 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 - **comptage des véhicules** : « +1 véhicule » à chaque véhicule, « −1 » et « Corriger » en cas d'erreur, puis **Valider le comptage** ; le compteur se replie (« modifier » pour le rouvrir) ;
 - **contrôle quotidien** (à la première ronde du jour dans le parking) : pour chaque point, « Conforme » ou « Non conforme » ; « Non conforme » ouvre un signalement prérempli, autant de fois que nécessaire ;
 - **contrôles mensuel et trimestriel** : proposés pendant la ronde quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking) ; « Plus tard » garde les réponses déjà données ;
-- **N'existe pas ici** (points facultatifs : caisses, ascenseurs, désenfumage, interphones, bornes de recharge, colonnes sèches, locaux techniques) : le point n'est plus proposé dans ce parking ; le superviseur peut le **rétablir** ;
+- **N'existe pas ici** (points facultatifs : portails, caisses, ascenseurs, déclencheurs d'alarme, désenfumage, interphones, bornes de recharge, colonnes sèches, locaux techniques) : le point n'est plus proposé dans ce parking ; le superviseur peut le **rétablir** ;
 - **+ Signalement** pour tout autre constat ;
 - **Terminer la ronde** : une fois le comptage validé et le contrôle quotidien complet.
 - **Annuler la ronde** (mauvais nom, mauvais parking, fausse manipulation) : depuis la revue, l'écran de ronde ou l'accueil. La ronde n'apparaît pas dans les rondes ; les signalements déjà faits sont conservés ; le contrôle quotidien reste à faire.
 
 L'accueil indique les **contrôles à faire** par parking.
+
+Le contrôle trimestriel comprend la vérification des **dates d'entretien** affichées (extincteurs, portails et barrières, ascenseurs, désenfumage, éclairage de sécurité, bornes de recharge) : une maintenance non faite à temps se signale en « Entretien et maintenance », adressé au DPMS.
 
 ### Signalement
 Catégorie → « Quoi ? » (sous-catégorie ou « Autre (préciser) ») → précisions, photos, destinataires (proposés selon la catégorie), urgence. Véhicules : plaque, emplacement (numéro de place, niveau), marque/modèle/couleur. **Signalement hors ronde** depuis l'accueil.
@@ -85,7 +87,7 @@ Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, e
   - indicateurs clés : signalements, en cours, clos, délai moyen de clôture, rondes, contrôles réalisés et non-conformités, véhicules par ronde, ouvertures et durée cumulée des barrières ;
   - graphiques prêts, et **Créer un graphique** : un indicateur (signalements, en cours / clos, délai de clôture, actions de traitement, contrôles réalisés, non-conformités, rondes, véhicules comptés, ouvertures ou durée d'ouverture des barrières) par catégorie, sous-catégorie, point de contrôle, type de contrôle, agent, parking, destinataire, barrière, motif, jour, semaine ou mois ;
   - chaque graphique : vue tableau, image, Excel.
-- **Contrôles** : par parking, dernier contrôle quotidien, mensuel et trimestriel, échéances et retards, points « n'existe pas ici » (avec « Rétablir »), historique avec les non-conformités.
+- **Contrôles** : par parking, dernier contrôle quotidien, mensuel et trimestriel, **registre de sécurité** (contrôle mensuel par le DPMS : rappel sur l'accueil après 30 jours, bouton « Registre contrôlé » avec observations), échéances et retards, points « n'existe pas ici » (avec « Rétablir »), historique avec les non-conformités.
 - **Exports** : Excel complet (Signalements, Rondes, Traitement, Contrôles, Barrières, Journal) et archive avec photos.
 - **Suppression** : un signalement (bouton dans sa fiche), tous les signalements affichés par les filtres, une ronde ou toutes les rondes (**Toutes les rondes**). Les éléments supprimés disparaissent de tous les appareils, des statistiques et des exports ; ils restent restaurables depuis **Corbeille** (Paramétrage).
 
