@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -315,6 +315,7 @@ Barrières, bornes et caisses | Skidata
 - Caisse forcée ou dégradée !
 - Interphone d’appel hors service
 - Affichage des places disponibles erroné
+- Réserve de tickets basse ou vide
 Accès piétons et ascenseurs | Ateliers
 - Ascenseur en panne
 - Alarme ou téléphone de cabine d’ascenseur hors service
@@ -354,6 +355,7 @@ Véhicules | Police municipale
 - Véhicule fracturé ou vitre brisée
 - Fuite sous un véhicule
 - Personne dans un véhicule
+- Véhicule entré sans ticket
 Bornes de recharge électrique | Ateliers
 - Borne hors service
 - Câble de recharge arraché ou dégradé
@@ -363,7 +365,9 @@ Accès et circulation | Ateliers
 - Rampe ou voie de circulation encombrée
 - Verglas ou neige sur la rampe ou les voies !
 - Chaussée dégradée (trou, plaque soulevée)
-- Portail en panne ou bouton-poussoir désactivé
+- Portail en panne (ne s’ouvre pas ou ne se ferme pas)
+- Bouton-poussoir désactivé ou hors service
+- Portail endommagé
 Entretien et maintenance | DPMS
 - Vérification des extincteurs dépassée
 - Entretien des portails, barrières ou portes automatiques dépassé
@@ -380,6 +384,45 @@ Sûreté et présences | Police municipale
 - Caméra de vidéoprotection dégradée ou masquée | Police municipale, DPMS
 - Vandalisme en cours (appeler le 17) ! | Police municipale, DPMS`;
 const CONTROLES_DEFAUT = `[Quotidien]
+- Rampes et voies de circulation : dégagées ; en hiver, ni verglas ni neige | Accès et circulation | Rampe ou voie de circulation encombrée ; Verglas ou neige sur la rampe ou les voies ! ; Chaussée dégradée (trou, plaque soulevée)
+- ?Portails : fonctionnent, boutons-poussoirs sur « on » | Accès et circulation | Portail en panne (ne s’ouvre pas ou ne se ferme pas) ; Bouton-poussoir désactivé ou hors service ; Portail endommagé
+- Barrières et bornes : fonctionnent, en bon état, bornes à ticket en service, réserve de tickets suffisante | Barrières, bornes et caisses | Barrière en panne (bloquée ouverte) ; Barrière en panne (ne s’ouvre pas) ; Lisse de barrière cassée ; Borne d’entrée hors service ; Borne de sortie hors service ; Réserve de tickets basse ou vide
+- ?Caisses automatiques : en service, pas de trace d’effraction | Barrières, bornes et caisses | Caisse automatique hors service ; Caisse forcée ou dégradée !
+- ?Ascenseurs : en service | Accès piétons et ascenseurs | Ascenseur en panne ; Alarme ou téléphone de cabine d’ascenseur hors service
+- Éclairage : lumières et interrupteurs fonctionnent | Éclairage et électricité | Luminaire(s) éteint(s) ; Zone entièrement dans le noir ; Interrupteur hors service ; Luminaire cassé ou pendant
+- Blocs de sécurité : allumés | Issues de secours et évacuation | Bloc de sécurité éteint ; Bloc de sécurité arraché ou cassé
+- Eau : grilles de drainage dégagées, pas d’eau stagnante, pas de trace d’infiltration (taches, suintements) aux plafonds, parois et sols | Bâtiment et infiltrations | Grille de drainage ou avaloir bouché ; Eau stagnante ; Infiltration (taches, suintements) ; Inondation !
+- Extincteurs : tous en place (aucun manquant), non utilisés, accès libre | Sécurité incendie | Extincteur absent ou déplacé ; Extincteur utilisé, vide ou scellé rompu ; Accès à un extincteur encombré
+- Issues de secours : balisées, portes fermées et non verrouillées | Issues de secours et évacuation | Issue de secours encombrée ! ; Issue de secours verrouillée ou bloquée ! ; Balisage de l’issue absent ou éteint ; Barre antipanique ou porte d’issue défectueuse
+- Portes coupe-feu : fermées, non calées ouvertes | Sécurité incendie | Porte coupe-feu calée ouverte ; Porte coupe-feu qui ne se ferme pas
+- Plans d’évacuation et consignes : en place, lisibles, non dégradés | Issues de secours et évacuation | Plan d’évacuation absent ou arraché ; Plan ou consignes dégradés ou illisibles
+- Propreté : déchets, dépôts, urine, seringues, tags | Propreté et hygiène
+- Sûreté : présences, squat, effraction, caméra masquée ou arrachée | Sûreté et présences
+- Véhicules : épave, véhicule gênant, sur place PMR, ventouse, entré sans ticket | Véhicules | Épave ou véhicule hors d’usage ; Véhicule mal stationné ou gênant ; Véhicule sur place PMR sans carte ; Véhicule ventouse (stationnement prolongé) ; Véhicule entré sans ticket ; Véhicule fracturé ou vitre brisée ; Personne dans un véhicule
+[Mensuel]
+- Extincteurs (un par un) : goupille et scellé présents, support fixé, panneau au-dessus | Sécurité incendie | Goupille ou scellé absent ; Support d’extincteur arraché ; Panneau de l’extincteur absent
+- Bac d’absorbant : rempli, pelle présente | Sécurité incendie | Bac d’absorbant vide ou absent ; Pelle absente
+- ?Déclencheurs manuels d’alarme : intacts, non masqués, accessibles (sans les actionner) | Sécurité incendie | Déclencheur cassé, masqué ou enclenché ; Déclencheur inaccessible
+- Blocs d’éclairage de sécurité (un par un) : voyant de charge allumé, bloc non arraché | Issues de secours et évacuation | Voyant de charge éteint ; Bloc de sécurité arraché ou cassé
+- Ferme-portes des portes coupe-feu : la porte lâchée se referme complètement seule | Sécurité incendie | Porte coupe-feu qui ne se referme pas seule ; Ferme-porte cassé ou décroché
+- ?Commandes de désenfumage : accessibles, boîtier fermé et intact, signalées (sans les actionner) | Sécurité incendie | Boîtier de commande ouvert ou dégradé ; Commande inaccessible ; Signalétique de la commande absente
+- Bouches de ventilation : dégagées, rien stationné ni stocké devant | Ventilation et qualité de l’air | Bouche de ventilation obstruée ; Bouche de ventilation dégradée
+- Signalétique d’évacuation : panneaux en place et visibles | Issues de secours et évacuation | Panneau d’évacuation absent ou masqué ; Panneau d’évacuation éteint ou cassé
+- ?Interphones et appel d’urgence : essai d’appel depuis chaque borne et depuis la cabine d’ascenseur | Barrières, bornes et caisses | Interphone de borne hors service ; Téléphone de cabine d’ascenseur hors service ; Appel sans réponse du centre
+- Signalisation routière : hauteur maximale à l’entrée, gabarit, marquage au sol, places PMR, numérotation | Signalisation et marquage
+- ?Bornes de recharge : en service, câbles intacts, extincteur à proximité | Bornes de recharge électrique
+- Issues côté extérieur : rien stationné ni entreposé devant les sorties et les accès pompiers | Issues de secours et évacuation | Véhicule stationné devant une sortie ; Objets entreposés devant une sortie ; Accès pompiers encombré !
+[Trimestriel]
+- Entretien des extincteurs : sur chaque extincteur, étiquette de vérification de moins d’un an | Entretien et maintenance | Vérification des extincteurs dépassée ; Étiquette absente ou illisible
+- ?Entretien des portails, barrières et portes automatiques : dernière visite d’entretien datée de moins de 6 mois | Entretien et maintenance | Entretien des portails, barrières ou portes automatiques dépassé ; Date d’entretien absente ou illisible
+- ?Entretien des ascenseurs : passage de l’ascensoriste noté, dernière visite de moins de 6 semaines | Entretien et maintenance | Visite de l’ascensoriste dépassée ; Date d’entretien absente ou illisible
+- ?Entretien du désenfumage : dernière vérification datée, échéance indiquée non dépassée | Entretien et maintenance | Vérification du désenfumage dépassée ; Date d’entretien absente ou illisible
+- Entretien de l’éclairage de sécurité : dernière vérification datée, échéance indiquée non dépassée | Entretien et maintenance | Vérification de l’éclairage de sécurité dépassée ; Date d’entretien absente ou illisible
+- ?Entretien des bornes de recharge : dernière maintenance datée, échéance indiquée non dépassée | Entretien et maintenance | Maintenance des bornes de recharge dépassée ; Date d’entretien absente ou illisible
+- ?Colonnes sèches : prises accessibles, capots et bouchons présents, signalétique en place | Sécurité incendie | Prise de colonne sèche inaccessible ; Capot ou bouchon manquant ; Signalétique absente
+- ?Locaux techniques : portes fermées à clé, signalées, aucun stockage | Bâtiment et infiltrations | Local technique ouvert ou non verrouillé ; Stockage dans un local technique ; Signalétique absente
+- Clés, badges et télécommandes d’exploitation : inventaire | Autre | Clé, badge ou télécommande manquant`;
+const CONTROLES_DEFAUT_V16 = `[Quotidien]
 - Rampes et voies de circulation : dégagées ; en hiver, ni verglas ni neige | Accès et circulation
 - ?Portails : fonctionnent, boutons-poussoirs sur « on » | Accès et circulation
 - Barrières et bornes : fonctionnent, en bon état, bornes à ticket en service, réserve de tickets suffisante | Barrières, bornes et caisses
@@ -462,15 +505,16 @@ function parseControles(text) {
     if (!niv || !/^[-•*]/.test(l)) continue;
     let t = l.replace(/^[-•*]\s*/, ''), opt = false;
     if (t.startsWith('?')) { opt = true; t = t.slice(1).trim(); }
-    const [corps, cat] = t.split('|').map(x => x.trim());
+    const [corps, cat, quoi] = t.split('|').map(x => x.trim());
     const i = corps.indexOf(' : ');
     const lbl = (i >= 0 ? corps.slice(0, i) : corps).trim(), detail = i >= 0 ? corps.slice(i + 3).trim() : '';
-    if (lbl) out.push({ id: niv[0] + '-' + slug(lbl), niveau: niv, lbl, detail, cat: cat || CAT_AUTRE, opt });
+    const subs = (quoi || '').split(';').map(x => x.trim()).filter(Boolean).map(x => x.endsWith('!') ? { lbl: x.slice(0, -1).trim(), urgent: true } : { lbl: x, urgent: false });
+    if (lbl) out.push({ id: niv[0] + '-' + slug(lbl), niveau: niv, lbl, detail, cat: cat || CAT_AUTRE, opt, ...(subs.length ? { subs } : {}) });
   }
   return out;
 }
 function controlesToText(list) {
-  return Object.keys(NIVEAUX).map(n => [`[${NIVEAUX[n].titre}]`, ...list.filter(c => c.niveau === n).map(c => `- ${c.opt ? '?' : ''}${c.lbl}${c.detail ? ' : ' + c.detail : ''}${c.cat ? ' | ' + c.cat : ''}`)].join('\n')).join('\n');
+  return Object.keys(NIVEAUX).map(n => [`[${NIVEAUX[n].titre}]`, ...list.filter(c => c.niveau === n).map(c => `- ${c.opt ? '?' : ''}${c.lbl}${c.detail ? ' : ' + c.detail : ''}${c.cat ? ' | ' + c.cat : ''}${(c.subs || []).length ? ' | ' + c.subs.map(x => x.lbl + (x.urgent ? ' !' : '')).join(' ; ') : ''}`)].join('\n')).join('\n');
 }
 const MOTIFS_DEFAUT = ['Panne de la barrière', 'Panne de borne ou de caisse', 'Intervention technique', 'Forte affluence', 'Consigne de la hiérarchie', 'Autre'];
 const CAT_AUTRE = 'Autre';
@@ -521,7 +565,7 @@ function normalizeCfg(c) {
   n.sites = (n.sites || []).map(s => ({ ...s, barrieres: Array.isArray(s.barrieres) && s.barrieres.length ? s.barrieres : ['Entrée', 'Sortie'] }));
   if (!Array.isArray(n.motifs) || !n.motifs.length) n.motifs = MOTIFS_DEFAUT.slice();
   n.gps = n.gps === true;
-  if (!Array.isArray(n.controles) || !n.controles.length || JSON.stringify(n.controles) === JSON.stringify(parseControles(CONTROLES_DEFAUT_V15))) n.controles = parseControles(CONTROLES_DEFAUT);
+  if (!Array.isArray(n.controles) || !n.controles.length || [CONTROLES_DEFAUT_V15, CONTROLES_DEFAUT_V16].some(t => JSON.stringify(n.controles) === JSON.stringify(parseControles(t)))) n.controles = parseControles(CONTROLES_DEFAUT);
   // Catégories utilisées par les points de contrôle mais absentes de la liste : reprises de la liste par défaut
   const taxo = parseTaxo(TAXO_DEFAUT);
   n.cats.forEach(c => (c.subs || []).forEach(sc => {
@@ -1554,22 +1598,28 @@ VIEWS.signalement = async ({ cat, from, ctl }) => {
   const destBox = chips(cfg.dests, d.dests, () => { d.destsTouche = true; }, { multi: true });
   const urg = h('button', { class: 'chip' + (d.urgent ? ' on-bad' : ''), onclick: e => { d.urgent = !d.urgent; d.urgentAuto = false; e.target.className = 'chip' + (d.urgent ? ' on-bad' : ''); } }, 'Urgent');
   const descLbl = h('label', { class: 'f' });
+  // « Quoi ? » : constats propres au point de contrôle s'il en a, sinon sous-catégories de la catégorie
+  const point = ctl ? (cfg.controles || []).find(x => x.id === ctl.id) : null;
+  const subsPoint = point && (point.subs || []).length && d.cat === catPour(point) ? point.subs : null;
+  const descOblig = () => d.sub === SUB_AUTRE || (d.cat === CAT_AUTRE && !(subsPoint && d.sub));
   const drawSubs = () => {
     const c = catByNom(d.cat);
     vehBox.style.display = isVehicule(d.cat) ? '' : 'none';
-    descLbl.textContent = d.sub === SUB_AUTRE || d.cat === CAT_AUTRE ? 'Description (obligatoire)' : 'Précisions (facultatif)';
-    if (!d.cat || d.cat === CAT_AUTRE) { subsBox.replaceChildren(); return; }
-    const opts = [...(c ? c.subs.map(s => s.lbl) : []), SUB_AUTRE];
+    descLbl.textContent = descOblig() ? 'Description (obligatoire)' : 'Précisions (facultatif)';
+    const liste = subsPoint && d.cat === catPour(point) ? subsPoint : c ? c.subs : null;
+    if (!d.cat || !liste) { subsBox.replaceChildren(); return; }
+    const opts = [...liste.map(s => s.lbl), SUB_AUTRE];
     subsBox.replaceChildren(h('label', { class: 'f' }, 'Quoi ?'), chips(opts, d.sub, v => {
       d.sub = v;
-      const s = c && c.subs.find(x => x.lbl === v);
+      const sp = liste.find(x => x.lbl === v), sc = c && c.subs.find(x => x.lbl === v);
+      const s = sp ? { ...sp, dests: (sc && sc.dests) || [] } : null;
       if (s && s.urgent) { d.urgent = true; d.urgentAuto = true; } else if (d.urgentAuto) { d.urgent = false; d.urgentAuto = false; }
       if (!d.destsTouche) {   // destinataires propres à la sous-catégorie, sinon ceux de la catégorie
         const ds = (s && s.dests && s.dests.length ? s.dests : (c && c.dests) || []).filter(x => cfg.dests.includes(x));
         d.dests.splice(0, d.dests.length, ...ds); destBox.set(d.dests);
       }
       urg.className = 'chip' + (d.urgent ? ' on-bad' : '');
-      descLbl.textContent = v === SUB_AUTRE ? 'Description (obligatoire)' : 'Précisions (facultatif)';
+      descLbl.textContent = descOblig() ? 'Description (obligatoire)' : 'Précisions (facultatif)';
     }));
   };
   drawSubs();
@@ -1593,8 +1643,8 @@ VIEWS.signalement = async ({ cat, from, ctl }) => {
     if (!d.site) throw new Error('Choisissez le parking.');
     if (!d.agent) throw new Error('Indiquez qui fait le signalement.');
     if (!d.cat) throw new Error('Choisissez une catégorie.');
-    if (d.cat !== CAT_AUTRE && !d.sub) throw new Error('Choisissez ce qui ne va pas (« Quoi ? »).');
-    if ((d.cat === CAT_AUTRE || d.sub === SUB_AUTRE) && !d.desc.trim()) throw new Error('Décrivez le problème.');
+    if ((d.cat !== CAT_AUTRE || subsPoint) && !d.sub) throw new Error('Choisissez ce qui ne va pas (« Quoi ? »).');
+    if (descOblig() && !d.desc.trim()) throw new Error('Décrivez le problème.');
     if (!d.dests.length) throw new Error('Choisissez au moins un destinataire.');
     showBusy('Enregistrement…');
     const site = siteById(d.site);
@@ -1818,7 +1868,8 @@ async function confirmerContact() {
     }
     await fermer(); await fold(); syncNow();
     toast('Action enregistrée dans le traitement.');
-    render();
+    // agents : appel passé ou courriel envoyé → retour à l'accueil ; sans réponse → on reste sur la fiche pour relancer
+    if (equipe && !suffixe) go('home'); else render();
   });
   const box = h('div', { class: 'confirm-contact' }, h('div', { class: 'sheet' },
     h('h3', null, c.type === 'tel' ? 'Appel' : 'Courriel', ` — ${s.ref}`),
