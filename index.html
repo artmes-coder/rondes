@@ -115,6 +115,49 @@ body.large main{max-width:1320px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:10px}
 .gallery img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;cursor:zoom-in;border:1px solid var(--line)}
 .gallery.grande{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+/* Interface agents (2.0) : grands boutons, une question par écran */
+body.agent{font-size:18px}
+.tuile{justify-content:flex-start;gap:16px;min-height:84px;font-size:21px;text-align:left;padding:14px 18px;margin-top:12px}
+.tuile.principal{background:var(--navy)}
+.tuile.sec{background:#e8edf4;color:var(--navy)}
+.tuile.accent{background:var(--accent)}
+.tuile-ico{display:flex;flex:none}
+.card.encours{border:2px solid var(--accent)}
+.grand{font-size:22px;font-weight:700;margin:2px 0}
+.question{font-size:20px;font-weight:650;margin:16px 0 6px;line-height:1.3}
+button.choix{background:#fff;color:var(--ink);border:2px solid var(--line);justify-content:flex-start;text-align:left;min-height:64px;font-size:19px;font-weight:600;margin-top:10px}
+button.choix.on{border-color:var(--navy);background:#e8edf4}
+.etapes{margin:0 0 8px}
+.etapes-txt{font-size:15px;color:var(--muted)}
+.etapes-txt b{color:var(--ink)}
+.etapes-barre{display:flex;gap:4px;margin-top:6px}
+.etapes-barre span{flex:1;height:6px;border-radius:3px;background:var(--line)}
+.etapes-barre span.fait{background:var(--ok)}
+.etapes-barre span.en-cours{background:var(--accent)}
+.compte-etape{font-size:16px;font-weight:650;color:var(--navy);margin:8px 0 6px}
+.card.point{padding:18px}
+.card.point h2{font-size:25px;text-transform:none;letter-spacing:0;color:var(--ink);margin:0 0 6px}
+.point-detail{font-size:19px;margin:0 0 6px}
+.card.point.nc{border:2px solid var(--bad)}
+.card.point.c{border:2px solid var(--ok)}
+button.case{background:#fff;color:var(--ink);border:2px solid var(--line);justify-content:flex-start;min-height:60px;font-size:19px;margin-top:8px;gap:14px}
+button.case .coche{width:32px;height:32px;border:2px solid var(--muted);border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:22px;color:#fff;flex:none}
+button.case.on{border-color:var(--navy)}
+button.case.on .coche{background:var(--navy);border-color:var(--navy)}
+button.case.urgent.on{border-color:var(--bad)}
+button.case.urgent.on .coche{background:var(--bad);border-color:var(--bad)}
+.fini{text-align:center;padding:28px 10px 10px;color:var(--ok)}
+.fini h2{color:var(--ink);font-size:26px;margin:10px 0 4px}
+.fini p{color:var(--ink);font-size:18px;margin:6px 0}
+.thumbs.grandes img{width:140px;height:140px}
+body.agent .gallery.grande img{max-height:24vh}
+button.big.rep{min-height:60px;margin-top:8px}
+.rondier.compact{padding:6px 12px}
+.rondier.compact b{font-size:19px}
+.nav-points{margin-top:8px;justify-content:space-between}
+.nav-points > *{flex:none;width:auto}
+.resume b{font-size:18px}
+.demande .sheet h3{font-size:22px}
 .confirm-contact{position:fixed;inset:0;background:rgba(10,18,32,.55);z-index:60;display:flex;align-items:flex-end;justify-content:center}
 .confirm-contact .sheet{background:#fff;width:100%;max-width:560px;max-height:92vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px 16px 20px;box-shadow:0 -6px 24px rgba(0,0,0,.2)}
 .confirm-contact h3{margin:0 0 2px}

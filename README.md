@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.8.2.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.0.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -53,30 +53,29 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 
 ## 5. Utilisation
 
-### Ronde (agents)
-**Commencer ma ronde** → parking → agent → revue des signalements en cours, avec leurs photos en grand (« Résolu » clôt le signalement) → écran de ronde. Le nom du rondier reste affiché en tête de la ronde, avec deux boutons : **Changer le rondier** (la ronde continue, ce qui a déjà été saisi passe au nom du bon agent ; le changement figure au journal) et **Annuler la ronde**.
+### Accueil des agents
+Trois grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **Barrière ouverte** ; au-dessus, **Messages du DPMS** quand il y en a ; en bas, **Urgence : appeler le DPMS** et **Plus** (traitement des signalements, échanges, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
 
-Écran de ronde :
-- **comptage des véhicules** : « +1 véhicule » à chaque véhicule, « −1 » et « Corriger » en cas d'erreur, puis **Valider le comptage** ; le compteur se replie (« modifier » pour le rouvrir) ;
-- **contrôle quotidien** (à chaque ronde, même s'il a déjà été fait dans la journée) : pour chaque point, « Conforme » ou « Non conforme » ; « Non conforme » ouvre un signalement prérempli, autant de fois que nécessaire ;
-- **contrôles mensuel et trimestriel** : proposés pendant la ronde quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking) ; « Plus tard » garde les réponses déjà données ;
-- **N'existe pas ici** (points facultatifs : portails, caisses, ascenseurs, déclencheurs d'alarme, désenfumage, interphones, bornes de recharge, colonnes sèches, locaux techniques) : le point n'est plus proposé dans ce parking ; le superviseur peut le **rétablir** ;
-- **+ Signalement** pour tout autre constat ;
-- **Terminer la ronde** : une fois le comptage validé et le contrôle quotidien complet.
-- **Annuler la ronde** (mauvais parking, fausse manipulation) : depuis la revue, l'écran de ronde ou l'accueil. La ronde n'apparaît pas dans les rondes ; les signalements déjà faits sont conservés ; le contrôle quotidien reste à faire.
+### Ronde (agents) : un parcours guidé, une question par écran
+**Commencer ma ronde** → parking → agent, puis les étapes s'enchaînent (« Étape 3 sur 6 », barre de progression) :
+1. **Signalements en cours** dans le parking, un par écran, photo en grand : **Résolu** (clôt le signalement), **Toujours en cours** ou **Aggravé** ; commentaire ou photo en option.
+2. **Comptage des véhicules** : « +1 véhicule » à chaque véhicule (« −1 », « Corriger »), puis **Valider**.
+3. **Contrôle quotidien**, à chaque ronde, **point par point** (« Point 4 sur 15 ») : **Conforme** passe au point suivant ; **Non conforme** ouvre directement le signalement avec les constats propres au point, puis revient ; « N'existe pas dans ce parking » pour les équipements facultatifs (le superviseur peut **rétablir** le point) ; « Point précédent » pour corriger.
+4. **Contrôle mensuel**, **contrôle trimestriel** quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking) : « Faire maintenant » ou « Plus tard » ; « Finir plus tard » en cours de route garde les réponses.
+5. **Fin de ronde** : « Autre chose à signaler ? » (**+ Signalement**, **Barrière ouverte**), récapitulatif (avec « modifier » / « reprendre »), puis **Terminer la ronde** et l'écran « Ronde terminée ».
 
-L'accueil indique les **contrôles à faire** par parking.
+En tête de chaque écran : le nom du rondier, **Changer le rondier** (la ronde continue, ce qui a déjà été saisi passe au nom du bon agent ; le changement figure au journal) et **Annuler la ronde** (mauvais parking, fausse manipulation : la ronde n'apparaît pas dans les rondes ; les signalements déjà faits sont conservés).
 
 Le contrôle trimestriel comprend la vérification des **dates d'entretien** affichées (extincteurs, portails et barrières, ascenseurs, désenfumage, éclairage de sécurité, bornes de recharge) : une maintenance non faite à temps se signale en « Entretien et maintenance », adressé au DPMS.
 
-### Signalement
-Catégorie → « Quoi ? » (sous-catégorie ou « Autre (préciser) ») → précisions, photos, destinataires (un ou plusieurs, proposés selon la sous-catégorie ou la catégorie), urgence. Véhicules : plaque, emplacement (numéro de place, niveau), marque/modèle/couleur. **Signalement hors ronde** depuis l'accueil.
+### Signalement : en étapes
+(hors ronde : parking → qui signale) → **catégorie** → **« Quoi ? »** → **photo** (« Continuer sans photo » possible) → **précisions** (obligatoires pour « Autre » ; plaque, emplacement et véhicule pour les véhicules) → **à qui** (cases déjà cochées selon la sous-catégorie ou la catégorie, une ou plusieurs) et **urgent** → **Enregistrer le signalement**. « Étape précédente » à tout moment.
 
 ### Barrière ouverte
 Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'oubli). La barrière reste affichée en rouge sur l'accueil de tous les appareils jusqu'à **Barrière refermée** (maintenant ou plus tôt).
 
 ### Traitement des signalements (téléphone ou PC de la loge)
-Accueil → **Traitement des signalements** : signalements classés en *À transmettre*, *En attente de réponse*, *Réponse reçue*, *Intervention prévue*, *Intervention réalisée*. Dans chaque fiche :
+Accueil → **Plus** → **Traitement des signalements** : signalements classés en *À transmettre*, *En attente de réponse*, *Réponse reçue*, *Intervention prévue*, *Intervention réalisée*. Dans chaque fiche :
 - **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous » quand il y a plusieurs destinataires, et « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ; un appel passé ou un courriel envoyé ramène l'agent à l'accueil ;
 - **Ajouter une action** : appel, courriel, relance, réponse reçue, intervention prévue (date), intervention réalisée, note, avec le destinataire, le détail et l'agent ;
 - **Problème résolu : clore le signalement**.
@@ -85,7 +84,7 @@ Accueil → **Traitement des signalements** : signalements classés en *À trans
 Chaque signalement a son fil d'échanges.
 - **Superviseur** (fiche du signalement, « Échanges avec les agents ») : **Envoyer** (question, information) ou **Demande d'action** (consigne à exécuter) ; « Clore la demande sans réponse » si besoin. Filtre **Échanges** dans la liste des signalements ; l'accueil signale les réponses non lues.
 - **Agents** : l'accueil affiche **Messages du DPMS** (icône courrier, nombre de messages non lus, demandes en attente) ; la demande apparaît aussi sur le signalement pendant la revue de ronde. L'agent choisit son nom puis **Répondre** ou **Action faite** (qui clôt la demande).
-- **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (accueil des agents ; Paramétrage pour le superviseur), puis accepter. Un message du DPMS fait alors sonner le téléphone des agents, une réponse d'agent fait sonner les appareils superviseurs. La notification ne contient que « nouveau message » : le texte reste chiffré et se lit dans l'application.
+- **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (page **Plus** des agents ; Paramétrage pour le superviseur), puis accepter. Un message du DPMS fait alors sonner le téléphone des agents, une réponse d'agent fait sonner les appareils superviseurs. La notification ne contient que « nouveau message » : le texte reste chiffré et se lit dans l'application.
 
 ### Police municipale
 Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, emplacement, photos et constats. Observations, puis **Traité** (clôt le signalement) ou **Non traité** (le laisse ouvert, observation visible des agents). Export Excel.

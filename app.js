@@ -1,4 +1,4 @@
-/* Rondes parkings — Ville de Cachan, DPMS — version 1.8
+/* Rondes parkings — Ville de Cachan, DPMS — version 2.0
  * Application web hors ligne (PWA).
  * - L'outil appartient aux agents : rondes, comptage des véhicules, signalements (catégories et
  *   sous-catégories, plusieurs par catégorie, en ronde ou hors ronde), barrières laissées ouvertes.
@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '2.0.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -672,6 +672,7 @@ async function render() {
   const fn = VIEWS[state.view] || VIEWS.home;
   const my = ++_renderSeq;
   document.body.classList.toggle('large', state.mode === 'superviseur');
+  document.body.classList.toggle('agent', state.mode === 'agent');
   try {
     const node = await fn(state.params);
     if (my !== _renderSeq) return;
@@ -1212,6 +1213,26 @@ function barriereLigne(b, withBtn) {
     h('div', { class: 'muted small' }, `depuis ${fmtQuand(b.ouverte.quand)} (${fmtDuree(Date.now() - new Date(b.ouverte.quand))}) — ${b.ouverte.agent || ''}${b.ouverte.motif ? ' — ' + b.ouverte.motif : ''}`),
     withBtn ? h('button', { class: 'ok', onclick: () => go('barriere', { bid: b.bid }) }, 'Barrière refermée') : null);
 }
+const ICO = {
+  ronde: '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v2h6V3"/><path d="m9 12 2 2 4-4"/></svg>',
+  alerte: '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/></svg>',
+  barriere: '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V9"/><circle cx="4" cy="7" r="2"/><path d="M6 8l15-4"/><path d="M10 6.9v2M14 5.8v2M18 4.8v2"/></svg>',
+  ok: '<svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m7 12 3.5 3.5L17 9"/></svg>'
+};
+const gros = (ico, txt, cls, onclick) => h('button', { class: 'tuile ' + cls, onclick }, h('span', { class: 'tuile-ico', html: ICO[ico] }), h('span', null, txt));
+
+/* Fenêtre de confirmation de l'application (à la place des fenêtres du navigateur) */
+function demander({ titre, texte, oui = 'Oui', non = 'Non', danger = false }) {
+  return new Promise(res => {
+    const fin = v => { box.remove(); res(v); };
+    const box = h('div', { class: 'confirm-contact demande' }, h('div', { class: 'sheet' },
+      h('h3', null, titre), texte ? h('p', { style: 'white-space:pre-line' }, texte) : null,
+      h('button', { class: (danger ? 'danger' : 'ok') + ' big', onclick: () => fin(true) }, oui),
+      h('button', { class: 'sec', onclick: () => fin(false) }, non)));
+    document.body.append(box);
+  });
+}
+
 async function agentHome() {
   const lastSync = await kvGet('lastSync');
   const syncErr = await kvGet('syncErr');
@@ -1223,47 +1244,52 @@ async function agentHome() {
       h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'));
   }
   const ronde = await kvGet('ronde');
-  const sigs = await dbAll('sigs');
   const ouvertes = await barrieresOuvertes();
   const cfg = state.cfg;
-  const enCours = sigs.filter(s => s.statut === 'ouvert');
-  const perSite = cfg.sites.map(s => {
-    const o = enCours.filter(x => x.site === s.id).length;
-    return h('div', { class: 'stat' }, h('span', null, s.nom), h('span', null, h('b', null, o), h('span', { class: 'muted small' }, o > 1 ? ' en cours' : ' en cours')));
-  });
-  const parSuivi = SUIVIS.map(e => [e, enCours.filter(s => suiviEtat(s) === e).length]).filter(([, n]) => n);
   return page('Rondes parkings', null,
     await carteMessagesAccueil(),
-    ronde ? h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
-      h('h3', null, `Ronde en cours : ${siteNom(ronde.site)}`),
-      h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
-      h('button', { class: 'accent big', onclick: () => resumeRonde(ronde) }, 'Reprendre la ronde'),
+    ronde ? h('div', { class: 'card encours' },
+      h('div', { class: 'small' }, 'Ronde en cours'),
+      h('div', { class: 'grand' }, `${siteNom(ronde.site)} — ${ronde.agent}`),
+      h('div', { class: 'muted small' }, `commencée à ${fmtHeure(ronde.debut)}`),
+      gros('ronde', 'Reprendre la ronde', 'accent', () => resumeRonde(ronde)),
       lienAnnuler())
-      : h('button', { class: 'big', onclick: () => go('choixParking') }, 'Commencer ma ronde'),
-    await carteControlesAFaire(),
-    h('div', { class: 'row' },
-      h('button', { class: 'sec', onclick: () => go('signalement', { from: 'hr' }) }, 'Signalement hors ronde'),
-      h('button', { class: 'sec', onclick: () => go('barriere', {}) }, 'Barrière ouverte')),
-    await cartePush(),
-    ouvertes.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
+      : gros('ronde', 'Commencer ma ronde', 'principal', () => go('choixParking')),
+    gros('alerte', 'Signalement hors ronde', 'sec', () => go('signalement', { from: 'hr' })),
+    gros('barriere', 'Barrière ouverte', 'sec', () => go('barriere', {})),
+    ouvertes.length ? h('div', { class: 'card', style: 'border:2px solid var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
+    h('button', { class: 'sec', style: 'margin-top:18px', onclick: () => go('plus') }, 'Plus : suivi des signalements, réglages…'),
+    cfg.urgenceTel ? h('a', { class: 'btn danger', style: 'margin-top:10px', href: 'tel:' + cfg.urgenceTel }, 'Urgence : appeler le DPMS') : null,
+    h('p', { class: 'muted small foot' }, enAttente ? `${enAttente} saisie(s) en attente d’envoi (envoi automatique dès qu’il y a du réseau)` : 'Tout est envoyé au DPMS.', ` · version ${APP_VERSION}`));
+}
+VIEWS.plus = async () => {
+  const lastSync = await kvGet('lastSync');
+  const syncErr = await kvGet('syncErr');
+  const enAttente = (await dbAll('events')).length;
+  const cfg = state.cfg;
+  const enCours = (await dbAll('sigs')).filter(s => s.statut === 'ouvert');
+  const parSuivi = SUIVIS.map(e => [e, enCours.filter(s => suiviEtat(s) === e).length]).filter(([, n]) => n);
+  return page('Plus', { back: true },
     h('div', { class: 'card' }, h('h2', null, 'Traitement des signalements'),
       parSuivi.length ? parSuivi.map(([e, n]) => h('button', { class: 'list-item', onclick: () => go('suivi', { f: e }) }, h('div', { class: 'stat' }, h('span', null, e), h('b', null, n))))
         : h('p', { class: 'muted' }, 'Aucun signalement en cours.'),
       h('button', { class: 'sec', onclick: () => go('suivi', { f: 'tous' }) }, 'Tous les signalements en cours')),
-    h('div', { class: 'card' }, h('h2', null, 'Par parking'), ...perSite),
+    h('button', { class: 'sec', onclick: () => go('messagesAgents') }, 'Échanges avec le DPMS'),
+    await carteControlesAFaire(),
+    h('div', { class: 'card' }, h('h2', null, 'Signalements en cours par parking'),
+      ...cfg.sites.map(s => h('div', { class: 'stat' }, h('span', null, s.nom), h('b', null, enCours.filter(x => x.site === s.id).length)))),
     syncCard(enAttente, lastSync, syncErr),
+    await cartePush(),
     h('div', { class: 'card' }, h('h2', null, 'Extrait Excel'),
       h('div', { class: 'row' },
         h('button', { class: 'sec', onclick: safe(() => agentExcel(7)) }, '7 jours'),
         h('button', { class: 'sec', onclick: safe(() => agentExcel(31)) }, '31 jours'),
         h('button', { class: 'sec', onclick: safe(() => agentExcel(HISTO_JOURS)) }, 'Tout'))),
-    (cfg.urgenceTel || cfg.urgenceMail) ? h('div', { class: 'card' }, h('h2', null, 'Urgence'),
-      h('p', { class: 'muted small' }, 'Pour une urgence, prévenez directement. En cas de danger immédiat : 17 ou 112.'),
-      cfg.urgenceTel ? h('a', { class: 'btn danger', href: 'tel:' + cfg.urgenceTel }, 'Appeler le DPMS') : null,
-      cfg.urgenceMail ? h('a', { class: 'btn sec', href: 'mailto:' + cfg.urgenceMail + '?subject=' + encodeURIComponent('URGENT — parking') }, 'Écrire au DPMS') : null) : null,
+    cfg.urgenceMail ? h('a', { class: 'btn sec', href: 'mailto:' + cfg.urgenceMail + '?subject=' + encodeURIComponent('URGENT — parking') }, 'Écrire au DPMS') : null,
+    h('p', { class: 'muted small' }, 'En cas de danger immédiat : 17 ou 112.'),
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
-}
+};
 
 async function carteControlesAFaire() {
   const st = await etatControles();
@@ -1274,28 +1300,35 @@ async function carteControlesAFaire() {
   return lignes.length ? h('div', { class: 'card' }, h('h2', null, 'Contrôles à faire'), ...lignes, h('p', { class: 'muted small' }, 'Ils sont proposés pendant la ronde du parking concerné.')) : null;
 }
 VIEWS.choixParking = async () => page('Commencer ma ronde', { back: true },
-  h('p', null, 'Quel parking ?'),
-  ...(state.cfg ? state.cfg.sites : []).map(s => h('button', { class: 'big sec', onclick: () => startRondeFlow(s.id) }, s.nom)));
+  h('p', { class: 'question' }, 'Quel parking ?'),
+  ...(state.cfg ? state.cfg.sites : []).map(s => h('button', { class: 'big sec choix', onclick: safe(() => startRondeFlow(s.id)) }, s.nom)));
 
 async function startRondeFlow(siteId) {
   const cur = await kvGet('ronde');
   if (cur) {
     if (cur.site === siteId) { resumeRonde(cur); return; }
-    if (!confirm(`Une ronde est en cours à ${siteNom(cur.site)}. La terminer et démarrer à ${siteNom(siteId)} ?`)) { go('home'); return; }
+    if (!(await demander({ titre: 'Une ronde est déjà en cours', texte: `Ronde à ${siteNom(cur.site)} (${cur.agent}). La terminer et commencer à ${siteNom(siteId)} ?`, oui: 'Oui, la terminer', non: 'Non' }))) { go('home'); return; }
     await finishRonde(cur, true);
   }
   go('choixAgent', { site: siteId });
 }
 VIEWS.choixAgent = async ({ site }) => page(`Ronde : ${siteNom(site)}`, { back: true },
-  h('p', null, 'Qui fait la ronde ?'),
-  ...state.cfg.agents.map(a => h('button', { class: 'big sec', onclick: safe(() => beginRonde(site, a)) }, a)));
+  h('p', { class: 'question' }, 'Qui fait la ronde ?'),
+  ...state.cfg.agents.map(a => h('button', { class: 'big sec choix', onclick: safe(() => beginRonde(site, a)) }, a)));
 
 async function beginRonde(site, agent) {
   showBusy('Démarrage de la ronde…');
   Geo.start();
   await Geo.waitFirst(4000);
-  const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [], compte: 0, compteValide: false,
-    quotidienDu: true, ctl: {}, ctlEmis: {} };   // contrôle quotidien refait à chaque ronde
+  const st = await etatControles();
+  const ouverts = (await dbAll('sigs')).filter(s => s.site === site && s.statut === 'ouvert').length;
+  const etapes = [];
+  if (ouverts) etapes.push({ id: 'revue', lbl: 'Signalements en cours' });
+  etapes.push({ id: 'comptage', lbl: 'Comptage des véhicules' }, { id: 'quotidien', lbl: 'Contrôle quotidien' });
+  ['mensuel', 'trimestriel'].forEach(n => { if (echeance(st, site, n).du && pointsSite(st, site, n).length) etapes.push({ id: n, lbl: NIVEAUX[n].lbl }); });
+  etapes.push({ id: 'fin', lbl: 'Fin de ronde' });
+  const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), etapes, step: etapes[0].id, pos: {}, revus: [], reporte: {}, lance: {},
+    checklist: {}, sigsCrees: [], compte: 0, compteValide: false, quotidienDu: true, ctl: {}, ctlEmis: {} };
   await appendEvent('ronde_debut', ronde, {});
   await kvSet('ronde', ronde);
   await kvSet('dernierAgent', { nom: agent, at: Date.now() });
@@ -1303,7 +1336,7 @@ async function beginRonde(site, agent) {
   resumeRonde(ronde);
 }
 function bandeauRondier(ronde, boutons = true) {
-  return h('div', { class: 'rondier' },
+  return h('div', { class: 'rondier' + (boutons ? '' : ' compact') },
     h('div', null, h('div', { class: 'small' }, `Rondier — ${siteNom(ronde.site)}, depuis ${fmtHeure(ronde.debut)}`), h('b', null, ronde.agent)),
     boutons ? h('div', { class: 'rondier-btns' },
       h('button', { class: 'sec', onclick: () => go('changerRondier') }, 'Changer le rondier'),
@@ -1312,88 +1345,25 @@ function bandeauRondier(ronde, boutons = true) {
 VIEWS.changerRondier = async () => {
   const ronde = await kvGet('ronde');
   if (!ronde) return agentHome();
-  const retour = () => go(ronde.step === 'revue' ? 'revue' : 'ronde', {}, { noPush: true });
+  const retour = () => go('ronde', {}, { noPush: true });
   return page('Changer le rondier', { back: retour },
     h('div', { class: 'banner info' }, `Ronde en cours à ${siteNom(ronde.site)}, commencée à ${fmtHeure(ronde.debut)} au nom de ${ronde.agent}. Ce qui a déjà été saisi passe au nom du rondier choisi ; la ronde continue.`),
-    h('p', null, 'Qui fait la ronde ?'),
-    ...state.cfg.agents.filter(a => a !== ronde.agent).map(a => h('button', { class: 'big sec', onclick: safe(async () => {
+    h('p', { class: 'question' }, 'Qui fait la ronde ?'),
+    ...state.cfg.agents.filter(a => a !== ronde.agent).map(a => h('button', { class: 'big sec choix', onclick: safe(async () => {
       const r = await kvGet('ronde');
       await appendEvent('ronde_agent', r, { ancien: r.agent, nouveau: a });
       r.agent = a; await kvSet('ronde', r);
       await fold();
       toast(`Rondier : ${a}.`);
-      go(r.step === 'revue' ? 'revue' : 'ronde', {}, { noPush: true });
+      retour();
     }) }, a)));
 };
 function resumeRonde(ronde) {
   Geo.start();
-  go(ronde.step === 'revue' ? 'revue' : 'ronde');
+  go('ronde');
 }
 
-/* ---------- Revue des signalements ouverts ---------- */
-const revueDraft = {};
-VIEWS.revue = async () => {
-  const ronde = await kvGet('ronde');
-  if (!ronde) return agentHome();
-  const open = (await dbAll('sigs')).filter(s => s.site === ronde.site && s.statut === 'ouvert')
-    .sort((a, b) => (a.jour || '').localeCompare(b.jour || ''));
-  if (!open.length) { ronde.step = 'ronde'; await kvSet('ronde', ronde); return VIEWS.ronde(); }
-  const btnValider = h('button', { class: 'ok' }, 'Valider la revue');
-  const refresh = () => { btnValider.disabled = !open.every(s => revueDraft[s.id] && revueDraft[s.id].verdict); };
-  const cards = [];
-  for (const s of open) {
-    const d = revueDraft[s.id] || (revueDraft[s.id] = { verdict: null, comment: '', photos: [] });
-    const thumbs = h('div', { class: 'thumbs' });
-    const drawThumbs = () => thumbs.replaceChildren(...d.photos.map((p, i) =>
-      h('div', { class: 't' }, h('img', { src: p.thumb, alt: '' }), h('button', { onclick: () => { d.photos.splice(i, 1); drawThumbs(); } }, '×'))));
-    drawThumbs();
-    const vbtns = Object.entries(VERDICTS).map(([k, lbl]) => h('button', {
-      class: d.verdict === k ? 'sel-' + k : '',
-      onclick: (e) => { d.verdict = k; [...e.target.parentNode.children].forEach(b => b.className = ''); e.target.className = 'sel-' + k; refresh(); }
-    }, lbl));
-    const { photos } = await photosDe(s.photos || [], { rapide: true });
-    const th = photos.length ? null : await thumbOf(s);
-    cards.push(h('div', { class: 'card' },
-      h('h3', null, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
-      h('p', { class: 'muted small' }, `${s.ref} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
-      s.desc ? h('p', null, s.desc) : null,
-      s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('b', null, 'Plaque : '), s.plaque, ' '] : null, s.emplacement ? [h('b', null, 'Emplacement : '), s.emplacement] : null) : null,
-      photos.length ? [galerie(photos, true), h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'Touchez la photo pour l’agrandir.')]
-        : th ? h('div', { class: 'gallery grande' }, h('img', { src: th, alt: 'Photo du signalement', onclick: () => lightbox([th], 0) }))
-        : h('p', { class: 'muted small' }, 'Pas de photo pour ce signalement.'),
-      s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
-      bandeauDemande(s),
-      (s.messages || []).length ? h('button', { class: 'sec', style: 'display:flex;gap:8px;align-items:center;justify-content:center', onclick: () => go('echanges', { id: s.id }) },
-        icoCourrier(await nonLus(s), !!s.demande), 'Échanges avec le DPMS') : null,
-      pmBanner(s),
-      h('p', { style: 'margin:10px 0 6px;font-weight:600' }, 'Aujourd’hui :'),
-      h('div', { class: 'verdicts' }, ...vbtns),
-      h('input', { type: 'text', placeholder: 'Commentaire (facultatif)', value: d.comment, style: 'margin-top:8px', oninput: e => d.comment = e.target.value }),
-      thumbs,
-      h('button', { class: 'sec', onclick: photoInput(async f => { showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Ajouter une photo')));
-  }
-  btnValider.onclick = safe(async () => {
-    showBusy('Enregistrement…');
-    for (const s of open) {
-      const d = revueDraft[s.id];
-      await savePhotos(d.photos);
-      await appendEvent('revue', ronde, { sig: s.id, ref: s.ref, verdict: d.verdict, comment: d.comment.trim() },
-        { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
-      delete revueDraft[s.id];
-    }
-    await fold();
-    ronde.step = 'ronde'; ronde.revueFaite = open.length; await kvSet('ronde', ronde);
-    hideBusy(); go('ronde');
-  });
-  refresh();
-  return page(`Revue : ${siteNom(ronde.site)}`, null,
-    bandeauRondier(ronde),
-    h('div', { class: 'banner info' }, `${open.length} signalement(s) en cours sur ce parking. Indiquez leur état aujourd’hui. « Résolu » clôt le signalement.`),
-    ...cards, h('div', { style: 'height:70px' }),
-    h('div', { class: 'sticky-bottom' }, h('div', null, btnValider)));
-};
-
-/* ---------- Contrôles : quotidien (une fois par jour), mensuel (30 j), trimestriel (90 j) ---------- */
+/* ---------- Contrôles : quotidien (à chaque ronde), mensuel (30 j), trimestriel (90 j) ---------- */
 async function etatControles() { return (await kvGet('controles')) || {}; }
 function joursDepuis(iso) { return Math.round((new Date(localDate() + 'T12:00:00') - new Date(localDate(new Date(iso)) + 'T12:00:00')) / 86400000); }
 function echeance(st, site, niveau) {
@@ -1412,34 +1382,6 @@ function restantControle(ronde, niveau, points, sigsRonde) {
   const rep = (ronde.ctl || {})[niveau] || {};
   return points.filter(c => !ncDe(sigsRonde, c.id).length && !rep[c.id]).length;
 }
-function lignesControle(ronde, niveau, points, sigsRonde, rafraichir) {
-  ronde.ctl = ronde.ctl || {};
-  const rep = ronde.ctl[niveau] = ronde.ctl[niveau] || {};
-  return points.map(c => {
-    const nc = ncDe(sigsRonde, c.id);
-    const v = nc.length ? 'NC' : rep[c.id];
-    const etat = v === 'NC' ? h('span', { class: 'badge b-bad' }, nc.length > 1 ? `non conforme (${nc.length})` : 'non conforme')
-      : v === 'C' ? h('span', { class: 'badge b-ok' }, 'conforme')
-        : v === 'NA' ? h('span', { class: 'badge b-info' }, 'n’existe pas ici') : h('span', { class: 'badge b-warn' }, 'à contrôler');
-    return h('div', { class: 'ctl' },
-      h('div', { class: 'ctl-txt' }, h('b', null, c.lbl), ' ', etat, c.detail ? h('div', { class: 'muted small' }, c.detail) : null),
-      h('div', { class: 'ctl-btns' },
-        nc.length || v === 'NA' ? null : h('button', {
-          class: v === 'C' ? 'sel-ras' : '', onclick: safe(async () => {
-            if (v === 'C') delete rep[c.id]; else rep[c.id] = 'C';
-            await kvSet('ronde', ronde); rafraichir();
-          })
-        }, 'Conforme'),
-        v === 'NA' ? h('button', { class: 'sec', onclick: safe(async () => { delete rep[c.id]; await kvSet('ronde', ronde); rafraichir(); }) }, 'Annuler') :
-          h('button', { class: nc.length ? 'sel-ano' : '', onclick: () => go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }) }, nc.length ? '+ Non conforme' : 'Non conforme'),
-        c.opt && !nc.length && v !== 'NA' ? h('button', {
-          class: 'link mini', onclick: safe(async () => {
-            if (!confirm(`« ${c.lbl} » n’existe pas dans ce parking ?\nCe point ne sera plus proposé ici.`)) return;
-            rep[c.id] = 'NA'; await kvSet('ronde', ronde); rafraichir();
-          })
-        }, 'N’existe pas ici') : null));
-  });
-}
 async function emettreControle(ronde, niveau, points, sigsRonde) {
   const rep = (ronde.ctl || {})[niveau] || {};
   const items = {};
@@ -1453,106 +1395,212 @@ function resumeControle(items, libelles) {
   return { c: par('C').length, nc: par('NC'), na: par('NA'), nf: par('NF') };
 }
 
-/* ---------- Ronde ---------- */
+/* ---------- Ronde : parcours guidé, une étape à la fois ---------- */
+const revueDraft = {};
+function ancienneRonde(ronde) {   // ronde commencée avec une version précédente
+  if (ronde.etapes) return;
+  ronde.etapes = [{ id: 'comptage', lbl: 'Comptage des véhicules' }, { id: 'quotidien', lbl: 'Contrôle quotidien' }, { id: 'fin', lbl: 'Fin de ronde' }];
+  ronde.step = ronde.compteValide ? 'quotidien' : 'comptage';
+  ronde.pos = {}; ronde.revus = []; ronde.reporte = {}; ronde.lance = {};
+}
+function enteteRonde(ronde) {
+  const et = ronde.etapes, i = Math.max(0, et.findIndex(e => e.id === ronde.step));
+  return [bandeauRondier(ronde),
+    h('div', { class: 'etapes' },
+      h('div', { class: 'etapes-txt' }, `Étape ${i + 1} sur ${et.length} : `, h('b', null, et[i].lbl)),
+      h('div', { class: 'etapes-barre' }, ...et.map((e, k) => h('span', { class: k < i ? 'fait' : k === i ? 'en-cours' : '' }))))];
+}
+async function avancer(ronde, vers) {
+  const et = ronde.etapes, i = et.findIndex(e => e.id === ronde.step);
+  ronde.step = vers || (et[i + 1] || et[et.length - 1]).id;
+  await kvSet('ronde', ronde);
+  go('ronde', {}, { noPush: true });
+}
+VIEWS.revue = (p) => VIEWS.ronde(p);
+VIEWS.controle = (p) => VIEWS.ronde(p);
 VIEWS.ronde = async () => {
   const ronde = await kvGet('ronde');
   if (!ronde) return agentHome();
-  if (ronde.compte == null) ronde.compte = 0;
-  ronde.ctlEmis = ronde.ctlEmis || {};
-  const st = await etatControles();
-  const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
-  const rafraichir = () => go('ronde', {}, { noPush: true, keepScroll: true });
-
-  // Comptage des véhicules : à valider ; une fois validé, il se replie
-  let compteur;
-  if (ronde.compteValide) {
-    compteur = h('div', { class: 'card', style: 'display:flex;align-items:center;justify-content:space-between;gap:8px' },
-      h('span', null, h('b', null, `${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''} compté${ronde.compte > 1 ? 's' : ''}`), ' ', h('span', { class: 'badge b-ok' }, 'validé')),
-      h('button', { class: 'link', style: 'width:auto;margin:0;min-height:40px', onclick: safe(async () => { ronde.compteValide = false; await kvSet('ronde', ronde); rafraichir(); }) }, 'modifier'));
-  } else {
-    const nb = h('div', { class: 'compteur' }, String(ronde.compte));
-    const majCompte = async (v) => { ronde.compte = Math.max(0, v); nb.textContent = ronde.compte; await kvSet('ronde', ronde); };
-    compteur = h('div', { class: 'card' },
-      h('h2', null, 'Comptage des véhicules'),
-      nb,
-      h('button', { class: 'plus1', onclick: safe(async () => { await majCompte(ronde.compte + 1); if (navigator.vibrate) navigator.vibrate(30); }) }, '+1 véhicule'),
-      h('div', { class: 'row' },
-        h('button', { class: 'sec', onclick: safe(() => majCompte(ronde.compte - 1)) }, '−1'),
-        h('button', { class: 'sec', onclick: safe(async () => { const v = prompt('Nombre de véhicules :', ronde.compte); if (v !== null && /^\d+$/.test(v.trim())) await majCompte(parseInt(v, 10)); }) }, 'Corriger')),
-      h('button', {
-        class: 'ok', onclick: safe(async () => {
-          if (!confirm(`Valider le comptage : ${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''} ?`)) return;
-          ronde.compteValide = true; await kvSet('ronde', ronde);
-          await appendEvent('comptage', ronde, { total: ronde.compte });
-          rafraichir();
-        })
-      }, 'Valider le comptage'));
-  }
-
-  // Contrôle quotidien (le premier de la journée dans ce parking)
-  const ptsQ = pointsSite(st, ronde.site, 'quotidien');
-  let quotidien;
-  if (ronde.quotidienDu) {
-    const reste = restantControle(ronde, 'quotidien', ptsQ, sigsRonde);
-    quotidien = h('div', { class: 'card' }, h('h2', null, `Contrôle quotidien (${ptsQ.length - reste}/${ptsQ.length})`),
-      ...lignesControle(ronde, 'quotidien', ptsQ, sigsRonde, rafraichir));
-  } else {
-    const e = echeance(st, ronde.site, 'quotidien');
-    quotidien = h('div', { class: 'card muted small' }, `Contrôle quotidien déjà fait aujourd’hui${e.dernier ? ` par ${e.dernier.agent} à ${fmtHeure(e.dernier.at)}` : ''}.`);
-  }
-  // Contrôles mensuel et trimestriel : proposés quand ils arrivent à échéance
-  const periodiques = ['mensuel', 'trimestriel'].map(niv => {
-    if (ronde.ctlEmis[niv]) return h('div', { class: 'card small' }, h('span', { class: 'badge b-ok' }, 'fait'), ` ${NIVEAUX[niv].lbl} enregistré.`);
-    const e = echeance(st, ronde.site, niv);
-    if (!e.du) return null;
-    const pts = pointsSite(st, ronde.site, niv);
-    const fait = pts.length - restantControle(ronde, niv, pts, sigsRonde);
-    return h('div', { class: 'card', style: 'border-color:var(--accent)' },
-      h('h2', null, `${NIVEAUX[niv].lbl} à faire`),
-      h('p', { class: 'muted small' }, e.dernier ? `Dernier : il y a ${e.depuis} jours (${e.dernier.agent}).` : 'Jamais fait dans ce parking.', fait ? ` ${fait}/${pts.length} points déjà contrôlés.` : ''),
-      h('button', { class: 'accent', onclick: () => go('controle', { niveau: niv }) }, fait ? 'Reprendre' : 'Faire maintenant'));
-  });
-
-  const libres = sigsRonde.filter(s => !s.controle);
-  return page(`Ronde : ${siteNom(ronde.site)}`, { back: () => go('home') },
-    bandeauRondier(ronde),
-    compteur,
-    quotidien,
-    ...periodiques,
-    h('div', { class: 'row' },
-      h('button', { class: 'sec', onclick: () => go('signalement', { from: 'ronde' }) }, `+ Signalement${libres.length ? ` (${libres.length})` : ''}`),
-      h('button', { class: 'sec', onclick: () => go('barriere', { site: ronde.site, from: 'ronde' }) }, 'Barrière ouverte')),
-    h('button', {
-      class: 'ok big', onclick: safe(async () => {
-        if (!ronde.compteValide) { toast('Validez d’abord le comptage des véhicules.', true); return; }
-        const reste = ronde.quotidienDu ? restantControle(ronde, 'quotidien', ptsQ, sigsRonde) : 0;
-        if (reste) { toast(`Contrôle quotidien : encore ${reste} point(s) à contrôler.`, true); return; }
-        if (!confirm('Terminer la ronde ?')) return;
-        await finishRonde(ronde);
-      })
-    }, 'Terminer la ronde'));
+  ancienneRonde(ronde);
+  if (ronde.step === 'revue') return etapeRevue(ronde);
+  if (ronde.step === 'comptage') return etapeComptage(ronde);
+  if (ronde.step === 'quotidien' || ronde.step === 'mensuel' || ronde.step === 'trimestriel') return etapeControle(ronde, ronde.step);
+  return etapeFin(ronde);
 };
-VIEWS.controle = async ({ niveau }) => {
-  const ronde = await kvGet('ronde');
-  if (!ronde) return agentHome();
+const pageRonde = (ronde, ...contenu) => page(`Ronde : ${siteNom(ronde.site)}`, { back: () => go('home') }, ...enteteRonde(ronde), ...contenu);
+
+async function etapeRevue(ronde) {
+  const open = (await dbAll('sigs')).filter(s => s.site === ronde.site && s.statut === 'ouvert' && !ronde.sigsCrees.includes(s.id))
+    .sort((a, b) => (a.jour || '').localeCompare(b.jour || ''));
+  const vus = new Set(ronde.revus || []);
+  const total = open.length + [...vus].filter(id => !open.some(s => s.id === id)).length;
+  const s = open.find(x => !vus.has(x.id));
+  if (!s) return avancer(ronde);
+  const k = total - open.filter(x => !vus.has(x.id)).length + 1;
+  const d = revueDraft[s.id] || (revueDraft[s.id] = { comment: '', photos: [], ouvert: false });
+  const { photos } = await photosDe(s.photos || [], { rapide: true });
+  const th = photos.length ? null : await thumbOf(s);
+  const thumbs = h('div', { class: 'thumbs' });
+  const drawThumbs = () => thumbs.replaceChildren(...d.photos.map((p, i) =>
+    h('div', { class: 't' }, h('img', { src: p.thumb, alt: '' }), h('button', { onclick: () => { d.photos.splice(i, 1); drawThumbs(); } }, '×'))));
+  drawThumbs();
+  const plus = h('div', { style: d.ouvert ? '' : 'display:none' },
+    h('textarea', { placeholder: 'Commentaire (facultatif)', value: d.comment, oninput: e => d.comment = e.target.value }),
+    thumbs,
+    h('button', { class: 'sec', onclick: photoInput(async f => { showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Ajouter une photo'));
+  const repondre = verdict => safe(async () => {
+    if (verdict === 'resolu' && !(await demander({ titre: 'Problème résolu ?', texte: 'Le signalement sera clos.', oui: 'Oui, résolu', non: 'Non' }))) return;
+    showBusy('Enregistrement…');
+    await savePhotos(d.photos);
+    await appendEvent('revue', ronde, { sig: s.id, ref: s.ref, verdict, comment: d.comment.trim() },
+      { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
+    delete revueDraft[s.id];
+    const r = await kvGet('ronde');
+    r.revus = [...(r.revus || []), s.id]; r.revueFaite = (r.revueFaite || 0) + 1;
+    await kvSet('ronde', r);
+    await fold();
+    hideBusy();
+    go('ronde', {}, { noPush: true });
+  });
+  return pageRonde(ronde,
+    h('p', { class: 'compte-etape' }, `Signalement ${k} sur ${total}`),
+    h('div', { class: 'card' },
+      h('h3', null, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
+      h('p', { class: 'muted small' }, `${s.ref} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
+      s.desc ? h('p', null, s.desc) : null,
+      s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('b', null, 'Plaque : '), s.plaque, ' '] : null, s.emplacement ? [h('b', null, 'Emplacement : '), s.emplacement] : null) : null,
+      photos.length ? galerie(photos, true) : th ? h('div', { class: 'gallery grande' }, h('img', { src: th, alt: 'Photo du signalement', onclick: () => lightbox([th], 0) })) : h('p', { class: 'muted small' }, 'Pas de photo.'),
+      s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
+      bandeauDemande(s),
+      (s.messages || []).length ? h('button', { class: 'sec', onclick: () => go('echanges', { id: s.id }) }, icoCourrier(await nonLus(s), !!s.demande), 'Échanges avec le DPMS') : null,
+      pmBanner(s)),
+    h('p', { class: 'question' }, 'Aujourd’hui, ce problème est :'),
+    h('button', { class: 'ok big rep', onclick: repondre('resolu') }, 'Résolu'),
+    h('button', { class: 'sec big rep', onclick: repondre('encours') }, 'Toujours en cours'),
+    h('button', { class: 'danger big rep', onclick: repondre('aggrave') }, 'Aggravé'),
+    h('button', { class: 'link', onclick: () => { d.ouvert = !d.ouvert; plus.style.display = d.ouvert ? '' : 'none'; } }, 'Ajouter un commentaire ou une photo'),
+    plus);
+}
+
+async function etapeComptage(ronde) {
+  if (ronde.compte == null) ronde.compte = 0;
+  const nb = h('div', { class: 'compteur' }, String(ronde.compte));
+  const lbl = h('span');
+  const maj = async v => { ronde.compte = Math.max(0, v); nb.textContent = ronde.compte; lbl.textContent = `Valider : ${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''}`; await kvSet('ronde', ronde); };
+  lbl.textContent = `Valider : ${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''}`;
+  const saisie = h('input', { type: 'number', min: '0', inputmode: 'numeric', value: String(ronde.compte) });
+  const corr = h('div', { style: 'display:none' }, h('label', { class: 'f' }, 'Nombre de véhicules'), saisie,
+    h('button', { class: 'sec', onclick: safe(async () => { if (/^\d+$/.test(saisie.value.trim())) { await maj(parseInt(saisie.value, 10)); corr.style.display = 'none'; } else toast('Nombre invalide.', true); }) }, 'OK'));
+  return pageRonde(ronde,
+    h('p', { class: 'question' }, 'Comptez les véhicules garés : touchez « +1 » pour chaque véhicule.'),
+    h('div', { class: 'card' }, nb,
+      h('button', { class: 'plus1', onclick: safe(async () => { await maj(ronde.compte + 1); if (navigator.vibrate) navigator.vibrate(30); }) }, '+1 véhicule'),
+      h('div', { class: 'row' },
+        h('button', { class: 'sec', onclick: safe(() => maj(ronde.compte - 1)) }, '−1'),
+        h('button', { class: 'sec', onclick: () => { corr.style.display = ''; saisie.value = String(ronde.compte); saisie.focus(); } }, 'Corriger')),
+      corr),
+    h('button', { class: 'ok big', onclick: safe(async () => {
+      if (!(await demander({ titre: 'Valider le comptage ?', texte: `${ronde.compte} véhicule${ronde.compte > 1 ? 's' : ''} compté${ronde.compte > 1 ? 's' : ''}.`, oui: 'Oui, valider', non: 'Non, corriger' }))) return;
+      const r = await kvGet('ronde'); r.compte = ronde.compte; r.compteValide = true;
+      await appendEvent('comptage', r, { total: r.compte });
+      await avancer(r);
+    }) }, lbl));
+}
+
+function prochainPoint(pts, etat, depuis) {
+  for (let k = depuis; k < pts.length; k++) if (!etat(pts[k])) return k;
+  for (let k = 0; k < Math.min(depuis, pts.length); k++) if (!etat(pts[k])) return k;
+  return -1;
+}
+async function etapeControle(ronde, niveau) {
   const st = await etatControles();
   const pts = pointsSite(st, ronde.site, niveau);
   const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
-  const reste = restantControle(ronde, niveau, pts, sigsRonde);
-  return page(`${NIVEAUX[niveau].lbl} : ${siteNom(ronde.site)}`, { back: () => go('ronde', {}, { noPush: true }) },
-    bandeauRondier(ronde, false),
-    h('div', { class: 'card' }, h('h2', null, `${pts.length - reste}/${pts.length} points contrôlés`),
-      ...lignesControle(ronde, niveau, pts, sigsRonde, () => go('controle', { niveau }, { noPush: true, keepScroll: true }))),
-    h('button', {
-      class: 'ok big', onclick: safe(async () => {
-        if (reste) { toast(`Encore ${reste} point(s) à contrôler.`, true); return; }
-        await emettreControle(ronde, niveau, pts, sigsRonde);
-        await fold();
-        toast(`${NIVEAUX[niveau].lbl} enregistré.`);
-        go('ronde', {}, { noPush: true });
-      })
-    }, `Valider le ${NIVEAUX[niveau].lbl.toLowerCase()}`),
-    h('button', { class: 'link', onclick: () => go('ronde', {}, { noPush: true }) }, 'Plus tard (les réponses sont gardées)'));
+  ronde.ctl = ronde.ctl || {}; ronde.pos = ronde.pos || {}; ronde.lance = ronde.lance || {}; ronde.reporte = ronde.reporte || {};
+  const rep = ronde.ctl[niveau] = ronde.ctl[niveau] || {};
+  const etat = c => ncDe(sigsRonde, c.id).length ? 'NC' : rep[c.id];
+  const periodique = niveau !== 'quotidien';
+
+  if (periodique && (ronde.ctlEmis || {})[niveau]) return avancer(ronde);
+  if (periodique && !ronde.lance[niveau]) {   // proposition du contrôle mensuel ou trimestriel
+    const e = echeance(st, ronde.site, niveau);
+    const fait = pts.filter(etat).length;
+    return pageRonde(ronde,
+      h('div', { class: 'card', style: 'border:2px solid var(--accent)' },
+        h('h3', null, `Le ${NIVEAUX[niveau].lbl.toLowerCase()} est à faire dans ce parking`),
+        h('p', null, e.dernier ? `Dernier : il y a ${e.depuis} jours (${e.dernier.agent}).` : 'Il n’a jamais été fait dans ce parking.'),
+        h('p', null, `${pts.length} points à contrôler${fait ? ` (${fait} déjà faits)` : ''}.`)),
+      h('button', { class: 'accent big', onclick: safe(async () => { ronde.lance[niveau] = true; ronde.reporte[niveau] = false; await kvSet('ronde', ronde); go('ronde', {}, { noPush: true }); }) }, fait ? 'Reprendre maintenant' : 'Faire maintenant'),
+      h('button', { class: 'sec big', onclick: safe(async () => { ronde.reporte[niveau] = true; await avancer(ronde); }) }, 'Plus tard'));
+  }
+
+  let i = ronde.pos[niveau];
+  if (i == null || i >= pts.length) i = prochainPoint(pts, etat, 0);
+  if (i < 0) {   // tous les points ont une réponse
+    if (periodique) { showBusy('Enregistrement…'); await emettreControle(ronde, niveau, pts, sigsRonde); await fold(); hideBusy(); toast(`${NIVEAUX[niveau].lbl} enregistré.`); }
+    delete ronde.pos[niveau];
+    return avancer(ronde);
+  }
+  const c = pts[i], v = etat(c), nc = ncDe(sigsRonde, c.id);
+  const suivant = async () => { const r = await kvGet('ronde'); r.pos = r.pos || {}; r.pos[niveau] = prochainPoint(pts, etat, i + 1); if (r.pos[niveau] < 0) r.pos[niveau] = pts.length; await kvSet('ronde', r); go('ronde', {}, { noPush: true }); };
+  const repondre = val => safe(async () => { rep[c.id] = val; ronde.pos[niveau] = i; await kvSet('ronde', ronde); await suivant(); });
+  const faits = pts.filter(etat).length;
+  return pageRonde(ronde,
+    h('p', { class: 'compte-etape' }, `Point ${i + 1} sur ${pts.length}`, h('span', { class: 'muted small' }, ` · ${faits} contrôlé${faits > 1 ? 's' : ''}`)),
+    h('div', { class: 'card point' + (v === 'NC' ? ' nc' : v === 'C' ? ' c' : '') },
+      h('h2', null, c.lbl),
+      c.detail ? h('p', { class: 'point-detail' }, c.detail) : null,
+      v === 'C' ? h('span', { class: 'badge b-ok' }, 'conforme') : v === 'NA' ? h('span', { class: 'badge b-info' }, 'n’existe pas ici') : null,
+      nc.length ? h('div', { class: 'banner bad' }, `Non conforme : ${nc.length} signalement${nc.length > 1 ? 's' : ''} enregistré${nc.length > 1 ? 's' : ''} (${nc.map(x => x.sub || x.cat).join(', ')}).`) : null),
+    nc.length ? [
+      h('button', { class: 'ok big', onclick: safe(suivant) }, 'Point suivant'),
+      h('button', { class: 'sec', onclick: () => go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }) }, 'Signaler une autre non-conformité ici')
+    ] : [
+      h('button', { class: 'ok big', onclick: repondre('C') }, 'Conforme'),
+      h('button', { class: 'danger big', onclick: () => go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }) }, 'Non conforme'),
+      c.opt ? h('button', { class: 'link', onclick: safe(async () => {
+        if (!(await demander({ titre: 'Équipement absent ?', texte: `« ${c.lbl} » n’existe pas dans ce parking. Ce point ne sera plus proposé ici.`, oui: 'Oui, il n’existe pas ici', non: 'Non' }))) return;
+        await repondre('NA')();
+      }) }, 'N’existe pas dans ce parking') : null],
+    h('div', { class: 'row nav-points' },
+      i > 0 ? h('button', { class: 'link', onclick: safe(async () => { ronde.pos[niveau] = i - 1; await kvSet('ronde', ronde); go('ronde', {}, { noPush: true }); }) }, '◀ Point précédent') : h('span'),
+      periodique ? h('button', { class: 'link', onclick: safe(async () => { ronde.lance[niveau] = false; ronde.reporte[niveau] = true; await avancer(ronde); }) }, 'Finir plus tard') : h('span')));
+}
+
+async function etapeFin(ronde) {
+  const st = await etatControles();
+  const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
+  const ptsQ = pointsSite(st, ronde.site, 'quotidien');
+  const repQ = (ronde.ctl || {}).quotidien || {};
+  const ncQ = ptsQ.filter(c => ncDe(sigsRonde, c.id).length).length, cQ = ptsQ.filter(c => !ncDe(sigsRonde, c.id).length && repQ[c.id] === 'C').length;
+  const resteQ = restantControle(ronde, 'quotidien', ptsQ, sigsRonde);
+  const libres = sigsRonde.filter(s => !s.controle);
+  const periodiques = ['mensuel', 'trimestriel'].filter(n => ronde.etapes.some(e => e.id === n));
+  const ligne = (t, v, btn) => h('div', { class: 'stat' }, h('span', null, t), h('span', { style: 'display:flex;gap:8px;align-items:center' }, h('b', null, v), btn || null));
+  const revenir = vers => h('button', { class: 'link mini', style: 'width:auto;margin:0;min-height:36px', onclick: safe(async () => { if (vers === 'comptage') ronde.compteValide = false; else { ronde.lance[vers] = true; ronde.reporte[vers] = false; } await avancer(ronde, vers); }) }, vers === 'comptage' ? 'modifier' : 'reprendre');
+  return pageRonde(ronde,
+    h('p', { class: 'question' }, 'Autre chose à signaler dans ce parking ?'),
+    h('div', { class: 'row' },
+      h('button', { class: 'sec big', onclick: () => go('signalement', { from: 'ronde' }) }, '+ Signalement'),
+      h('button', { class: 'sec big', onclick: () => go('barriere', { site: ronde.site, from: 'ronde' }) }, 'Barrière ouverte')),
+    h('div', { class: 'card' }, h('h2', null, 'Récapitulatif'),
+      ligne('Véhicules comptés', ronde.compteValide ? String(ronde.compte) : 'non validé', revenir('comptage')),
+      ligne('Contrôle quotidien', resteQ ? `${resteQ} point(s) restant(s)` : `${cQ} conforme(s), ${ncQ} non conforme(s)`, resteQ ? revenir('quotidien') : null),
+      ...periodiques.map(n => ligne(NIVEAUX[n].lbl, (ronde.ctlEmis || {})[n] ? 'fait' : 'reporté', (ronde.ctlEmis || {})[n] ? null : revenir(n))),
+      ligne('Autres signalements', String(libres.length)),
+      libres.length ? h('p', { class: 'muted small' }, libres.map(s => sigTitre(s)).join(' · ')) : null),
+    h('button', { class: 'ok big', onclick: safe(async () => {
+      if (!ronde.compteValide) return avancer(ronde, 'comptage');
+      if (resteQ) { ronde.pos.quotidien = null; return avancer(ronde, 'quotidien'); }
+      await finishRonde(ronde);
+    }) }, 'Terminer la ronde'));
+}
+VIEWS.rondeFinie = async ({ site, agent }) => {
+  const enAttente = (await dbAll('events')).length;
+  return page('Ronde terminée', null,
+    h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Ronde terminée'), h('p', null, `${siteNom(site)} — ${agent}`),
+      h('p', { class: enAttente ? 'muted' : '' }, enAttente ? (navigator.onLine ? 'Envoi au DPMS en cours…' : 'Pas de réseau : la ronde partira automatiquement dès qu’il y en aura.') : 'Ronde envoyée au DPMS.')),
+    h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'));
 };
 async function annulerRonde() {
   const ronde = await kvGet('ronde');
@@ -1562,8 +1610,9 @@ async function annulerRonde() {
   if (n) gardes.push(n > 1 ? `les ${n} signalements faits pendant la ronde` : 'le signalement fait pendant la ronde');
   ['mensuel', 'trimestriel'].forEach(n => { if ((ronde.ctlEmis || {})[n]) gardes.push(`le ${NIVEAUX[n].lbl.toLowerCase()}`); });
   if (r) gardes.push(r > 1 ? `l’état des ${r} signalements en cours` : 'l’état du signalement en cours');
-  if (!confirm(`Annuler la ronde (${siteNom(ronde.site)}, ${ronde.agent}) ?\n\nElle n’apparaîtra pas dans les rondes. Le comptage et les contrôles non validés sont effacés.`
-    + (gardes.length ? `\n\nDéjà enregistré et conservé : ${gardes.join(', ')}.` : ''))) return;
+  if (!(await demander({ titre: 'Annuler la ronde ?', danger: true, oui: 'Oui, annuler la ronde', non: 'Non, continuer',
+    texte: `${siteNom(ronde.site)}, ${ronde.agent}.\nElle n’apparaîtra pas dans les rondes. Le comptage et les contrôles non validés sont effacés.`
+      + (gardes.length ? `\n\nDéjà enregistré et conservé : ${gardes.join(', ')}.` : '') }))) return;
   showBusy('Annulation…');
   await appendEvent('ronde_annulee', ronde, { nbSig: ronde.sigsCrees.length });
   await kvDel('ronde');
@@ -1588,135 +1637,157 @@ async function finishRonde(ronde, silent) {
   Geo.stop();
   hideBusy();
   if (!silent) {
-    toast('Ronde terminée. Envoi au DPMS en cours…');
-    go('home');
-    syncNow().then(r => {
-      if (r && r.sent) toast('Ronde envoyée au DPMS.');
-      else if (r && (r.offline || r.err)) toast('Pas de réseau : la ronde partira automatiquement plus tard.');
-      refreshIfHome();
-    });
+    go('rondeFinie', { site: ronde.site, agent: ronde.agent }, { noPush: true });
+    syncNow().then(() => { if (state.view === 'rondeFinie') render(); refreshIfHome(); });
   }
 }
 
 /* ---------- Signalement (en ronde ou hors ronde) ---------- */
 let sigDraft = null;
+/* Signalement en étapes : (parking, agent) → catégorie → « Quoi ? » → photo → précisions → destinataires et envoi */
 VIEWS.signalement = async ({ cat, from, ctl }) => {
   const ronde = from === 'ronde' ? await kvGet('ronde') : null;
   if (from === 'ronde' && !ronde) return agentHome();
   const cfg = state.cfg;
   const cle = `${from}|${cat || ''}|${ctl ? ctl.id : ''}`;
   if (!sigDraft || sigDraft.cle !== cle) {
-    sigDraft = { cle, site: ronde ? ronde.site : (state.dernierSite || (cfg.sites.length === 1 ? cfg.sites[0].id : null)), agent: ronde ? ronde.agent : await agentPrefere(),
-      cat: cat || null, sub: null, desc: '', plaque: '', emplacement: '', vehicule: '', photos: [], dests: [], urgent: false, destsTouche: false };
+    sigDraft = { cle, site: ronde ? ronde.site : null, agent: ronde ? ronde.agent : await agentPrefere(),
+      cat: cat || null, sub: null, desc: '', plaque: '', emplacement: '', vehicule: '', photos: [], dests: [], urgent: false, destsTouche: false, etape: null };
     if (cat) appliquerCat(sigDraft, cat);
   }
   if (from !== 'ronde') Geo.start();
   const d = sigDraft;
-  const catsNoms = [...cfg.cats.map(c => c.nom), CAT_AUTRE];
-
-  const subsBox = h('div');
-  const vehBox = h('div', null,
-    h('label', { class: 'f' }, 'Plaque d’immatriculation'),
-    h('input', { type: 'text', value: d.plaque, placeholder: 'AB-123-CD', autocapitalize: 'characters', oninput: e => d.plaque = e.target.value }),
-    h('label', { class: 'f' }, 'Emplacement (numéro de place, niveau)'),
-    h('input', { type: 'text', value: d.emplacement, placeholder: 'Ex. : place 112, niveau -1', oninput: e => d.emplacement = e.target.value }),
-    h('label', { class: 'f' }, 'Véhicule (marque, modèle, couleur)'),
-    h('input', { type: 'text', value: d.vehicule, placeholder: 'Ex. : Renault Clio grise', oninput: e => d.vehicule = e.target.value }));
-  const destBox = chips(cfg.dests, d.dests, () => { d.destsTouche = true; }, { multi: true });
-  const urg = h('button', { class: 'chip' + (d.urgent ? ' on-bad' : ''), onclick: e => { d.urgent = !d.urgent; d.urgentAuto = false; e.target.className = 'chip' + (d.urgent ? ' on-bad' : ''); } }, 'Urgent');
-  const descLbl = h('label', { class: 'f' });
-  // « Quoi ? » : constats propres au point de contrôle s'il en a, sinon sous-catégories de la catégorie
   const point = ctl ? (cfg.controles || []).find(x => x.id === ctl.id) : null;
-  const subsPoint = point && (point.subs || []).length && d.cat === catPour(point) ? point.subs : null;
-  const descOblig = () => d.sub === SUB_AUTRE || (d.cat === CAT_AUTRE && !(subsPoint && d.sub));
-  const drawSubs = () => {
-    const c = catByNom(d.cat);
-    vehBox.style.display = isVehicule(d.cat) ? '' : 'none';
-    descLbl.textContent = descOblig() ? 'Description (obligatoire)' : 'Précisions (facultatif)';
-    const liste = subsPoint && d.cat === catPour(point) ? subsPoint : c ? c.subs : null;
-    if (!d.cat || !liste) { subsBox.replaceChildren(); return; }
-    const opts = [...liste.map(s => s.lbl), SUB_AUTRE];
-    subsBox.replaceChildren(h('label', { class: 'f' }, 'Quoi ?'), chips(opts, d.sub, v => {
-      d.sub = v;
-      const sp = liste.find(x => x.lbl === v), sc = c && c.subs.find(x => x.lbl === v);
-      const s = sp ? { ...sp, dests: (sc && sc.dests) || [] } : null;
-      if (s && s.urgent) { d.urgent = true; d.urgentAuto = true; } else if (d.urgentAuto) { d.urgent = false; d.urgentAuto = false; }
-      if (!d.destsTouche) {   // destinataires propres à la sous-catégorie, sinon ceux de la catégorie
-        const ds = (s && s.dests && s.dests.length ? s.dests : (c && c.dests) || []).filter(x => cfg.dests.includes(x));
-        d.dests.splice(0, d.dests.length, ...ds); destBox.set(d.dests);
-      }
-      urg.className = 'chip' + (d.urgent ? ' on-bad' : '');
-      descLbl.textContent = descOblig() ? 'Description (obligatoire)' : 'Précisions (facultatif)';
-    }));
+  const subsPoint = () => point && (point.subs || []).length && d.cat === catPour(point) ? point.subs : null;
+  const listeQuoi = () => { const c = catByNom(d.cat); return subsPoint() || (c ? c.subs : null); };
+  const descOblig = () => d.sub === SUB_AUTRE || (d.cat === CAT_AUTRE && !(subsPoint() && d.sub));
+  const etapes = () => [
+    ...(ronde ? [] : ['parking', 'agent']),
+    ...(ctl ? [] : ['cat']),
+    ...(listeQuoi() ? ['quoi'] : []),
+    'photo', 'details', 'envoi'];
+  if (!d.etape || !etapes().includes(d.etape)) d.etape = etapes()[0];
+  const ets = etapes(), k = ets.indexOf(d.etape);
+  const aller = e => { d.etape = e; go('signalement', { cat, from, ctl }, { noPush: true }); };
+  const suivante = () => aller(etapes()[etapes().indexOf(d.etape) + 1]);
+  const retour = () => { sigDraft = null; if (from === 'ronde') go('ronde', {}, { noPush: true }); else { geoStopSiLibre(); go('home'); } };
+  const back = async () => {
+    if (k > 0) return aller(ets[k - 1]);
+    if (d.photos.length || d.desc) { if (!(await demander({ titre: 'Abandonner ce signalement ?', oui: 'Oui, abandonner', non: 'Non, continuer', danger: true }))) return; }
+    retour();
   };
-  drawSubs();
-  const catBox = h('div');
-  const drawCats = () => {
-    if (d.cat && !d.choixCat) {
-      catBox.replaceChildren(h('div', { class: 'chips' }, h('button', { class: 'chip on' }, d.cat), h('button', { class: 'link', style: 'width:auto;min-height:44px;margin:0', onclick: () => { d.choixCat = true; drawCats(); } }, 'changer')));
-      return;
+  const choixListe = (opts, sel, fn) => opts.map(o => h('button', { class: 'choix' + ((typeof o === 'object' ? o.val : o) === sel ? ' on' : ''), onclick: () => fn(typeof o === 'object' ? o.val : o) }, typeof o === 'object' ? o.lbl : o));
+  const appliquerQuoi = v => {
+    d.sub = v;
+    const c = catByNom(d.cat), liste = listeQuoi() || [];
+    const sp = liste.find(x => x.lbl === v), sc = c && c.subs.find(x => x.lbl === v);
+    if (sp && sp.urgent) { d.urgent = true; d.urgentAuto = true; } else if (d.urgentAuto) { d.urgent = false; d.urgentAuto = false; }
+    if (!d.destsTouche) {   // destinataires propres à la sous-catégorie, sinon ceux de la catégorie
+      const ds = ((sc && sc.dests && sc.dests.length) ? sc.dests : (c && c.dests) || []).filter(x => cfg.dests.includes(x));
+      d.dests.splice(0, d.dests.length, ...ds);
     }
-    catBox.replaceChildren(chips(catsNoms, d.cat, v => { appliquerCat(d, v); d.choixCat = false; drawCats(); drawSubs(); destBox.set(d.dests); urg.className = 'chip' + (d.urgent ? ' on-bad' : ''); }));
   };
-  drawCats();
-  const thumbs = h('div', { class: 'thumbs' });
-  const drawThumbs = () => thumbs.replaceChildren(...d.photos.map((p, i) =>
-    h('div', { class: 't' }, h('img', { src: p.thumb, alt: '' }), h('button', { onclick: () => { d.photos.splice(i, 1); drawThumbs(); } }, '×'))));
-  drawThumbs();
-  const retour = () => { sigDraft = null; if (ctl && ctl.niveau !== 'quotidien') go('controle', { niveau: ctl.niveau }, { noPush: true }); else if (from === 'ronde') go('ronde', {}, { noPush: true }); else { geoStopSiLibre(); go('home'); } };
-  const back = () => { if (!d.photos.length && !d.desc || confirm('Abandonner ce signalement ?')) retour(); };
 
-  const save = (encore) => safe(async () => {
-    if (!d.site) throw new Error('Choisissez le parking.');
-    if (!d.agent) throw new Error('Indiquez qui fait le signalement.');
-    if (!d.cat) throw new Error('Choisissez une catégorie.');
-    if ((d.cat !== CAT_AUTRE || subsPoint) && !d.sub) throw new Error('Choisissez ce qui ne va pas (« Quoi ? »).');
-    if (descOblig() && !d.desc.trim()) throw new Error('Décrivez le problème.');
-    if (!d.dests.length) throw new Error('Choisissez au moins un destinataire.');
-    showBusy('Enregistrement…');
-    const site = siteById(d.site);
-    const id = uuid(), ref = `${site.code}-${randCode(5)}`;
+  let corps;
+  if (d.etape === 'parking') {
+    corps = [h('p', { class: 'question' }, 'Dans quel parking ?'), ...choixListe(cfg.sites.map(x => ({ val: x.id, lbl: x.nom })), d.site, v => { d.site = v; suivante(); })];
+  } else if (d.etape === 'agent') {
+    corps = [h('p', { class: 'question' }, 'Qui fait le signalement ?'), ...choixListe(cfg.agents, d.agent, v => { d.agent = v; suivante(); })];
+  } else if (d.etape === 'cat') {
+    corps = [h('p', { class: 'question' }, 'De quoi s’agit-il ?'), ...choixListe([...cfg.cats.map(c => c.nom), CAT_AUTRE], d.cat, v => { if (v !== d.cat) appliquerCat(d, v); suivante(); })];
+  } else if (d.etape === 'quoi') {
+    corps = [h('p', { class: 'question' }, 'Qu’est-ce qui ne va pas ?'), ...choixListe([...listeQuoi().map(x => x.lbl), SUB_AUTRE], d.sub, v => { appliquerQuoi(v); suivante(); })];
+  } else if (d.etape === 'photo') {
+    const thumbs = h('div', { class: 'thumbs grandes' }, ...d.photos.map((p, n) =>
+      h('div', { class: 't' }, h('img', { src: p.thumb, alt: '' }), h('button', { onclick: () => { d.photos.splice(n, 1); aller('photo'); } }, '×'))));
+    corps = [h('p', { class: 'question' }, d.photos.length ? `${d.photos.length} photo${d.photos.length > 1 ? 's' : ''}` : 'Prenez une photo du problème.'),
+      thumbs,
+      d.photos.length < 4 ? h('button', { class: (d.photos.length ? 'sec' : 'accent') + ' big', onclick: photoInput(async f => { showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); aller('photo'); }) }, d.photos.length ? 'Ajouter une autre photo' : 'Prendre une photo') : null,
+      h('button', { class: (d.photos.length ? 'ok' : 'sec') + ' big', onclick: suivante }, d.photos.length ? 'Suivant' : 'Continuer sans photo')];
+  } else if (d.etape === 'details') {
     const veh = isVehicule(d.cat);
-    await savePhotos(d.photos);
-    await appendEvent('signalement', { rid: ronde ? ronde.rid : null, site: d.site, agent: d.agent },
-      {
-        id, ref, cat: d.cat, sub: d.sub && d.sub !== SUB_AUTRE ? d.sub : (d.sub === SUB_AUTRE ? 'Autre' : ''), desc: d.desc.trim(),
-        plaque: veh ? d.plaque.trim().toUpperCase() : '', emplacement: veh ? d.emplacement.trim() : '', vehicule: veh ? d.vehicule.trim() : '',
-        dests: [...d.dests], urgent: d.urgent, horsRonde: !ronde, thumb: d.photos[0] ? d.photos[0].thumb : null, controle: ctl || null
-      },
-      { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
-    if (ronde) { const r = await kvGet('ronde'); r.sigsCrees.push(id); await kvSet('ronde', r); }
-    else { await kvSet('dernierAgent', { nom: d.agent, at: Date.now() }); state.dernierSite = d.site; }
-    await fold();
-    const urgent = d.urgent, catNom = d.cat;
-    sigDraft = null;
-    hideBusy();
-    toast(`Signalement ${ref} enregistré.`);
-    if (encore) go('signalement', { from, cat: catNom, ctl }, { noPush: true });
-    else retour();
-    if (urgent || !ronde) syncNow().then(refreshIfHome);   // urgent ou hors ronde : envoi immédiat
-  });
+    corps = [h('p', { class: 'question' }, descOblig() ? 'Décrivez le problème (obligatoire)' : 'Précisions (facultatif)'),
+      h('textarea', { placeholder: 'Où exactement (niveau, place, porte…), ce qui ne va pas. Le micro du clavier permet de dicter.', oninput: e => d.desc = e.target.value, value: d.desc }),
+      veh ? [
+        h('label', { class: 'f' }, 'Plaque d’immatriculation'),
+        h('input', { type: 'text', value: d.plaque, placeholder: 'AB-123-CD', autocapitalize: 'characters', oninput: e => d.plaque = e.target.value }),
+        h('label', { class: 'f' }, 'Emplacement (numéro de place, niveau)'),
+        h('input', { type: 'text', value: d.emplacement, placeholder: 'Ex. : place 112, niveau -1', oninput: e => d.emplacement = e.target.value }),
+        h('label', { class: 'f' }, 'Véhicule (marque, modèle, couleur)'),
+        h('input', { type: 'text', value: d.vehicule, placeholder: 'Ex. : Renault Clio grise', oninput: e => d.vehicule = e.target.value })] : null,
+      h('button', { class: 'ok big', onclick: () => { if (descOblig() && !d.desc.trim()) { toast('Décrivez le problème.', true); return; } suivante(); } }, 'Suivant')];
+  } else {   // envoi
+    const cases = h('div');
+    const drawCases = () => cases.replaceChildren(...cfg.dests.map(x => {
+      const on = d.dests.includes(x);
+      return h('button', { class: 'case' + (on ? ' on' : ''), onclick: () => { const n = d.dests.indexOf(x); if (n >= 0) d.dests.splice(n, 1); else d.dests.push(x); d.destsTouche = true; drawCases(); } },
+        h('span', { class: 'coche' }, on ? '✓' : ''), x);
+    }));
+    drawCases();
+    const urg = h('button', { class: 'case urgent' + (d.urgent ? ' on' : ''), onclick: () => { d.urgent = !d.urgent; d.urgentAuto = false; urg.className = 'case urgent' + (d.urgent ? ' on' : ''); urg.firstChild.textContent = d.urgent ? '✓' : ''; } },
+      h('span', { class: 'coche' }, d.urgent ? '✓' : ''), 'Urgent');
+    corps = [
+      h('div', { class: 'card resume' },
+        h('b', null, d.cat === CAT_AUTRE && !d.sub ? 'Autre' : `${d.cat}${d.sub ? ' — ' + d.sub : ''}`),
+        d.desc ? h('div', null, d.desc) : null,
+        d.plaque ? h('div', null, 'Plaque : ', h('span', { class: 'plaque' }, d.plaque.toUpperCase())) : null,
+        h('div', { class: 'muted small' }, `${siteNom(d.site)} — ${d.agent} — ${d.photos.length} photo${d.photos.length > 1 ? 's' : ''}`)),
+      h('p', { class: 'question' }, 'À signaler à :'), h('p', { class: 'muted small', style: 'margin-top:-6px' }, 'Un ou plusieurs : touchez pour cocher ou décocher.'),
+      cases,
+      h('p', { class: 'question' }, 'Priorité :'), urg,
+      h('button', { class: 'ok big', style: 'margin-top:16px', onclick: save(false) }, 'Enregistrer le signalement'),
+      h('button', { class: 'sec', onclick: save(true) }, ctl ? 'Enregistrer et signaler une autre non-conformité ici' : 'Enregistrer et faire un autre signalement')];
+  }
+
+  function save(encore) {
+    return safe(async () => {
+      if (!d.site) throw new Error('Choisissez le parking.');
+      if (!d.agent) throw new Error('Indiquez qui fait le signalement.');
+      if (!d.cat) throw new Error('Choisissez une catégorie.');
+      if ((d.cat !== CAT_AUTRE || subsPoint()) && !d.sub) throw new Error('Choisissez ce qui ne va pas (« Quoi ? »).');
+      if (descOblig() && !d.desc.trim()) throw new Error('Décrivez le problème.');
+      if (!d.dests.length) throw new Error('Choisissez au moins un destinataire.');
+      showBusy('Enregistrement…');
+      const site = siteById(d.site);
+      const id = uuid(), ref = `${site.code}-${randCode(5)}`;
+      const veh = isVehicule(d.cat);
+      await savePhotos(d.photos);
+      await appendEvent('signalement', { rid: ronde ? ronde.rid : null, site: d.site, agent: d.agent },
+        {
+          id, ref, cat: d.cat, sub: d.sub && d.sub !== SUB_AUTRE ? d.sub : (d.sub === SUB_AUTRE ? 'Autre' : ''), desc: d.desc.trim(),
+          plaque: veh ? d.plaque.trim().toUpperCase() : '', emplacement: veh ? d.emplacement.trim() : '', vehicule: veh ? d.vehicule.trim() : '',
+          dests: [...d.dests], urgent: d.urgent, horsRonde: !ronde, thumb: d.photos[0] ? d.photos[0].thumb : null, controle: ctl || null
+        },
+        { photoAges: d.photos.map(p => ({ id: p.id, ageMin: p.ageMin })) }, d.photos);
+      if (ronde) { const r = await kvGet('ronde'); r.sigsCrees.push(id); await kvSet('ronde', r); }
+      else { await kvSet('dernierAgent', { nom: d.agent, at: Date.now() }); state.dernierSite = d.site; }
+      await fold();
+      const urgent = d.urgent, catNom = d.cat, siteId = d.site, agent = d.agent;
+      sigDraft = null;
+      hideBusy();
+      if (urgent || !ronde) syncNow().then(refreshIfHome);   // urgent ou hors ronde : envoi immédiat
+      if (encore) {
+        toast(`Signalement ${ref} enregistré.`);
+        if (!ronde) { sigDraft = { cle, site: siteId, agent, cat: null, sub: null, desc: '', plaque: '', emplacement: '', vehicule: '', photos: [], dests: [], urgent: false, destsTouche: false, etape: 'cat' }; }
+        go('signalement', { from, cat: ctl ? catNom : null, ctl }, { noPush: true });
+      } else if (ronde) { toast(`Signalement ${ref} enregistré.`); go('ronde', {}, { noPush: true }); }
+      else go('sigEnregistre', { ref }, { noPush: true });
+    });
+  }
 
   return page(ctl ? 'Non conforme' : ronde ? 'Nouveau signalement' : 'Signalement hors ronde', { back },
     ronde ? bandeauRondier(ronde, false) : null,
     ctl ? h('div', { class: 'banner warn' }, `${NIVEAUX[ctl.niveau].lbl} — ${ctl.lbl}`) : null,
-    !ronde ? [h('label', { class: 'f' }, 'Parking'), chips(cfg.sites.map(s => ({ val: s.id, lbl: s.nom })), d.site, v => d.site = v),
-      h('label', { class: 'f' }, 'Signalé par'), chips(cfg.agents, d.agent, v => d.agent = v)] : null,
-    h('label', { class: 'f' }, 'Catégorie'), catBox,
-    subsBox,
-    descLbl,
-    h('textarea', { placeholder: 'Où exactement (niveau, place, porte…), ce qui ne va pas. Le micro du clavier permet de dicter.', oninput: e => d.desc = e.target.value, value: d.desc }),
-    vehBox,
-    h('label', { class: 'f' }, 'Photos'),
-    thumbs,
-    h('button', { class: 'sec', onclick: photoInput(async f => { if (d.photos.length >= 4) { toast('4 photos maximum.', true); return; } showBusy('Photo…'); d.photos.push(await processPhoto(f)); hideBusy(); drawThumbs(); }) }, 'Prendre une photo'),
-    h('label', { class: 'f' }, 'À signaler à ', h('span', { class: 'muted small', style: 'font-weight:400' }, '(un ou plusieurs : touchez pour ajouter ou retirer)')), destBox,
-    h('label', { class: 'f' }, 'Priorité'), h('div', { class: 'chips' }, urg),
-    h('div', { style: 'height:130px' }),
-    h('div', { class: 'sticky-bottom' }, h('div', null,
-      h('button', { class: 'ok', onclick: save(false) }, 'Enregistrer'),
-      h('button', { class: 'sec', onclick: save(true) }, 'Enregistrer et signaler autre chose ici'))));
+    h('div', { class: 'etapes' }, h('div', { class: 'etapes-txt' }, `Étape ${k + 1} sur ${ets.length}`),
+      h('div', { class: 'etapes-barre' }, ...ets.map((e, n) => h('span', { class: n < k ? 'fait' : n === k ? 'en-cours' : '' })))),
+    ...corps,
+    k > 0 ? h('button', { class: 'link', onclick: back }, '◀ Étape précédente') : null);
 };
+VIEWS.sigEnregistre = async ({ ref }) => page('Signalement enregistré', null,
+  h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Signalement enregistré'), h('p', null, `Référence ${ref}`),
+    h('p', { class: 'muted' }, navigator.onLine ? 'Il est envoyé au DPMS.' : 'Pas de réseau : il partira automatiquement dès qu’il y en aura.')),
+  h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'),
+  h('button', { class: 'sec', onclick: () => { sigDraft = null; go('signalement', { from: 'hr' }, { noPush: true }); } }, 'Faire un autre signalement'));
 function appliquerCat(d, nom) {
   d.cat = nom; d.sub = null;
   const c = catByNom(nom);
