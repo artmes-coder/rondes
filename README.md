@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.6.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.6.1.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -52,7 +52,9 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 ## 5. Utilisation
 
 ### Ronde (agents)
-**Commencer ma ronde** → parking → agent → revue des signalements en cours (« Résolu » clôt le signalement) → écran de ronde :
+**Commencer ma ronde** → parking → agent → revue des signalements en cours, avec leurs photos en grand (« Résolu » clôt le signalement) → écran de ronde. Le nom du rondier reste affiché en tête de la ronde (« Pas vous ? Annuler la ronde »).
+
+Écran de ronde :
 - **comptage des véhicules** : « +1 véhicule » à chaque véhicule, « −1 » et « Corriger » en cas d'erreur, puis **Valider le comptage** ; le compteur se replie (« modifier » pour le rouvrir) ;
 - **contrôle quotidien** (à la première ronde du jour dans le parking) : pour chaque point, « Conforme » ou « Non conforme » ; « Non conforme » ouvre un signalement prérempli, autant de fois que nécessaire ;
 - **contrôles mensuel et trimestriel** : proposés pendant la ronde quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking) ; « Plus tard » garde les réponses déjà données ;

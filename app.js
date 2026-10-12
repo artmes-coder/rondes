@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1223,6 +1223,11 @@ async function beginRonde(site, agent) {
   hideBusy();
   resumeRonde(ronde);
 }
+function bandeauRondier(ronde, annuler = true) {
+  return h('div', { class: 'rondier' },
+    h('div', null, h('div', { class: 'small' }, `Rondier — ${siteNom(ronde.site)}, depuis ${fmtHeure(ronde.debut)}`), h('b', null, ronde.agent)),
+    annuler ? h('button', { class: 'link', style: 'color:var(--bad);width:auto;margin:0;text-align:right', onclick: safe(annulerRonde) }, 'Pas vous ?', h('br'), 'Annuler la ronde') : null);
+}
 function resumeRonde(ronde) {
   Geo.start();
   go(ronde.step === 'revue' ? 'revue' : 'ronde');
@@ -1249,13 +1254,16 @@ VIEWS.revue = async () => {
       class: d.verdict === k ? 'sel-' + k : '',
       onclick: (e) => { d.verdict = k; [...e.target.parentNode.children].forEach(b => b.className = ''); e.target.className = 'sel-' + k; refresh(); }
     }, lbl));
-    const th = await thumbOf(s);
+    const { photos } = await photosDe(s.photos || [], { rapide: true });
+    const th = photos.length ? null : await thumbOf(s);
     cards.push(h('div', { class: 'card' },
       h('h3', null, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null, s.aggrave ? h('span', { class: 'badge b-bad' }, 'Aggravé') : null),
       h('p', { class: 'muted small' }, `${s.ref} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
       s.desc ? h('p', null, s.desc) : null,
       s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('b', null, 'Plaque : '), s.plaque, ' '] : null, s.emplacement ? [h('b', null, 'Emplacement : '), s.emplacement] : null) : null,
-      th ? h('div', { class: 'thumbs' }, h('img', { src: th, alt: 'Photo du signalement' })) : null,
+      photos.length ? [galerie(photos, true), h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'Touchez la photo pour l’agrandir.')]
+        : th ? h('div', { class: 'gallery grande' }, h('img', { src: th, alt: 'Photo du signalement', onclick: () => lightbox([th], 0) }))
+        : h('p', { class: 'muted small' }, 'Pas de photo pour ce signalement.'),
       s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
       pmBanner(s),
       h('p', { style: 'margin:10px 0 6px;font-weight:600' }, 'Aujourd’hui :'),
@@ -1279,9 +1287,7 @@ VIEWS.revue = async () => {
   });
   refresh();
   return page(`Revue : ${siteNom(ronde.site)}`, null,
-    h('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:8px' },
-      h('span', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
-      h('button', { class: 'link', style: 'color:var(--bad);width:auto;margin:0', onclick: safe(annulerRonde) }, 'Annuler la ronde')),
+    bandeauRondier(ronde),
     h('div', { class: 'banner info' }, `${open.length} signalement(s) en cours sur ce parking. Indiquez leur état aujourd’hui. « Résolu » clôt le signalement.`),
     ...cards, h('div', { style: 'height:70px' }),
     h('div', { class: 'sticky-bottom' }, h('div', null, btnValider)));
@@ -1409,7 +1415,7 @@ VIEWS.ronde = async () => {
 
   const libres = sigsRonde.filter(s => !s.controle);
   return page(`Ronde : ${siteNom(ronde.site)}`, { back: () => go('home') },
-    h('p', { class: 'muted' }, `${ronde.agent} — commencée à ${fmtHeure(ronde.debut)}`),
+    bandeauRondier(ronde),
     compteur,
     quotidien,
     ...periodiques,
@@ -1424,8 +1430,7 @@ VIEWS.ronde = async () => {
         if (!confirm('Terminer la ronde ?')) return;
         await finishRonde(ronde);
       })
-    }, 'Terminer la ronde'),
-    lienAnnuler());
+    }, 'Terminer la ronde'));
 };
 VIEWS.controle = async ({ niveau }) => {
   const ronde = await kvGet('ronde');
@@ -1435,6 +1440,7 @@ VIEWS.controle = async ({ niveau }) => {
   const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
   const reste = restantControle(ronde, niveau, pts, sigsRonde);
   return page(`${NIVEAUX[niveau].lbl} : ${siteNom(ronde.site)}`, { back: () => go('ronde', {}, { noPush: true }) },
+    bandeauRondier(ronde, false),
     h('div', { class: 'card' }, h('h2', null, `${pts.length - reste}/${pts.length} points contrôlés`),
       ...lignesControle(ronde, niveau, pts, sigsRonde, () => go('controle', { niveau }, { noPush: true, keepScroll: true }))),
     h('button', {
@@ -1582,6 +1588,7 @@ VIEWS.signalement = async ({ cat, from, ctl }) => {
   });
 
   return page(ctl ? 'Non conforme' : ronde ? 'Nouveau signalement' : 'Signalement hors ronde', { back },
+    ronde ? bandeauRondier(ronde, false) : null,
     ctl ? h('div', { class: 'banner warn' }, `${NIVEAUX[ctl.niveau].lbl} — ${ctl.lbl}`) : null,
     !ronde ? [h('label', { class: 'f' }, 'Parking'), chips(cfg.sites.map(s => ({ val: s.id, lbl: s.nom })), d.site, v => d.site = v),
       h('label', { class: 'f' }, 'Signalé par'), chips(cfg.agents, d.agent, v => d.agent = v)] : null,
@@ -1696,11 +1703,12 @@ function texteSignalement(s) {
     `Signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}.`, '', 'Ville de Cachan — surveillance des parkings'].filter(x => x !== null).join('\n');
 }
 /* Photos d'une liste (téléchargées depuis le relais au besoin) */
-async function photosDe(list) {
+async function photosDe(list, opts = {}) {
   const miss = new Set();
   for (const p of list || []) if (p.n && !(await dbGet('photos', p.id))) miss.add(p.n);
   const erreurs = [];
-  for (const n of miss) { try { await fetchMedia(n); } catch (e) { erreurs.push(e.message); } }
+  if (miss.size && opts.rapide && !navigator.onLine) erreurs.push('pas de réseau');
+  else for (const n of miss) { try { await fetchMedia(n, opts.rapide ? 20000 : 180000); } catch (e) { erreurs.push(e.message); } }
   const out = [];
   for (const p of list || []) { const c = await dbGet('photos', p.id); if (c) out.push({ ...c, attendu: p.sha }); }
   return { photos: out, erreurs };
@@ -1776,12 +1784,12 @@ function actionForm(s, { onSave, onClore, agents, parDefaut }) {
   box.preset = (type, dest) => { d.type = type; typeBox.set(type); if (dest) { d.dest = dest; destBox.set(dest); } prevuBox.style.display = type === 'prevue' ? '' : 'none'; setTimeout(() => { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300); };
   return box;
 }
-function galerie(photos) {
+function galerie(photos, grande) {
   if (!photos.length) return null;
   const urls = photos.map(p => URL.createObjectURL(p.blob));
   return h('div', null,
     photos.some(p => p.attendu && p.sha !== p.attendu) ? h('div', { class: 'banner bad' }, 'Une photo a été modifiée après la saisie (empreinte différente).') : null,
-    h('div', { class: 'gallery' }, ...urls.map((u, i) => h('img', { src: u, alt: 'Photo', onclick: () => lightbox(urls, i) }))));
+    h('div', { class: 'gallery' + (grande ? ' grande' : '') }, ...urls.map((u, i) => h('img', { src: u, alt: 'Photo', onclick: () => lightbox(urls, i) }))));
 }
 function lightbox(urls, i) {
   const img = h('img', { alt: 'Photo' });
@@ -2366,9 +2374,9 @@ function geoLink(geo) {
 }
 const aGeo = g => g && !g.err && g.lat != null;
 /* Photos : téléchargées à la demande depuis le relais, vérifiées, conservées sur l'appareil */
-async function fetchMedia(n) {
+async function fetchMedia(n, delai = 180000) {
   let r;
-  try { r = await rel('media', { n }, 180000); }
+  try { r = await rel('media', { n }, delai); }
   catch (e) { if (/interdit/.test(e.message)) throw new Error('le relais doit être mis à jour (version 3) pour afficher les photos sur cet appareil'); throw e; }
   const z = fflate.unzipSync(await teamDec(b64u.dec(r.data)));
   const out = [];
