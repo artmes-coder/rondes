@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1260,6 +1260,7 @@ async function agentHome() {
     ouvertes.length ? h('div', { class: 'card', style: 'border:2px solid var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
     h('button', { class: 'sec', style: 'margin-top:18px', onclick: () => go('plus') }, 'Plus : suivi des signalements, réglages…'),
     cfg.urgenceTel ? h('a', { class: 'btn danger', style: 'margin-top:10px', href: 'tel:' + cfg.urgenceTel }, 'Urgence : appeler le DPMS') : null,
+    h('img', { class: 'logo-ville', src: 'logo-cachan.png', alt: 'Ville de Cachan — parkings' }),
     h('p', { class: 'muted small foot' }, enAttente ? `${enAttente} saisie(s) en attente d’envoi (envoi automatique dès qu’il y a du réseau)` : 'Tout est envoyé au DPMS.', ` · version ${APP_VERSION}`));
 }
 VIEWS.plus = async () => {
@@ -2730,6 +2731,7 @@ async function supHome() {
     Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Appareils de l’équipe'),
       ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', { style: 'white-space:nowrap;margin-right:8px' }, d + (v.role === 'pm' ? ' (PM)' : '')), h('span', { class: 'muted small', style: 'text-align:right' }, `${v.seq} saisies — dernier envoi ${fmtQuand(v.at)}`)))) : null,
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),
+    h('img', { class: 'logo-ville', src: 'logo-cachan.png', alt: 'Ville de Cachan — parkings' }),
     h('p', { class: 'muted small foot' }, `Version ${APP_VERSION}`));
 }
 /* Registres de sécurité : contrôle mensuel par le DPMS (30 jours glissants) */
