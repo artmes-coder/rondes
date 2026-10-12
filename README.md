@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.8.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 1.8.1.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -77,7 +77,7 @@ Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'o
 
 ### Traitement des signalements (téléphone ou PC de la loge)
 Accueil → **Traitement des signalements** : signalements classés en *À transmettre*, *En attente de réponse*, *Réponse reçue*, *Intervention prévue*, *Intervention réalisée*. Dans chaque fiche :
-- **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous » quand il y a plusieurs destinataires, et « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ;
+- **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous » quand il y a plusieurs destinataires, et « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ; un appel passé ou un courriel envoyé ramène l'agent à l'accueil ;
 - **Ajouter une action** : appel, courriel, relance, réponse reçue, intervention prévue (date), intervention réalisée, note, avec le destinataire, le détail et l'agent ;
 - **Problème résolu : clore le signalement**.
 
@@ -107,6 +107,7 @@ Modifiables par le superviseur, sans toucher au programme (**Listes, catégories
 [Mensuel]
 - Bac d’absorbant : rempli, pelle présente | Sécurité incendie     ← point : ce qu'on regarde | catégorie en cas de non-conformité
 - ?Bornes de recharge : en service, câbles intacts | Bornes de …   ← « ? » : l'agent peut indiquer qu'il n'existe pas ici
+- ?Portails : fonctionnent | Accès et circulation | Portail en panne ; Bouton-poussoir désactivé ; Portail endommagé   ← 3e champ : les « Quoi ? » proposés quand le point est non conforme (« ! » = urgent)
 ```
 ```
 Sécurité incendie | Ateliers          ← catégorie de signalement | destinataires proposés
