@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.0.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.1.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -69,16 +69,17 @@ En tête de chaque écran : le nom du rondier, **Changer le rondier** (la ronde 
 Le contrôle trimestriel comprend la vérification des **dates d'entretien** affichées (extincteurs, portails et barrières, ascenseurs, désenfumage, éclairage de sécurité, bornes de recharge) : une maintenance non faite à temps se signale en « Entretien et maintenance », adressé au DPMS.
 
 ### Signalement : en étapes
-(hors ronde : parking → qui signale) → **catégorie** → **« Quoi ? »** → **photo** (« Continuer sans photo » possible) → **précisions** (obligatoires pour « Autre » ; plaque, emplacement et véhicule pour les véhicules) → **à qui** (cases déjà cochées selon la sous-catégorie ou la catégorie, une ou plusieurs) et **urgent** → **Enregistrer le signalement**. « Étape précédente » à tout moment.
+(hors ronde : parking → qui signale) → **catégorie** → **« Quoi ? »** → **photo, obligatoire** (sauf quand une personne est en cause : « Pas de photo possible (personne présente, danger) ») → **précisions** (obligatoires pour « Autre » ; plaque, emplacement et véhicule pour les véhicules) → **à qui** (cases déjà cochées selon la sous-catégorie ou la catégorie, une ou plusieurs) et **urgent** → **Enregistrer le signalement**. « Étape précédente » à tout moment.
 
-### Barrière ouverte
-Parking, barrière, motif, heure (« Maintenant » ou « Plus tôt » en cas d'oubli). La barrière reste affichée en rouge sur l'accueil de tous les appareils jusqu'à **Barrière refermée** (maintenant ou plus tôt).
+### Barrière ouverte (en étapes)
+Parking → barrière (celles déjà signalées ouvertes sont grisées) → motif → depuis quand (« Maintenant » ou « Plus tôt (oubli de déclaration) » avec l'heure) → qui → récapitulatif, commentaire facultatif, **Enregistrer l'ouverture**. Pendant une ronde, le parking et le rondier sont déjà connus. La barrière reste affichée en rouge sur l'accueil de tous les appareils jusqu'à **Barrière refermée** (maintenant ou plus tôt → qui → **Enregistrer la fermeture**).
 
 ### Traitement des signalements (téléphone ou PC de la loge)
-Accueil → **Plus** → **Traitement des signalements** : signalements classés en *À transmettre*, *En attente de réponse*, *Réponse reçue*, *Intervention prévue*, *Intervention réalisée*. Dans chaque fiche :
-- **Transmettre** : boutons « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous » quand il y a plusieurs destinataires, et « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ; un appel passé ou un courriel envoyé ramène l'agent à l'accueil ;
-- **Ajouter une action** : appel, courriel, relance, réponse reçue, intervention prévue (date), intervention réalisée, note, avec le destinataire, le détail et l'agent ;
-- **Problème résolu : clore le signalement**.
+Accueil → **Plus** → **Traitement des signalements** : liste regroupée par étape (*À transmettre aux services*, *Relancer si pas de réponse*, *Suivre l'intervention*, *Vérifier le passage*, *À clore si le problème est réglé*). La fiche d'un signalement montre la photo, puis **Que voulez-vous faire ?** :
+- **Transmettre** (ou **Relancer**) : « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous », « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ; un appel passé ou un courriel envoyé ramène l'agent à l'accueil. « Transmis autrement » pour une remise en main propre ;
+- **Une réponse a été reçue**, **Une intervention est prévue** (date), **L'intervention a été réalisée** (l'application demande ensuite si le problème est réglé, et clôt le signalement si oui) : de qui, précisions, qui enregistre, **Enregistrer** ;
+- **Problème résolu : clore le signalement** ; **Ajouter une note** ;
+- **Historique** des actions et des constats, replié en bas de la fiche.
 
 ### Échanges DPMS ↔ agents
 Chaque signalement a son fil d'échanges.
