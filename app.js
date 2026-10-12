@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.3.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1300,7 +1300,7 @@ VIEWS.plus = async () => {
     h('div', { class: 'card' }, h('h2', null, 'Signalements en cours par parking'),
       ...cfg.sites.map(s => h('div', { class: 'stat' }, h('span', null, s.nom), h('b', null, enCours.filter(x => x.site === s.id).length)))),
     syncCard(enAttente, lastSync, syncErr),
-    await cartePush(),
+    await carteAppareil(),
     h('div', { class: 'card' }, h('h2', null, 'Extrait Excel'),
       h('div', { class: 'row' },
         h('button', { class: 'sec', onclick: safe(() => agentExcel(7)) }, '7 jours'),
@@ -2304,6 +2304,25 @@ async function maintenirPush() {
     if (v && (await kvGet('pushAbo'))) await abonnerPush(v);
   } catch (e) { console.warn(e.message); }
 }
+/* Installation sur l'écran d'accueil et notifications : carte « Cet appareil », affichée tant qu'il reste quelque chose à faire */
+let _installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); _installEvt = e; if (['home', 'plus'].includes(state.view)) render(); });
+window.addEventListener('appinstalled', () => { _installEvt = null; toast('Application installée sur l’écran d’accueil.'); if (['home', 'plus'].includes(state.view)) render(); });
+const estInstallee = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+async function carteAppareil() {
+  if (!['agent', 'superviseur'].includes(state.mode)) return null;
+  const lignes = [];
+  if (!estInstallee()) {
+    if (_installEvt) lignes.push(h('button', { class: 'accent', onclick: safe(async () => { const e = _installEvt; _installEvt = null; e.prompt(); await e.userChoice; render(); }) }, 'Installer l’application sur cet appareil'));
+    else lignes.push(h('p', { class: 'small', style: 'margin:4px 0' }, h('b', null, 'Installer l’application : '),
+      'menu ⋮ de Chrome (en haut à droite) → « Installer l’application » ou « Ajouter à l’écran d’accueil ». ',
+      'Si ce menu n’existe pas ou ne propose pas l’installation, la page est ouverte dans un navigateur intégré (Google Lens, messagerie…) : menu ⋮ → « Ouvrir dans Chrome », puis recommencer.'));
+  }
+  if (!pushDispo()) lignes.push(h('p', { class: 'small', style: 'margin:4px 0' }, h('b', null, 'Notifications : '), 'indisponibles dans ce navigateur. Ouvrez l’application dans Chrome (de préférence installée).'));
+  else { const c = await cartePush(); if (c) lignes.push(c); }
+  if (!lignes.length) return null;
+  return h('div', { class: 'card', style: 'border:2px solid var(--accent)' }, h('h2', null, 'Cet appareil'), ...lignes);
+}
 async function cartePush() {
   if (!pushDispo() || !['agent', 'superviseur'].includes(state.mode)) return null;
   if (Notification.permission === 'granted' && (await kvGet('pushAbo'))) return null;
@@ -2762,6 +2781,7 @@ async function supHome() {
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
     await carteMessagesAccueil(),
+    await carteAppareil(),
     await alerteRegistres(),
     barrOuv.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...barrOuv.map(b => barriereLigne(b, false))) : null,
     h('button', { class: 'big', onclick: () => go('supStats') }, 'Statistiques et graphiques'),
@@ -2783,8 +2803,7 @@ async function supHome() {
       h('button', { class: 'sec', onclick: () => go('supQR') }, 'Configurer les appareils (QR et liens)'),
       h('button', { class: 'sec', onclick: () => go('supConfig') }, 'Listes, catégories et coordonnées'),
       h('button', { class: 'sec', onclick: () => go('supRelais') }, 'Relais et appareils'),
-      h('button', { class: 'sec', onclick: () => go('supCorbeille') }, 'Corbeille (éléments supprimés)'),
-      await cartePush()),
+      h('button', { class: 'sec', onclick: () => go('supCorbeille') }, 'Corbeille (éléments supprimés)')),
     Object.keys(devs).length ? h('div', { class: 'card' }, h('h2', null, 'Appareils de l’équipe'),
       ...Object.entries(devs).map(([d, v]) => h('div', { class: 'stat' }, h('span', { style: 'white-space:nowrap;margin-right:8px' }, d + (v.role === 'pm' ? ' (PM)' : '')), h('span', { class: 'muted small', style: 'text-align:right' }, `${v.seq} saisies — dernier envoi ${fmtQuand(v.at)}`)))) : null,
     h('button', { class: 'link', onclick: () => go('reglages') }, 'Réglages'),

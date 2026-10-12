@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.3.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.3.1.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -85,7 +85,7 @@ Accueil → **Plus** → **Traitement des signalements** : liste regroupée par 
 Chaque signalement a son fil d'échanges.
 - **Superviseur** (fiche du signalement, « Échanges avec les agents ») : **Envoyer** (question, information) ou **Demande d'action** (consigne à exécuter) ; « Clore la demande sans réponse » si besoin. Filtre **Échanges** dans la liste des signalements ; l'accueil signale les réponses non lues.
 - **Agents** : l'accueil affiche **Messages du DPMS** (icône courrier, nombre de messages non lus, demandes en attente) ; la demande apparaît aussi sur le signalement pendant la revue de ronde. L'agent choisit son nom puis **Répondre** ou **Action faite** (qui clôt la demande).
-- **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (page **Plus** des agents ; Paramétrage pour le superviseur), puis accepter.
+- **Notifications** : sur chaque appareil, une fois, **Activer les notifications sur cet appareil** (carte **Cet appareil** : page **Plus** des agents, haut de l'accueil superviseur), puis accepter.
   - appareils **superviseurs** : barrière ouverte et refermée ; nouveau signalement (« URGENT » en tête s'il l'est) ; signalement aggravé ou clos ; traitement (appel, courriel, réponse reçue, intervention prévue ou réalisée, note) ; suite donnée par la police municipale ; ronde terminée (véhicules, signalements) ou annulée ; réponse d'un agent ;
   - **téléphone des agents** : message ou demande d'action du DPMS.
 
