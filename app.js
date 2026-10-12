@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.2.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1002,8 +1002,16 @@ function syncNow() {
   return _syncP;
 }
 let _notifSup = [], _notifAgents = [];
-function notifPourSup(ev) {
+async function notifPourSup(ev) {
   const lieu = siteNom(ev.site), qui = ev.agent || '';
+  const sig = ev.data && ev.data.sig ? await dbGet('sigs', ev.data.sig) : null;
+  const quoi = sig ? `${sig.ref} ${sigTitre(sig)}` : (ev.data && ev.data.ref) || '';
+  if (ev.t === 'revue' && ev.data.verdict === 'resolu') return { type: 'clos', titre: `Signalement clos — ${lieu}`, corps: `${quoi} — ${qui}${ev.data.comment ? ' : ' + ev.data.comment : ''}` };
+  if (ev.t === 'revue' && ev.data.verdict === 'aggrave') return { type: 'aggrave', titre: `Signalement aggravé — ${lieu}`, corps: `${quoi} — ${qui}${ev.data.comment ? ' : ' + ev.data.comment : ''}` };
+  if (ev.t === 'action') return { type: 'action', titre: `${ACTIONS[ev.data.type] || 'Traitement'} — ${lieu}`, corps: `${quoi}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.prevu ? ' — le ' + fmtDT(ev.data.prevu) : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''} (${qui})` };
+  if (ev.t === 'pm') return { type: 'pm', titre: `Police municipale — ${PM_STATUTS[ev.data.statut] || ''}`, corps: `${quoi}${ev.data.obs ? ' : ' + ev.data.obs : ''}` };
+  if (ev.t === 'barriere' && ev.data.action === 'fermee') return { type: 'barriere', titre: `Barrière refermée — ${lieu}`, corps: `${ev.data.barriere} — ${qui}` };
+  if (ev.t === 'ronde_annulee') return { type: 'ronde', titre: `Ronde annulée — ${lieu}`, corps: qui };
   if (ev.t === 'signalement') return { type: 'sig', titre: `${ev.data.urgent ? 'URGENT — ' : ''}Signalement — ${lieu}`, corps: `${ev.data.cat}${ev.data.sub ? ' — ' + ev.data.sub : ''}${ev.data.horsRonde ? ' (hors ronde)' : ''} — ${qui}` };
   if (ev.t === 'barriere' && ev.data.action === 'ouverte') return { type: 'barriere', titre: `Barrière ouverte — ${lieu}`, corps: `${ev.data.barriere} : ${ev.data.motif || ''} — ${qui}` };
   if (ev.t === 'ronde_fin') return { type: 'ronde', titre: `Ronde terminée — ${lieu}`, corps: `${qui} : ${ev.data.compte} véhicule(s), ${ev.data.nbSig} signalement(s)` };
@@ -1025,7 +1033,7 @@ async function agentSync() {
       }
       if (bytes > LOT_MAX_OCTETS) break;
     }
-    batch.forEach(ev => { const n = notifPourSup(ev); if (n) _notifSup.push(n); });
+    for (const ev of batch) { const n = await notifPourSup(ev); if (n) _notifSup.push(n); }
     const data = await encJSON({ v: 3, dev, events: batch });
     const media = Object.keys(files).length ? b64u.enc(await teamEnc(fflate.zipSync(files))) : null;
     const r = await rel('put', { dev, data, media }, 180000);
