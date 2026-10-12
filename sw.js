@@ -6,9 +6,9 @@
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
  * Notifications : texte chiffré par l'appareil émetteur pour cet appareil ; le relais et Google ne peuvent pas le lire.
  */
-const CACHE = 'rondes-cachan-2.3.1';
+const CACHE = 'rondes-cachan-2.3.2';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
-const STATIC = ['./logo-cachan.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js'];
+const STATIC = ['./logo-cachan.png', './notif-icon.png', './notif-badge.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js'];
 const NET_TIMEOUT = 4000;
 
 self.addEventListener('install', e => {
@@ -61,12 +61,13 @@ self.addEventListener('fetch', e => {
   e.respondWith(caches.match(req, { ignoreSearch: true }).then(r => r || fetch(req)));
 });
 
+// badge : silhouette blanche sur fond transparent (petite icône de la barre d'état Android) ; icon : blason de Cachan + P
 self.addEventListener('push', e => {
   let d = null;
   try { d = e.data ? e.data.json() : null; } catch (err) { d = null; }   // texte chiffré pour cet appareil, déchiffré par le navigateur
   e.waitUntil(self.registration.showNotification(d && d.titre ? d.titre : 'Rondes parkings', {
     body: d && d.corps ? d.corps : 'Nouvelle information : ouvrez l’application.',
-    icon: './icon-192.png', badge: './icon-192.png', tag: 'rondes-' + (d && d.type ? d.type : 'message') + '-' + Date.now(), renotify: true
+    icon: './notif-icon.png', badge: './notif-badge.png', tag: 'rondes-' + (d && d.type ? d.type : 'message') + '-' + Date.now(), renotify: true
   }));
 });
 self.addEventListener('notificationclick', e => {

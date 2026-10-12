@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.3.1';
+const APP_VERSION = '2.3.2';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
