@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -815,15 +815,23 @@ async function fold() {
           dests: ev.data.dests, urgent: ev.data.urgent, horsRonde: !!ev.data.horsRonde, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
           thumb: e.local && typeof ev.data.thumb === 'string' ? ev.data.thumb : null,
           photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), ts, geo: dec && dec.geo, dev: ev.dev, seq: ev.seq,
-          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], messages: [], controle: ev.data.controle || null
+          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], messages: [], controle: ev.data.controle || null, rid: ev.rid || null
         });
+      } else if (ev.t === 'ronde_agent' && ev.rid) {   // rondier corrigé : saisies de la ronde réattribuées
+        const { ancien, nouveau } = ev.data;
+        for (const s of sigs.values()) {
+          if (s.rid === ev.rid && s.agent === ancien) s.agent = nouveau;
+          (s.suivi || []).forEach(v => { if (v.rid === ev.rid && v.agent === ancien) v.agent = nouveau; });
+        }
+        ctlHist.forEach(x => { if (x.rid === ev.rid && x.agent === ancien) x.agent = nouveau; });
+        Object.values(ctl).forEach(c => Object.keys(NIVEAUX).forEach(n => { if (c[n] && c[n].rid === ev.rid && c[n].agent === ancien) c[n].agent = nouveau; }));
       } else if (ev.t === 'msg') {
         const s = sigs.get(ev.data.sig);
         if (s) s.messages.push({ id: `${ev.dev}:${ev.seq}`, role: 'agent', de: ev.agent || 'Agent', quand: ev.data.quand || ts || ev.jour, texte: ev.data.texte || '', fait: !!ev.data.fait });
       } else if (ev.t === 'revue') {
         const s = sigs.get(ev.data.sig);
         if (s) {
-          s.suivi.push({ jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), geo: dec && dec.geo });
+          s.suivi.push({ rid: ev.rid || null, jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), geo: dec && dec.geo });
           applyVerdict(s, ev.data.verdict, ts || ev.jour, ev.agent);
         } else if (sup) alertes.push({ key: `orph:${ev.dev}:${ev.seq}`, at: e.at, msg: `${siteNom(ev.site)}, ${ev.agent}, ${fmtJour(ev.jour)} — constat sur un signalement inconnu (${ev.data.ref})` });
       } else if (ev.t === 'action') {
@@ -841,7 +849,7 @@ async function fold() {
       } else if (ev.t === 'controle') {
         const c = ctl[ev.site] = ctl[ev.site] || { na: new Set() };
         const quand = ev.data.quand || ev.jour + 'T12:00:00';
-        if (!c[ev.data.niveau] || c[ev.data.niveau].at <= quand) c[ev.data.niveau] = { at: quand, agent: ev.agent };
+        if (!c[ev.data.niveau] || c[ev.data.niveau].at <= quand) c[ev.data.niveau] = { at: quand, agent: ev.agent, rid: ev.rid || null };
         Object.entries(ev.data.items || {}).forEach(([k, v]) => { if (v === 'NA') c.na.add(k); });
         ctlHist.push({ site: ev.site, niveau: ev.data.niveau, at: quand, ts, agent: ev.agent, items: ev.data.items, libelles: ev.data.libelles, rid: ev.rid });
       } else if (ev.t === 'barriere') {
@@ -855,6 +863,7 @@ async function fold() {
       if (sup && ev.rid && !del.rids.has(ev.rid) && !annulees.has(ev.rid)) {
         const r = rondes.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: ev.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, compte: null, alertes: [] };
         if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; }
+        if (ev.t === 'ronde_agent') { r.agent = ev.data.nouveau; (r.changements = r.changements || []).push(`${ev.data.ancien} → ${ev.data.nouveau}`); }
         if (ev.t === 'ronde_fin') { r.fin = ts; if (r.compte == null && ev.data.compte != null) r.compte = ev.data.compte; }
         if (ev.t === 'checklist') r.checklist = ev.data.items;
         if (ev.t === 'comptage') r.compte = ev.data.total;
@@ -1286,18 +1295,36 @@ async function beginRonde(site, agent) {
   Geo.start();
   await Geo.waitFirst(4000);
   const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), step: 'revue', checklist: {}, sigsCrees: [], compte: 0, compteValide: false,
-    quotidienDu: echeance(await etatControles(), site, 'quotidien').du, ctl: {}, ctlEmis: {} };
+    quotidienDu: true, ctl: {}, ctlEmis: {} };   // contrôle quotidien refait à chaque ronde
   await appendEvent('ronde_debut', ronde, {});
   await kvSet('ronde', ronde);
   await kvSet('dernierAgent', { nom: agent, at: Date.now() });
   hideBusy();
   resumeRonde(ronde);
 }
-function bandeauRondier(ronde, annuler = true) {
+function bandeauRondier(ronde, boutons = true) {
   return h('div', { class: 'rondier' },
     h('div', null, h('div', { class: 'small' }, `Rondier — ${siteNom(ronde.site)}, depuis ${fmtHeure(ronde.debut)}`), h('b', null, ronde.agent)),
-    annuler ? h('button', { class: 'link', style: 'color:var(--bad);width:auto;margin:0;text-align:right', onclick: safe(annulerRonde) }, 'Pas vous ?', h('br'), 'Annuler la ronde') : null);
+    boutons ? h('div', { class: 'rondier-btns' },
+      h('button', { class: 'sec', onclick: () => go('changerRondier') }, 'Changer le rondier'),
+      h('button', { class: 'danger', onclick: safe(annulerRonde) }, 'Annuler la ronde')) : null);
 }
+VIEWS.changerRondier = async () => {
+  const ronde = await kvGet('ronde');
+  if (!ronde) return agentHome();
+  const retour = () => go(ronde.step === 'revue' ? 'revue' : 'ronde', {}, { noPush: true });
+  return page('Changer le rondier', { back: retour },
+    h('div', { class: 'banner info' }, `Ronde en cours à ${siteNom(ronde.site)}, commencée à ${fmtHeure(ronde.debut)} au nom de ${ronde.agent}. Ce qui a déjà été saisi passe au nom du rondier choisi ; la ronde continue.`),
+    h('p', null, 'Qui fait la ronde ?'),
+    ...state.cfg.agents.filter(a => a !== ronde.agent).map(a => h('button', { class: 'big sec', onclick: safe(async () => {
+      const r = await kvGet('ronde');
+      await appendEvent('ronde_agent', r, { ancien: r.agent, nouveau: a });
+      r.agent = a; await kvSet('ronde', r);
+      await fold();
+      toast(`Rondier : ${a}.`);
+      go(r.step === 'revue' ? 'revue' : 'ronde', {}, { noPush: true });
+    }) }, a)));
+};
 function resumeRonde(ronde) {
   Geo.start();
   go(ronde.step === 'revue' ? 'revue' : 'ronde');
@@ -3105,7 +3132,7 @@ async function supExcel() {
     const fin = b.fermee ? new Date(b.fermee.quand) : new Date();
     A3.push([siteNom(b.site), b.barriere, fmtDT(b.ouverte.quand), b.ouverte.agent || '', b.ouverte.motif || '', b.ouverte.comment || '', fmtDT(b.ouverte.ts), b.fermee ? fmtDT(b.fermee.quand) : '', b.fermee ? b.fermee.agent || '' : '', b.fermee ? b.fermee.comment || '' : '', b.fermee ? fmtDT(b.fermee.ts) : '', Math.round((fin - new Date(b.ouverte.quand)) / 60000), b.fermee ? '' : 'Oui']);
   });
-  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', ronde_annulee: 'Ronde annulée', msg: 'Message au DPMS', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
+  const TYPES = { controle: 'Contrôle', action: 'Traitement', ronde_debut: 'Début de ronde', ronde_fin: 'Fin de ronde', ronde_annulee: 'Ronde annulée', ronde_agent: 'Changement de rondier', msg: 'Message au DPMS', checklist: 'Contrôles', comptage: 'Comptage', signalement: 'Signalement', revue: 'Constat de suivi', barriere: 'Barrière', pm: 'Police municipale' };
   const A4 = [['Appareil', 'N°', 'Type', 'Jour déclaré', 'Horodatage appareil', 'Reçu par le relais', 'Parking', 'Agent', 'Détail', 'Latitude', 'Longitude', 'Précision (m)', 'Âge position (s)', 'Empreinte']];
   evs.forEach(e => {
     const ev = e.ev; let det = '';
@@ -3116,6 +3143,7 @@ async function supExcel() {
     if (ev.t === 'controle') { const r = resumeControle(ev.data.items, ev.data.libelles); det = `${NIVEAUX[ev.data.niveau].lbl} : ${r.c} conforme(s)${r.nc.length ? ', non conforme : ' + r.nc.join(', ') : ''}`; }
     if (ev.t === 'action') det = `${ev.data.ref} : ${ACTIONS[ev.data.type]}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''}`;
     if (ev.t === 'ronde_fin') det = `${ev.data.nbSig} signalement(s)`;
+    if (ev.t === 'ronde_agent') det = `${ev.data.ancien} → ${ev.data.nouveau}`;
     if (ev.t === 'msg') det = `${ev.data.ref} : ${ev.data.fait ? '[action faite] ' : ''}${ev.data.texte || ''}`;
     if (ev.t === 'ronde_annulee') det = `annulée par l’agent${ev.data.nbSig ? ` (${ev.data.nbSig} signalement(s) conservé(s))` : ''}`;
     if (ev.t === 'barriere') det = `${ev.data.barriere} ${ev.data.action} — déclaré ${fmtDT(ev.data.quand)}${ev.data.motif ? ' — ' + ev.data.motif : ''}`;
