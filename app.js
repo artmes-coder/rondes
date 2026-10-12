@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.2.1';
+const APP_VERSION = '2.3.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1194,7 +1194,7 @@ function parseLink(text) {
   let hash = '';
   try { hash = new URL(text, appBaseURL()).hash; } catch (e) { hash = ''; }
   if (!hash && text.startsWith('#')) hash = text;
-  const m = /^#(join|site|cfg)=(.+)$/.exec(hash);
+  const m = /^#(join|site|cfg|sup)=(.+)$/.exec(hash);
   return m ? { kind: m[1], val: m[2] } : null;
 }
 async function handleLink(text, fromScan) {
@@ -1206,6 +1206,12 @@ async function handleLink(text, fromScan) {
     if (state.mode === 'superviseur') { toast('Cet appareil est superviseur : configuration ignorée.', true); go('home'); return; }
     if (estEquipe()) { if (confirm('Reconfigurer cet appareil avec ce QR ?')) await safe(setupEquipe)(j); else go('home'); return; }
     state.pendingJoin = j; go('home'); return;
+  }
+  if (l.kind === 'sup') {   // QR « autre superviseur » : adresse du relais seulement ; la phrase de passe reste demandée
+    let u = ''; try { u = td.decode(b64u.dec(l.val)); } catch (e) { u = ''; }
+    if (!/^https?:\/\/[^\s]+$/.test(u)) { toast('QR superviseur illisible.', true); go('home'); return; }
+    if (state.mode) { toast(state.mode === 'superviseur' ? 'Cet appareil est déjà superviseur.' : 'Cet appareil est déjà configuré : Réglages → Réinitialiser cet appareil, puis scanner à nouveau.', true); go('home'); return; }
+    go('supJoin', { url: u }); return;
   }
   if (l.kind === 'site') { toast('Les QR de parking ne sont plus utilisés : appuyez sur « Commencer ma ronde ».'); go('home'); return; }
 }
@@ -2676,7 +2682,8 @@ VIEWS.supJoin = async ({ url: u0 } = {}) => {
   const url = h('input', { type: 'text', value: u0 || '', placeholder: 'https://script.google.com/macros/s/…/exec' });
   const pass = h('input', { type: 'password', autocomplete: 'current-password' });
   return page('Ajouter un superviseur', { back: true },
-    h('p', { class: 'muted' }, 'L’adresse du relais figure dans les Réglages de tout appareil déjà configuré.'),
+    u0 ? h('div', { class: 'banner info' }, 'Adresse du relais reçue par le QR. Saisissez la phrase de passe superviseur.')
+      : h('p', { class: 'muted' }, 'L’adresse du relais figure dans les Réglages de tout appareil déjà configuré, ou dans le QR « Autre superviseur » (Configurer les appareils).'),
     h('label', { class: 'f' }, 'Adresse du relais'), url,
     h('label', { class: 'f' }, 'Phrase de passe superviseur'), pass,
     h('button', {
@@ -3427,8 +3434,19 @@ VIEWS.supQR = async ({ first } = {}) => {
   return page('Configurer les appareils', { back: true },
     first ? h('div', { class: 'banner ok' }, 'Relais activé. Étapes suivantes : saisir les prénoms des agents et les coordonnées des destinataires (Listes, catégories et coordonnées), puis configurer les téléphones.') : null,
     bloc('Téléphones des agents et PC de la loge', 'Téléphone : scanner le QR avec l’appareil photo. PC sans caméra : copier le lien et l’ouvrir dans le navigateur du PC. Les modifications de listes parviennent ensuite seules.', 'agent'),
-    bloc('Police municipale', 'Appareil du chef de service PM : signalements de véhicules (plaques, emplacements, photos), observations, traité / non traité.', 'pm'));
+    bloc('Police municipale', 'Appareil du chef de service PM : signalements de véhicules (plaques, emplacements, photos), observations, traité / non traité.', 'pm'),
+    blocSup());
 };
+function blocSup() {
+  const lien = appBaseURL() + '#sup=' + b64u.enc(te.encode(state.conn.url));
+  const show = h('div', { class: 'qr' });
+  return h('div', { class: 'card' }, h('h2', null, 'Autre superviseur'),
+    h('p', { class: 'muted small' }, 'Téléphone ou ordinateur d’un autre superviseur : scanner le QR (ou ouvrir le lien). L’adresse du relais est remplie d’office ; la phrase de passe superviseur reste demandée, elle n’est pas dans le QR.'),
+    h('div', { class: 'row' },
+      h('button', { onclick: () => { show.innerHTML = qrSvg(lien, 'M'); } }, 'Afficher le QR'),
+      h('button', { class: 'sec', onclick: safe(async () => { try { await navigator.clipboard.writeText(lien); toast('Lien copié.'); } catch (e) { prompt('Copiez ce lien :', lien); } }) }, 'Copier le lien (PC)')),
+    show);
+}
 async function publishCfg(cfg) {
   cfg = normalizeCfg(cfg);
   state.cfg = cfg; await kvSet('cfg', cfg);
@@ -3511,7 +3529,7 @@ async function boot() {
   if (state.mode && !state.conn) { state.mode = null; }
   if (state.mode === 'agent' && (await kvGet('ronde'))) Geo.start();
   const hash = location.hash;
-  if (hash && /^#(join|site|cfg)=/.test(hash)) {
+  if (hash && /^#(join|site|cfg|sup)=/.test(hash)) {
     history.replaceState(null, '', location.pathname + location.search);
     await handleLink(hash, false);
     if (state.view === 'home') render();
@@ -3520,7 +3538,7 @@ async function boot() {
 }
 window.addEventListener('hashchange', () => {
   const hash = location.hash;
-  if (hash && /^#(join|site|cfg)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
+  if (hash && /^#(join|site|cfg|sup)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(confirmerContact, 600); });
 setTimeout(confirmerContact, 1500);

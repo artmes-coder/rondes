@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.2.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.3.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -42,7 +42,7 @@ Sur un ordinateur, avec un **compte Google dédié au service**.
 
 ## 4. Ajouter un appareil
 
-- **Superviseur supplémentaire** : ouvrir l'application → **Ajouter cet appareil comme superviseur** → adresse du relais + phrase de passe.
+- **Superviseur supplémentaire** : sur un appareil superviseur, **Configurer les appareils** → QR **Autre superviseur** ; le scanner avec le nouvel appareil (ou ouvrir le lien sur un PC) : l'adresse du relais est remplie d'office, il ne reste qu'à saisir la **phrase de passe superviseur** (elle n'est pas dans le QR). Sans QR : ouvrir l'application → **Ajouter cet appareil comme superviseur** → adresse du relais + phrase de passe.
 - **Téléphone agents** : **Scanner un QR de configuration** → QR « Téléphones des agents » affiché par un superviseur (**Configurer les appareils**).
 - **PC de la loge** (sans caméra) : sur le superviseur, **Configurer les appareils → Copier le lien**, puis ouvrir ce lien dans le navigateur du PC.
 - **Police municipale** : QR « Police municipale ».
