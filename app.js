@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.5.2';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -842,11 +842,10 @@ async function storeEvEntry(ev, n, idx, at, extra = {}) {
   await dbPut('entries', { k, kind: 'ev', n, idx, at, ev: light, ...extra });
   return true;
 }
+// Téléphone partagé : hors ronde, aucun nom n'est présélectionné ; l'agent choisit le sien à chaque saisie.
 async function agentPrefere() {
   const r = await kvGet('ronde');
-  if (r) return r.agent;
-  const l = await kvGet('dernierAgent');
-  return l && Date.now() - l.at < 12 * 3600000 ? l.nom : null;
+  return r ? r.agent : null;
 }
 
 /* ---------- Synchronisation ---------- */
