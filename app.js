@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.5.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -803,6 +803,12 @@ async function fold() {
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [], regs = [], mcs = new Map();
   let cfg = null, vapid = null;
   const alertes = [];
+  // Précédence causale : une saisie d'agent ne change le statut (clos / ouvert) que si l'appareil
+  // connaissait le dernier changement de statut (même appareil, ou changement antérieur à son curseur « vu »).
+  // Sinon (décision du DPMS ou d'un autre appareil qu'il ignorait) : le constat est conservé, le statut ne bouge pas.
+  const nDe = e => e.local ? Infinity : (e.n || 0);
+  const connu = (x, ev) => ev.vu == null || x.statutDev === ev.dev || (x.statutN || 0) <= ev.vu;
+  const marquer = (x, e, qui) => { x.statutN = nDe(e); x.statutDev = qui; };
   for (const { e } of items) {
     if (e.kind === 'ev') {
       const ev = e.ev, dec = e.dec || null, ts = dec && dec.ts;
@@ -820,10 +826,11 @@ async function fold() {
           dests: ev.data.dests, urgent: ev.data.urgent, horsRonde: !!ev.data.horsRonde, statut: 'ouvert', jour: ev.jour, agent: ev.agent,
           thumb: e.local && typeof ev.data.thumb === 'string' ? ev.data.thumb : null,
           photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), ts, geo: dec && dec.geo, dev: ev.dev, seq: ev.seq,
-          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], messages: [], controle: ev.data.controle || null, rid: ev.rid || null, mc: ev.data.mc || null
+          suivi: [], journalDPMS: [], notes: '', notesAgents: '', pm: null, actions: [], messages: [], controle: ev.data.controle || null, rid: ev.rid || null, mc: ev.data.mc || null,
+          statutN: nDe(e), statutDev: ev.dev
         });
-      } else if (ev.t === 'contact') { mcAjout(mcs, ev.data, ev.agent);
-      } else if (ev.t === 'contact_suivi') { mcSuivi(mcs, ev.data, ev.agent);
+      } else if (ev.t === 'contact') { mcAjout(mcs, ev.data, ev.agent); const c = mcs.get(ev.data.id); if (c && c.statutN == null) marquer(c, e, ev.dev);
+      } else if (ev.t === 'contact_suivi') { mcSuivi(mcs, ev.data, ev.agent, { connu: x => connu(x, ev), marquer: x => marquer(x, e, ev.dev) });
       } else if (ev.t === 'ronde_agent' && ev.rid) {   // rondier corrigé : saisies de la ronde réattribuées
         const { ancien, nouveau } = ev.data;
         for (const s of sigs.values()) {
@@ -838,8 +845,12 @@ async function fold() {
       } else if (ev.t === 'revue') {
         const s = sigs.get(ev.data.sig);
         if (s) {
-          s.suivi.push({ rid: ev.rid || null, jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), geo: dec && dec.geo });
-          applyVerdict(s, ev.data.verdict, ts || ev.jour, ev.agent);
+          const change = (s.statut === 'clos') !== (ev.data.verdict === 'resolu');
+          const ok = !change || connu(s, ev);   // pas de changement de statut : toujours appliqué
+          s.suivi.push({ rid: ev.rid || null, jour: ev.jour, ts, agent: ev.agent, verdict: ev.data.verdict, comment: ev.data.comment, photos: (ev.photos || []).map(p => ({ id: p.id, sha: p.sha, n: e.n })), geo: dec && dec.geo, sansEffet: ok ? undefined : true });
+          if (change && ok) { applyVerdict(s, ev.data.verdict, ts || ev.jour, ev.agent); marquer(s, e, ev.dev); }
+          else if (!change && ev.data.verdict === 'aggrave') s.aggrave = true;
+          else if (sup && (s.statut === 'clos') !== (ev.data.verdict === 'resolu')) alertes.push({ key: `tardif:${ev.dev}:${ev.seq}`, at: e.at, msg: `${s.ref} (${siteNom(s.site)}) — constat « ${VERDICTS[ev.data.verdict]} » de ${ev.agent} fait sans connaître la dernière décision (${s.statut === 'clos' ? 'clôture' : 'réouverture'}) : statut maintenu, à vérifier.` });
         } else if (sup) alertes.push({ key: `orph:${ev.dev}:${ev.seq}`, at: e.at, msg: `${siteNom(ev.site)}, ${ev.agent}, ${fmtJour(ev.jour)} — constat sur un signalement inconnu (${ev.data.ref})` });
       } else if (ev.t === 'action') {
         const s = sigs.get(ev.data.sig);
@@ -850,14 +861,16 @@ async function fold() {
           s.pm = s.pm || { statut: null, hist: [] };
           s.pm.hist.push({ jour: ev.jour, ts, statut: ev.data.statut, obs: ev.data.obs || '', agent: ev.agent });
           if (ev.data.statut !== 'obs') s.pm.statut = ev.data.statut;
-          if (ev.data.statut === 'traite') { s.statut = 'clos'; s.closLe = ts || ev.jour; s.closPar = 'Police municipale'; }
-          else if (ev.data.statut === 'non_traite' && s.closPar === 'Police municipale') { s.statut = 'ouvert'; s.closLe = null; s.closPar = null; }
+          if (connu(s, ev)) {
+            if (ev.data.statut === 'traite') { s.statut = 'clos'; s.closLe = ts || ev.jour; s.closPar = 'Police municipale'; marquer(s, e, ev.dev); }
+            else if (ev.data.statut === 'non_traite' && s.closPar === 'Police municipale') { s.statut = 'ouvert'; s.closLe = null; s.closPar = null; marquer(s, e, ev.dev); }
+          }
         }
       } else if (ev.t === 'controle') {
         const c = ctl[ev.site] = ctl[ev.site] || { na: new Set() };
         const quand = ev.data.quand || ev.jour + 'T12:00:00';
         if (!c[ev.data.niveau] || c[ev.data.niveau].at <= quand) c[ev.data.niveau] = { at: quand, agent: ev.agent, rid: ev.rid || null };
-        Object.entries(ev.data.items || {}).forEach(([k, v]) => { if (v === 'NA') c.na.add(k); });
+        Object.entries(ev.data.items || {}).forEach(([k, v]) => { if (v === 'NA' && !(ev.vu != null && c.retabli && (c.retabli[k] || 0) > ev.vu)) c.na.add(k); });
         ctlHist.push({ site: ev.site, niveau: ev.data.niveau, at: quand, ts, agent: ev.agent, items: ev.data.items, libelles: ev.data.libelles, rid: ev.rid });
       } else if (ev.t === 'barriere') {
         const d = ev.data;
@@ -889,13 +902,13 @@ async function fold() {
       else if (d.type === 'msg') { const s = sigs.get(d.sig); if (s) s.messages.push({ id: d.id, role: 'dpms', de: 'DPMS', quand: d.ts, texte: d.texte || '', demande: !!d.demande }); }
       else if (d.type === 'demande_close') { const s = sigs.get(d.sig); if (s) s.messages.push({ id: d.id, role: 'dpms', de: 'DPMS', quand: d.ts, texte: '', cloture: true }); }
       else if (d.type === 'vapid') { if (!vapid && d.pub && d.priv) vapid = { pub: d.pub, priv: d.priv }; }
-      else if (d.type === 'contact') mcAjout(mcs, d.contact, d.par || 'DPMS');
-      else if (d.type === 'contact_suivi') mcSuivi(mcs, d.suivi, d.par || 'DPMS');
+      else if (d.type === 'contact') { mcAjout(mcs, d.contact, d.par || 'DPMS'); const c = mcs.get(d.contact && d.contact.id); if (c && c.statutN == null) marquer(c, e, 'dpms'); }
+      else if (d.type === 'contact_suivi') mcSuivi(mcs, d.suivi, d.par || 'DPMS', { connu: () => true, marquer: x => marquer(x, e, 'dpms') });
       else if (d.type === 'registre') regs.push({ site: d.site, at: d.ts, note: d.note || '', par: d.par || 'DPMS' });
-      else if (d.type === 'ctl_reactiver') { if (ctl[d.site]) ctl[d.site].na.delete(d.item); }
+      else if (d.type === 'ctl_reactiver') { const c = ctl[d.site] = ctl[d.site] || { na: new Set() }; c.na.delete(d.item); (c.retabli = c.retabli || {})[d.item] = nDe(e); }
       else if (d.type === 'sig') {
         const s = sigs.get(d.sig);
-        if (s) { Object.assign(s, d.patch); s.journalDPMS.push({ ts: d.ts, action: d.action, par: d.par || 'DPMS' }); }
+        if (s) { Object.assign(s, d.patch); if (d.patch && 'statut' in d.patch) marquer(s, e, 'dpms'); s.journalDPMS.push({ ts: d.ts, action: d.action, par: d.par || 'DPMS' }); }
       }
     } else if (e.kind === 'note' && sup) {
       const s = sigs.get(e.dec.sig);
@@ -944,7 +957,7 @@ async function fold() {
   if (vapid) await kvSet('vapid', vapid);
   await kvSet('barrieres', [...barr.values()]);
   await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
-  await kvSet('controles', Object.fromEntries(Object.entries(ctl).map(([k, v]) => [k, { ...v, na: [...v.na] }])));
+  await kvSet('controles', Object.fromEntries(Object.entries(ctl).map(([k, v]) => [k, { ...v, na: [...v.na], retabli: undefined }])));
   if (sup) await kvSet('controlesHist', ctlHist.sort((a, b) => b.at.localeCompare(a.at)));
   if (sup) await kvSet('registres', regs.sort((a, b) => b.at.localeCompare(a.at)));
   if (sup) await kvSet('corbeille', [...suppr.values()].map(d => ({ ...d, annule: annul.has(d.id) })).sort((a, b) => b.ts.localeCompare(a.ts)));
@@ -962,6 +975,7 @@ async function appendEvent(type, base, data, secretExtra = {}, photos = []) {
     const ev = {
       v: 3, dev: await kvGet('dev'), role: state.mode, seq: head.seq + 1, t: type, jour: localDate(now),
       rid: base.rid || null, site: base.site || null, agent: base.agent || null,
+      vu: (await kvGet('cursor')) || 0,   // dernier élément du journal connu de l'appareil (ordre causal)
       data, photos: photos.map(p => ({ id: p.id, sha: p.sha })),
       sec: await seal(secret), prev: head.hash
     };
@@ -1066,6 +1080,8 @@ async function traiterOpsRelais() {
 async function notifPourSup(ev) {
   const lieu = siteNom(ev.site), qui = ev.agent || '';
   const sig = ev.data && ev.data.sig ? await dbGet('sigs', ev.data.sig) : null;
+  if (ev.data && ev.data.sig && !sig && ['revue', 'action', 'pm', 'msg'].includes(ev.t)) return null;   // signalement supprimé par le DPMS
+  if (ev.t === 'signalement' && !(await dbGet('sigs', ev.data.id))) return null;
   const quoi = sig ? `${sig.ref} ${sigTitre(sig)}` : (ev.data && ev.data.ref) || '';
   if (ev.t === 'revue' && ev.data.verdict === 'resolu') return { type: 'clos', titre: `Signalement clos — ${lieu}`, corps: `${quoi} — ${qui}${ev.data.comment ? ' : ' + ev.data.comment : ''}` };
   if (ev.t === 'revue' && ev.data.verdict === 'aggrave') return { type: 'aggrave', titre: `Signalement aggravé — ${lieu}`, corps: `${quoi} — ${qui}${ev.data.comment ? ' : ' + ev.data.comment : ''}` };
@@ -1084,6 +1100,7 @@ async function notifPourSup(ev) {
 async function agentSync() {
   const dev = await kvGet('dev');
   let sent = 0;
+  const envoyes = [];
   for (let guard = 0; guard < 50; guard++) {
     const pending = (await dbAll('events')).sort((a, b) => a.seq - b.seq);
     if (!pending.length) break;
@@ -1099,7 +1116,7 @@ async function agentSync() {
     const data = await encJSON({ v: 3, dev, events: batch });
     const media = Object.keys(files).length ? b64u.enc(await teamEnc(fflate.zipSync(files))) : null;
     const r = await rel('put', { dev, data, media }, 180000);
-    for (const ev of batch) { const n = await notifPourSup(ev); if (n) _notifSup.push(n); }   // seulement une fois le dépôt accepté
+    envoyes.push(...batch);   // notifications calculées après la relève
     await opsPourRelais(batch);
     for (let i = 0; i < batch.length; i++) await storeEvEntry(batch[i], r.n, i, r.at, { media: !!media });
     const d = await openDB(); const t = d.transaction(['events', 'photos'], 'readwrite');
@@ -1109,6 +1126,7 @@ async function agentSync() {
   }
   const got = await pullAll(['p', 'd']);
   if (sent || got) await fold();
+  for (const ev of envoyes) { const n = await notifPourSup(ev); if (n) _notifSup.push(n); }
   if (_notifSup.length) { const l = _notifSup; _notifSup = []; notifier('sup', l); }
   traiterOpsRelais();
   return { sent, got };
@@ -1409,6 +1427,7 @@ VIEWS.choixAgent = async ({ site }) => page(`Ronde : ${siteNom(site)}`, { back: 
 async function beginRonde(site, agent) {
   showBusy('Démarrage de la ronde…');
   Geo.start();
+  if (navigator.onLine) await Promise.race([syncNow().catch(() => null), new Promise(r => setTimeout(r, 6000))]);   // clôtures et suppressions du DPMS
   await Geo.waitFirst(4000);
   const st = await etatControles();
   const ouverts = (await dbAll('sigs')).filter(s => s.site === site && s.statut === 'ouvert').length;
@@ -2006,14 +2025,15 @@ function mcAjout(mcs, c, par) {
   const rep = clos ? [{ quand: c.quand, mode: MODE_CANAL[c.canal] || 'place', texte: c.suite === 'service' ? `Orienté vers : ${c.service}${c.reponse ? ' — ' + c.reponse : ''}` : c.suite === 'barriere' ? `Barrière ouverte${c.reponse ? ' — ' + c.reponse : ''}` : c.reponse || 'Réponse donnée', par, regle: true }] : [];
   mcs.set(c.id, { ...c, par, statut: clos ? 'clos' : 'ouvert', closLe: clos ? c.quand : null, reponduLe: clos ? c.quand : null, hist: rep.map(r => ({ ...r, type: 'reponse' })), sigs: [], annule: false });
 }
-function mcSuivi(mcs, s, par) {
+function mcSuivi(mcs, s, par, causal = { connu: () => true, marquer: () => { } }) {
   const c = s && mcs.get(s.mc);
   if (!c) return;
   const quand = s.quand || new Date().toISOString();
-  c.hist.push({ type: s.type, quand, mode: s.mode || null, texte: s.texte || '', par: par || 'DPMS', regle: !!s.regle });
-  if (s.type === 'reponse') { if (!c.reponduLe || quand < c.reponduLe) c.reponduLe = quand; if (s.regle) { c.statut = 'clos'; c.closLe = quand; } }
-  if (s.type === 'clos') { c.statut = 'clos'; c.closLe = quand; }
-  if (s.type === 'rouvert') { c.statut = 'ouvert'; c.closLe = null; }
+  const ok = causal.connu(c);
+  c.hist.push({ type: s.type, quand, mode: s.mode || null, texte: s.texte || '', par: par || 'DPMS', regle: !!s.regle, sansEffet: ok ? undefined : true });
+  if (s.type === 'reponse') { if (!c.reponduLe || quand < c.reponduLe) c.reponduLe = quand; if (s.regle && ok) { c.statut = 'clos'; c.closLe = quand; causal.marquer(c); } }
+  if (s.type === 'clos' && ok) { c.statut = 'clos'; c.closLe = quand; causal.marquer(c); }
+  if (s.type === 'rouvert' && ok) { c.statut = 'ouvert'; c.closLe = null; causal.marquer(c); }
   if (s.type === 'annule') c.annule = true;
 }
 async function mainCourante() { return ((await kvGet('mainCourante')) || []).filter(c => !c.annule); }
@@ -3477,7 +3497,7 @@ async function supSigDetail(s, recharger) {
   const suivi = [];
   for (const v of s.suivi || []) {
     suivi.push(h('div', { class: 'stat', style: 'display:block' },
-      h('div', null, h('b', null, VERDICTS[v.verdict] || v.verdict), ` — ${v.ts ? fmtDT(v.ts) : fmtJour(v.jour)} — ${v.agent || ''}`),
+      h('div', null, h('b', null, VERDICTS[v.verdict] || v.verdict), ` — ${v.ts ? fmtDT(v.ts) : fmtJour(v.jour)} — ${v.agent || ''}`, v.sansEffet ? h('span', { class: 'badge b-warn' }, 'sans effet sur le statut : décision du DPMS non connue de l’agent') : null),
       v.comment ? h('div', { class: 'small' }, v.comment) : null,
       aGeo(v.geo) ? h('div', { class: 'small' }, 'Position : ', geoLink(v.geo)) : null,
       ...(await photoBlocks(v.photos))));
