@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.6.0.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.6.1.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -136,7 +136,7 @@ Sécurité incendie | Ateliers          ← catégorie de signalement | destinat
 ## 6. Bon à savoir
 
 - Ne jamais vider les données du navigateur sur un téléphone agents : les saisies pas encore envoyées n'existent que sur lui.
-- **Synchronisation** : chaque appareil n'envoie que ses propres saisies, une seule fois ; il ne renvoie jamais ce qu'il a reçu. Une suppression faite par le DPMS s'applique sur tous les appareils à leur relève ; les saisies d'agents qui visent un signalement supprimé sont ignorées (ni affichées, ni notifiées, ni exportées).
+- **Synchronisation** : chaque appareil n'envoie que ses propres saisies, une seule fois ; il ne renvoie jamais ce qu'il a reçu. Plusieurs téléphones agents peuvent être configurés avec le même QR. Les décisions prises pendant une relève attendent leur tour dans la file de l'appareil ; une décision reçue deux fois (renvoi après une réponse perdue du relais) n'est appliquée qu'une fois. Une suppression faite par le DPMS s'applique sur tous les appareils à leur relève ; les saisies d'agents qui visent un signalement supprimé sont ignorées (ni affichées, ni notifiées, ni exportées).
 - **Qui l'emporte** : un constat ou une clôture d'agent ne change le statut d'un signalement que si le téléphone connaissait la dernière décision (clôture ou réouverture) au moment de la saisie. Un constat fait hors réseau sur un signalement que le DPMS a clos entre-temps est conservé dans l'historique (« sans effet sur le statut ») et signalé dans les points d'attention, mais ne le rouvre pas. Le téléphone tente une relève au début de chaque ronde.
 - Pour les autres modifications d'un même signalement, la dernière reçue l'emporte ; l'historique reste dans le journal.
 - Les notifications et alertes ne remplacent pas l'appel : pour une urgence, utiliser les boutons d'appel de l'accueil.

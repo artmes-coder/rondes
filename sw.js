@@ -6,7 +6,7 @@
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
  * Notifications : texte chiffré par l'appareil émetteur pour cet appareil ; le relais et Google ne peuvent pas le lire.
  */
-const CACHE = 'rondes-cachan-2.6.0';
+const CACHE = 'rondes-cachan-2.6.1';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
 const STATIC = ['./logo-cachan.png', './notif-icon.png', './notif-badge.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js', './lib/jspdf.umd.min.js'];
 const NET_TIMEOUT = 4000;

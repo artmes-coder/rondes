@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.6.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -147,6 +147,15 @@ async function dbReplaceAll(s, vals) { const d = await openDB(); const t = d.tra
 const kvGet = k => dbGet('kv', k);
 const kvSet = (k, v) => dbPut('kv', v, k);
 const kvDel = k => dbDel('kv', k);
+/* Lecture-modification-écriture d'une clé en UNE transaction : deux traitements simultanés
+   (saisie de l'utilisateur et relève en cours) ne peuvent plus s'écraser mutuellement. */
+async function kvUpdate(k, fn) {
+  const d = await openDB(); const t = d.transaction('kv', 'readwrite'); const o = t.objectStore('kv');
+  let res;
+  o.get(k).onsuccess = e => { res = fn(e.target.result); o.put(res, k); };
+  await txDone(t); return res;
+}
+const idFile = () => uuid();
 let _lock = Promise.resolve();
 function withLock(fn) { const p = _lock.then(fn, fn); _lock = p.catch(() => { }); return p; }
 
@@ -781,11 +790,15 @@ function pmBanner(s) {
 const ORD_LOCAL = 1e15;
 async function fold() {
   const sup = state.mode === 'superviseur';
-  const entries = await dbAll('entries');
+  const { entries, decQueue } = await (async () => {
+    const db = await openDB(); const t = db.transaction(['entries', 'kv']);
+    const [a, b] = await Promise.all([reqP(t.objectStore('entries').getAll()), reqP(t.objectStore('kv').get('decQueue'))]);
+    return { entries: a, decQueue: b || [] };
+  })();
   const items = [];
   for (const e of entries) items.push({ ord: e.n * 100000 + (e.idx || 0), e });
   if (!sup) for (const ev of await dbAll('events')) items.push({ ord: ORD_LOCAL + ev.seq, e: { kind: 'ev', ev, local: true } });
-  if (sup) ((await kvGet('decQueue')) || []).forEach((q, i) => items.push({ ord: 2 * ORD_LOCAL + i, e: { kind: q.kind === 'n' ? 'note' : 'dec', dec: q.d, local: true } }));
+  if (sup) decQueue.forEach((q, i) => items.push({ ord: 2 * ORD_LOCAL + i, e: { kind: q.kind === 'n' ? 'note' : 'dec', dec: q.d, local: true } }));
   items.sort((a, b) => a.ord - b.ord);
 
   // Suppressions décidées par un superviseur (annulables depuis la corbeille)
@@ -807,6 +820,7 @@ async function fold() {
   // connaissait le dernier changement de statut (même appareil, ou changement antérieur à son curseur « vu »).
   // Sinon (décision du DPMS ou d'un autre appareil qu'il ignorait) : le constat est conservé, le statut ne bouge pas.
   const nDe = e => e.local ? Infinity : (e.n || 0);
+  const decVues = new Set();
   const connu = (x, ev) => ev.vu == null || x.statutDev === ev.dev || (x.statutN || 0) <= ev.vu;
   const marquer = (x, e, qui) => { x.statutN = nDe(e); x.statutDev = qui; };
   for (const { e } of items) {
@@ -894,6 +908,7 @@ async function fold() {
       }
     } else if (e.kind === 'dec') {
       const d = e.dec;
+      if (d.id && d.type !== 'cfg') { if (decVues.has(d.id)) continue; decVues.add(d.id); }   // même décision reçue deux fois
       if (d.type === 'cfg') { if (validCfg(normalizeCfg(d.cfg))) cfg = normalizeCfg(d.cfg); }
       else if (d.type === 'action') {
         const s = sigs.get(d.action.sig);
@@ -1046,7 +1061,7 @@ async function prefsNotif() {
 }
 /* Alertes tenues par le relais : « une ronde a commencé ici aujourd'hui » et « ronde pas finie au bout d'1 h » */
 async function opsPourRelais(batch) {
-  const ops = (await kvGet('opsRelais')) || [];
+  const ops = [];
   const finies = new Set(batch.filter(ev => ev.t === 'ronde_fin' || ev.t === 'ronde_annulee').map(ev => ev.rid));
   for (const ev of batch) {
     if (ev.t === 'ronde_debut') {
@@ -1055,14 +1070,15 @@ async function opsPourRelais(batch) {
     }
     if ((ev.t === 'ronde_fin' || ev.t === 'ronde_annulee') && ev.rid) ops.push({ op: 'annuler', rid: ev.rid });
   }
-  await kvSet('opsRelais', ops.slice(-50));
+  if (ops.length) await kvUpdate('opsRelais', l => [...(l || []), ...ops.map(o => ({ ...o, oid: idFile() }))].slice(-50));
 }
 let _opsEnCours = false;
 async function traiterOpsRelais() {
   if (_opsEnCours) return; _opsEnCours = true;
   try {
-    let ops = (await kvGet('opsRelais')) || [];
-    while (ops.length) {
+    for (let garde = 0; garde < 100; garde++) {
+      const ops = (await kvGet('opsRelais')) || [];
+      if (!ops.length) break;
       const o = ops[0];
       try {
         if (o.op === 'pointer') await rel('pointer', { jetons: [await jeton('site', o.site)] }, 20000);
@@ -1073,7 +1089,7 @@ async function traiterOpsRelais() {
           if (Object.keys(messages).length) await rel('differer', { id: await jeton('ronde', o.rid), apres: new Date(new Date(o.debut).getTime() + 3600000).toISOString(), messages }, 20000);
         }
       } catch (e) { if (!/opération inconnue|invalide/.test(e.message)) break; }   // relais ancien : opération ignorée
-      ops = ops.slice(1); await kvSet('opsRelais', ops);
+      await kvUpdate('opsRelais', l => (l || []).filter(x => (o.oid ? x.oid !== o.oid : JSON.stringify(x) !== JSON.stringify(o))));
     }
   } finally { _opsEnCours = false; }
 }
@@ -3172,8 +3188,7 @@ VIEWS.supJoin = async ({ url: u0 } = {}) => {
 
 /* ---------- Synchronisation superviseur ---------- */
 async function queueDec(kind, d) {
-  const q = (await kvGet('decQueue')) || [];
-  q.push({ kind, d }); await kvSet('decQueue', q);
+  await kvUpdate('decQueue', q => [...(q || []), { qid: idFile(), kind, d }]);
 }
 async function supSync() {
   const vault = await kvGet('vaultPending');
@@ -3212,16 +3227,23 @@ async function programmerAlertes(force) {
   await kvSet('programme', { empreinte, at: Date.now() });
 }
 async function viderFileSup() {
-  let q = (await kvGet('decQueue')) || [];
-  while (q.length) {
+  for (let garde = 0; garde < 500; garde++) {
+    // relu à chaque tour : les décisions prises pendant l'envoi restent dans la file
+    let q = (await kvGet('decQueue')) || [];
+    if (!q.length) break;
+    if (q.some(x => !x.qid)) q = await kvUpdate('decQueue', l => (l || []).map(x => x.qid ? x : { ...x, qid: idFile() }));   // anciennes versions
     const it = q[0];
-    if (it.d && it.d.type === 'msg') _notifAgents.push({ type: 'msg', titre: `${it.d.demande ? 'Demande d’action' : 'Message'} du DPMS — ${it.d.ref || ''}`, corps: it.d.texte || '' });
     const data = it.kind === 'n'
       ? b64u.enc(await sealBytesFor(await getPubKey(), fflate.deflateSync(te.encode(JSON.stringify(it.d)))))
       : await encJSON(it.d);
     const r = await rel('putDec', { kind: it.kind, data });
-    await dbPut('entries', { k: `${it.kind}:${r.n}`, kind: it.kind === 'n' ? 'note' : 'dec', n: r.n, at: r.at, dec: it.d });
-    q = q.slice(1); await kvSet('decQueue', q);
+    if (it.d && it.d.type === 'msg') _notifAgents.push({ type: 'msg', titre: `${it.d.demande ? 'Demande d’action' : 'Message'} du DPMS — ${it.d.ref || ''}`, corps: it.d.texte || '' });
+    // déplacement atomique : la décision passe de la file au journal local dans la même transaction
+    const db = await openDB(); const t = db.transaction(['entries', 'kv'], 'readwrite');
+    t.objectStore('entries').put({ k: `${it.kind}:${r.n}`, kind: it.kind === 'n' ? 'note' : 'dec', n: r.n, at: r.at, dec: it.d });
+    const kv = t.objectStore('kv');
+    kv.get('decQueue').onsuccess = e => kv.put((e.target.result || []).filter(x => x.qid !== it.qid), 'decQueue');
+    await txDone(t);
   }
 }
 
