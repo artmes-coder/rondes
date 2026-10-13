@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.5.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.6.0.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -58,13 +58,13 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 ### Accueil des agents
 Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **Barrière ouverte**, **Usager ou demande reçue** ; au-dessus, **Messages du DPMS** quand il y en a ; en bas, **Urgence : appeler le DPMS** et **Plus** (traitement des signalements, échanges, main courante, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
 
-### Ronde (agents) : un parcours guidé, une question par écran
+### Ronde (agents) : un parcours guidé
 **Commencer ma ronde** → parking → agent, puis les étapes s'enchaînent (« Étape 3 sur 6 », barre de progression) :
 1. **Signalements en cours** dans le parking, un par écran, photo en grand : **Résolu** (clôt le signalement), **Toujours en cours** ou **Aggravé** ; commentaire ou photo en option.
 2. **Comptage des véhicules** : « +1 véhicule » à chaque véhicule (« −1 », « Corriger »), puis **Valider**.
-3. **Contrôle quotidien**, à chaque ronde, **point par point** (« Point 4 sur 15 ») : **Conforme** passe au point suivant ; **Non conforme** ouvre directement le signalement avec les constats propres au point, puis revient ; « N'existe pas dans ce parking » pour les équipements facultatifs (le superviseur peut **rétablir** le point) ; « Point précédent » pour corriger.
-4. **Contrôle mensuel**, **contrôle trimestriel** quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking) : « Faire maintenant » ou « Plus tard » ; « Finir plus tard » en cours de route garde les réponses.
-5. **Fin de ronde** : « Autre chose à signaler ? » (**+ Signalement**, **Barrière ouverte**), récapitulatif (avec « modifier » / « reprendre »), puis **Terminer la ronde** et l'écran « Ronde terminée ».
+3. **Contrôle quotidien**, à chaque ronde : **liste déroulante des thèmes** (Rampes, Portails, Barrières et bornes, Éclairage, Extincteurs…), chacun avec sa pastille de couleur (orange : à vérifier ; vert : conforme ; rouge : non conforme ; gris : n'existe pas ici). L'agent ouvre les thèmes **dans l'ordre qu'il veut** et peut **revenir à tout moment** sur un thème pour signaler un problème vu en passant. Dans un thème : **Conforme** (le thème suivant à vérifier s'ouvre) ou **Non conforme : signaler** (signalement avec les constats propres au thème, puis retour à la liste) ; « N'existe pas dans ce parking » pour les équipements facultatifs (le superviseur peut **rétablir** le point). Le bouton du bas indique combien de thèmes restent et ouvre le premier ; une fois tout vérifié, **Contrôle terminé : étape suivante**.
+4. **Contrôle mensuel**, **contrôle trimestriel** quand ils arrivent à échéance (30 et 90 jours après le précédent dans ce parking), même liste de thèmes : « Faire maintenant » ou « Plus tard » ; « Finir plus tard » en cours de route garde les réponses.
+5. **Fin de ronde** : « Autre chose à signaler ? » (**+ Signalement**, **Barrière ouverte**), récapitulatif (avec « modifier », « revoir » le contrôle quotidien, « reprendre »), puis **Terminer la ronde** et l'écran « Ronde terminée ».
 
 En tête de chaque écran : le nom du rondier, **Changer le rondier** (la ronde continue, ce qui a déjà été saisi passe au nom du bon agent ; le changement figure au journal) et **Annuler la ronde** (mauvais parking, fausse manipulation : la ronde n'apparaît pas dans les rondes ; les signalements déjà faits sont conservés).
 

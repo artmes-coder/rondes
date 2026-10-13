@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.5.1';
+const APP_VERSION = '2.6.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -1547,8 +1547,7 @@ async function etapeRevue(ronde) {
   if (!s) return avancer(ronde);
   const k = total - open.filter(x => !vus.has(x.id)).length + 1;
   const d = revueDraft[s.id] || (revueDraft[s.id] = { comment: '', photos: [], ouvert: false });
-  const { photos } = await photosDe(s.photos || [], { rapide: true });
-  const th = photos.length ? null : await thumbOf(s);
+  const blocPhotos = await photoBlocks(s.photos || [], { rapide: true, grande: true, vignette: await thumbOf(s) });
   const thumbs = h('div', { class: 'thumbs' });
   const drawThumbs = () => thumbs.replaceChildren(...d.photos.map((p, i) =>
     h('div', { class: 't' }, h('img', { src: p.thumb, alt: '' }), h('button', { onclick: () => { d.photos.splice(i, 1); drawThumbs(); } }, '×'))));
@@ -1578,7 +1577,7 @@ async function etapeRevue(ronde) {
       h('p', { class: 'muted small' }, `${s.ref} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
       s.desc ? h('p', null, s.desc) : null,
       s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('b', null, 'Plaque : '), s.plaque, ' '] : null, s.emplacement ? [h('b', null, 'Emplacement : '), s.emplacement] : null) : null,
-      photos.length ? galerie(photos, true) : th ? h('div', { class: 'gallery grande' }, h('img', { src: th, alt: 'Photo du signalement', onclick: () => lightbox([th], 0) })) : h('p', { class: 'muted small' }, 'Pas de photo.'),
+      blocPhotos.length ? blocPhotos : h('p', { class: 'muted small' }, 'Pas de photo.'),
       s.notesAgents ? h('div', { class: 'banner info' }, 'DPMS : ' + s.notesAgents) : null,
       bandeauDemande(s),
       (s.messages || []).length ? h('button', { class: 'sec', onclick: () => go('echanges', { id: s.id }) }, icoCourrier(await nonLus(s), !!s.demande), 'Échanges avec le DPMS') : null,
@@ -1643,39 +1642,53 @@ async function etapeControle(ronde, niveau) {
       h('button', { class: 'sec big', onclick: safe(async () => { ronde.reporte[niveau] = true; await avancer(ronde); }) }, 'Plus tard'));
   }
 
-  let i = ronde.pos[niveau];
-  if (i == null || i >= pts.length) i = prochainPoint(pts, etat, 0);
-  if (i < 0) {   // tous les points ont une réponse
+  // Liste déroulante des thèmes : l'agent ouvre le thème qu'il veut, dans l'ordre qu'il veut,
+  // et peut revenir sur un thème déjà vu pour signaler à la volée.
+  ronde.ouvert = ronde.ouvert || {};
+  const faits = pts.filter(etat).length, reste = pts.length - faits;
+  const suivantNonFait = depuis => { const k = prochainPoint(pts, c => c.id === depuis ? 'x' : etat(c), Math.max(0, pts.findIndex(c => c.id === depuis))); return k < 0 ? null : pts[k].id; };
+  if (ronde.ouvert[niveau] === undefined) ronde.ouvert[niveau] = reste ? pts[prochainPoint(pts, etat, 0)].id : null;
+  const ouvert = ronde.ouvert[niveau];
+  const ouvrir = async (id, defiler = true) => { const r = await kvGet('ronde'); r.ouvert = r.ouvert || {}; r.ouvert[niveau] = id; await kvSet('ronde', r); _defilerVers = defiler && id ? 'pt-' + id : null; go('ronde', {}, { noPush: true }); };
+  const repondre = (c, val) => safe(async () => { rep[c.id] = val; ronde.ouvert[niveau] = suivantNonFait(c.id); await kvSet('ronde', ronde); _defilerVers = ronde.ouvert[niveau] ? 'pt-' + ronde.ouvert[niveau] : 'fin-controle'; go('ronde', {}, { noPush: true }); });
+  const signaler = c => safe(async () => { ronde.ouvert[niveau] = suivantNonFait(c.id); await kvSet('ronde', ronde); _defilerVers = 'pt-' + c.id; go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }); });
+  const carte = c => {
+    const v = etat(c), nc = ncDe(sigsRonde, c.id), ouv = ouvert === c.id;
+    const cls = v === 'NC' ? 'nc' : v === 'C' ? 'c' : v === 'NA' ? 'na' : 'afaire';
+    const badge = v === 'NC' ? `Non conforme${nc.length > 1 ? ` (${nc.length})` : ''}` : v === 'C' ? 'Conforme' : v === 'NA' ? 'N’existe pas ici' : 'À vérifier';
+    return h('div', { class: `theme ${cls}${ouv ? ' ouvert' : ''}`, id: 'pt-' + c.id },
+      h('button', { class: 'theme-tete', onclick: () => ouvrir(ouv ? null : c.id, !ouv) },
+        h('span', { class: 'theme-pastille' }, v === 'NC' ? '!' : v === 'C' ? '✓' : v === 'NA' ? '–' : ''),
+        h('span', { class: 'theme-lbl' }, c.lbl),
+        h('span', { class: 'theme-badge' }, badge),
+        h('span', { class: 'theme-chevron' }, ouv ? '▲' : '▼')),
+      ouv ? h('div', { class: 'theme-corps' },
+        c.detail ? h('p', { class: 'point-detail' }, c.detail) : null,
+        nc.length ? h('div', { class: 'banner bad' }, `${nc.length} signalement${nc.length > 1 ? 's' : ''} : ${nc.map(x => x.sub || x.cat).join(', ')}`) : null,
+        nc.length ? null : h('button', { class: 'ok big' + (v === 'C' ? ' choisi' : ''), onclick: repondre(c, 'C') }, v === 'C' ? '✓ Conforme' : 'Conforme'),
+        h('button', { class: 'danger big', onclick: signaler(c) }, nc.length ? 'Signaler un autre problème ici' : 'Non conforme : signaler'),
+        c.opt && !nc.length ? h('button', { class: 'link', onclick: safe(async () => {
+          if (!(await demander({ titre: 'Équipement absent ?', texte: `« ${c.lbl} » n’existe pas dans ce parking. Ce point ne sera plus proposé ici.`, oui: 'Oui, il n’existe pas ici', non: 'Non' }))) return;
+          await repondre(c, 'NA')();
+        }) }, 'N’existe pas dans ce parking') : null) : null);
+  };
+  const valider = safe(async () => {
+    if (reste) { const id = pts[prochainPoint(pts, etat, 0)].id; toast(`Encore ${reste} thème${reste > 1 ? 's' : ''} à vérifier.`, true); return ouvrir(id); }
     if (periodique) { showBusy('Enregistrement…'); await emettreControle(ronde, niveau, pts, sigsRonde); await fold(); hideBusy(); toast(`${NIVEAUX[niveau].lbl} enregistré.`); }
-    delete ronde.pos[niveau];
+    delete ronde.ouvert[niveau];
     return avancer(ronde);
-  }
-  const c = pts[i], v = etat(c), nc = ncDe(sigsRonde, c.id);
-  const suivant = async () => { const r = await kvGet('ronde'); r.pos = r.pos || {}; r.pos[niveau] = prochainPoint(pts, etat, i + 1); if (r.pos[niveau] < 0) r.pos[niveau] = pts.length; await kvSet('ronde', r); go('ronde', {}, { noPush: true }); };
-  const repondre = val => safe(async () => { rep[c.id] = val; ronde.pos[niveau] = i; await kvSet('ronde', ronde); await suivant(); });
-  const faits = pts.filter(etat).length;
+  });
+  if (_defilerVers) { const cible = _defilerVers; _defilerVers = null; setTimeout(() => { const el = document.getElementById(cible); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 60); }
   return pageRonde(ronde,
-    h('p', { class: 'compte-etape' }, `Point ${i + 1} sur ${pts.length}`, h('span', { class: 'muted small' }, ` · ${faits} contrôlé${faits > 1 ? 's' : ''}`)),
-    h('div', { class: 'card point' + (v === 'NC' ? ' nc' : v === 'C' ? ' c' : '') },
-      h('h2', null, c.lbl),
-      c.detail ? h('p', { class: 'point-detail' }, c.detail) : null,
-      v === 'C' ? h('span', { class: 'badge b-ok' }, 'conforme') : v === 'NA' ? h('span', { class: 'badge b-info' }, 'n’existe pas ici') : null,
-      nc.length ? h('div', { class: 'banner bad' }, `Non conforme : ${nc.length} signalement${nc.length > 1 ? 's' : ''} enregistré${nc.length > 1 ? 's' : ''} (${nc.map(x => x.sub || x.cat).join(', ')}).`) : null),
-    nc.length ? [
-      h('button', { class: 'ok big', onclick: safe(suivant) }, 'Point suivant'),
-      h('button', { class: 'sec', onclick: () => go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }) }, 'Signaler une autre non-conformité ici')
-    ] : [
-      h('button', { class: 'ok big', onclick: repondre('C') }, 'Conforme'),
-      h('button', { class: 'danger big', onclick: () => go('signalement', { from: 'ronde', cat: catPour(c), ctl: { id: c.id, niveau, lbl: c.lbl } }) }, 'Non conforme'),
-      c.opt ? h('button', { class: 'link', onclick: safe(async () => {
-        if (!(await demander({ titre: 'Équipement absent ?', texte: `« ${c.lbl} » n’existe pas dans ce parking. Ce point ne sera plus proposé ici.`, oui: 'Oui, il n’existe pas ici', non: 'Non' }))) return;
-        await repondre('NA')();
-      }) }, 'N’existe pas dans ce parking') : null],
-    h('div', { class: 'row nav-points' },
-      i > 0 ? h('button', { class: 'link', onclick: safe(async () => { ronde.pos[niveau] = i - 1; await kvSet('ronde', ronde); go('ronde', {}, { noPush: true }); }) }, '◀ Point précédent') : h('span'),
-      periodique ? h('button', { class: 'link', onclick: safe(async () => { ronde.lance[niveau] = false; ronde.reporte[niveau] = true; await avancer(ronde); }) }, 'Finir plus tard') : h('span')));
+    h('p', { class: 'compte-etape' }, `${faits} sur ${pts.length} vérifié${faits > 1 ? 's' : ''}`, reste ? h('span', { class: 'muted small' }, ` · reste ${reste}`) : h('span', { class: 'muted small' }, ' · tout est vérifié')),
+    h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'Touchez un thème pour l’ouvrir. Vous pouvez y revenir à tout moment pour signaler un problème.'),
+    h('div', { class: 'themes' }, ...pts.map(carte)),
+    h('button', { class: (reste ? 'sec' : 'ok') + ' big', id: 'fin-controle', style: 'margin-top:14px', onclick: valider },
+      reste ? `Encore ${reste} thème${reste > 1 ? 's' : ''} à vérifier` : (periodique ? `Valider le ${NIVEAUX[niveau].lbl.toLowerCase()}` : 'Contrôle terminé : étape suivante')),
+    h('button', { class: 'sec', onclick: () => go('signalement', { from: 'ronde' }) }, '+ Autre signalement (hors liste)'),
+    periodique ? h('button', { class: 'link', onclick: safe(async () => { ronde.lance[niveau] = false; ronde.reporte[niveau] = true; await avancer(ronde); }) }, 'Finir plus tard') : null);
 }
-
+let _defilerVers = null;
 async function etapeFin(ronde) {
   const st = await etatControles();
   const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
@@ -1686,7 +1699,7 @@ async function etapeFin(ronde) {
   const libres = sigsRonde.filter(s => !s.controle);
   const periodiques = ['mensuel', 'trimestriel'].filter(n => ronde.etapes.some(e => e.id === n));
   const ligne = (t, v, btn) => h('div', { class: 'stat' }, h('span', null, t), h('span', { style: 'display:flex;gap:8px;align-items:center' }, h('b', null, v), btn || null));
-  const revenir = vers => h('button', { class: 'link mini', style: 'width:auto;margin:0;min-height:36px', onclick: safe(async () => { if (vers === 'comptage') ronde.compteValide = false; else { ronde.lance[vers] = true; ronde.reporte[vers] = false; } await avancer(ronde, vers); }) }, vers === 'comptage' ? 'modifier' : 'reprendre');
+  const revenir = vers => h('button', { class: 'link mini', style: 'width:auto;margin:0;min-height:36px', onclick: safe(async () => { if (vers === 'comptage') ronde.compteValide = false; else if (vers !== 'quotidien') { ronde.lance[vers] = true; ronde.reporte[vers] = false; } await avancer(ronde, vers); }) }, vers === 'comptage' ? 'modifier' : vers === 'quotidien' ? 'revoir' : 'reprendre');
   return pageRonde(ronde,
     h('p', { class: 'question' }, 'Autre chose à signaler dans ce parking ?'),
     h('div', { class: 'row' },
@@ -1694,13 +1707,13 @@ async function etapeFin(ronde) {
       h('button', { class: 'sec big', onclick: () => go('barriere', { site: ronde.site, from: 'ronde' }) }, 'Barrière ouverte')),
     h('div', { class: 'card' }, h('h2', null, 'Récapitulatif'),
       ligne('Véhicules comptés', ronde.compteValide ? String(ronde.compte) : 'non validé', revenir('comptage')),
-      ligne('Contrôle quotidien', resteQ ? `${resteQ} point(s) restant(s)` : `${cQ} conforme(s), ${ncQ} non conforme(s)`, resteQ ? revenir('quotidien') : null),
+      ligne('Contrôle quotidien', resteQ ? `${resteQ} thème(s) restant(s)` : `${cQ} conforme(s), ${ncQ} non conforme(s)`, revenir('quotidien')),
       ...periodiques.map(n => ligne(NIVEAUX[n].lbl, (ronde.ctlEmis || {})[n] ? 'fait' : 'reporté', (ronde.ctlEmis || {})[n] ? null : revenir(n))),
       ligne('Autres signalements', String(libres.length)),
       libres.length ? h('p', { class: 'muted small' }, libres.map(s => sigTitre(s)).join(' · ')) : null),
     h('button', { class: 'ok big', onclick: safe(async () => {
       if (!ronde.compteValide) return avancer(ronde, 'comptage');
-      if (resteQ) { ronde.pos.quotidien = null; return avancer(ronde, 'quotidien'); }
+      if (resteQ) { toast(`Contrôle quotidien : encore ${resteQ} thème(s) à vérifier.`, true); return avancer(ronde, 'quotidien'); }
       await finishRonde(ronde);
     }) }, 'Terminer la ronde'));
 }
@@ -2808,15 +2821,14 @@ VIEWS.suiviSig = async ({ id, mode }) => {
   const menu = () => go('suiviSig', { id }, { noPush: true });
   const ouvrir = m => go('suiviSig', { id, mode: m });
   const resume = async (grande) => {
-    const { photos } = await photosDe(s.photos || [], { rapide: true });
-    const th = photos.length ? null : await thumbOf(s);
+    const blocPhotos = grande ? await photoBlocks(s.photos || [], { rapide: true, grande: true, vignette: await thumbOf(s) }) : [];
     const der = (s.actions || []).filter(a => a.type !== 'note').slice(-1)[0];
     return h('div', { class: 'card' },
       h('h3', null, sigTitre(s), ' ', suiviBadge(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'Urgent') : null),
       h('p', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — signalé le ${fmtJour(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
       s.desc ? h('p', null, s.desc) : null,
       s.plaque || s.emplacement ? h('p', null, s.plaque ? [h('span', { class: 'plaque' }, s.plaque), ' '] : null, s.emplacement || '') : null,
-      grande ? (photos.length ? galerie(photos, true) : th ? h('div', { class: 'gallery grande' }, h('img', { src: th, alt: '', onclick: () => lightbox([th], 0) })) : null) : null,
+      blocPhotos,
       h('p', { class: 'small' }, h('b', null, 'À signaler à : '), (s.dests || []).join(', ')),
       der ? h('p', { class: 'small' }, h('b', null, 'Dernière action : '), `${ACTIONS[der.type]}${der.dest ? ' — ' + der.dest : ''}, ${fmtQuand(der.quand || der.jour)}${der.par ? ' (' + der.par + ')' : ''}`) : null,
       pmBanner(s));
@@ -3471,7 +3483,14 @@ function geoLink(geo) {
 }
 const aGeo = g => g && !g.err && g.lat != null;
 /* Photos : téléchargées à la demande depuis le relais, vérifiées, conservées sur l'appareil */
-async function fetchMedia(n, delai = 180000) {
+const _mediaEnCours = new Map();   // un seul téléchargement par lot, même si plusieurs écrans le demandent
+function fetchMedia(n, delai = 180000) {
+  if (_mediaEnCours.has(n)) return _mediaEnCours.get(n);
+  const p = fetchMedia_(n, delai).finally(() => _mediaEnCours.delete(n));
+  _mediaEnCours.set(n, p);
+  return p;
+}
+async function fetchMedia_(n, delai) {
   let r;
   try { r = await rel('media', { n }, delai); }
   catch (e) { if (/interdit/.test(e.message)) throw new Error('le relais doit être mis à jour (version 3) pour afficher les photos sur cet appareil'); throw e; }
@@ -3481,9 +3500,26 @@ async function fetchMedia(n, delai = 180000) {
   await dbPutMany('photos', out);
   return out;
 }
-async function photoBlocks(list) {
-  const { photos, erreurs } = await photosDe(list);
-  return [galerie(photos), erreurs.length ? h('p', { class: 'muted small' }, 'Photos indisponibles : ' + erreurs[0]) : null];
+/* Photos sans bloquer l'affichage : déjà sur l'appareil → affichées tout de suite ;
+   sinon la fiche s'affiche immédiatement (vignette si connue) et les photos arrivent ensuite */
+async function photosEnCache(list) { for (const p of list || []) if (!(await dbGet('photos', p.id))) return false; return true; }
+function photosDiffere(list, opts = {}) {
+  const attente = opts.vignette
+    ? h('div', { class: 'gallery' + (opts.grande ? ' grande' : '') }, h('img', { src: opts.vignette, alt: 'Photo du signalement', onclick: () => lightbox([opts.vignette], 0) }))
+    : null;
+  const box = h('div', { class: 'photos-diff' }, attente, h('p', { class: 'muted small' }, 'Chargement des photos…'));
+  photosDe(list, opts).then(({ photos, erreurs }) => {
+    box.replaceChildren(...[photos.length ? galerie(photos, opts.grande) : attente, erreurs.length ? h('p', { class: 'muted small' }, 'Photos indisponibles : ' + erreurs[0]) : null].filter(Boolean));
+  }).catch(e => box.replaceChildren(...[attente, h('p', { class: 'muted small' }, 'Photos indisponibles : ' + e.message)].filter(Boolean)));
+  return box;
+}
+async function photoBlocks(list, opts = {}) {
+  if (!(list || []).length) return opts.vignette ? [h('div', { class: 'gallery' + (opts.grande ? ' grande' : '') }, h('img', { src: opts.vignette, alt: 'Photo du signalement', onclick: () => lightbox([opts.vignette], 0) }))] : [];
+  if (await photosEnCache(list)) {
+    const { photos, erreurs } = await photosDe(list);
+    return [galerie(photos, opts.grande), erreurs.length ? h('p', { class: 'muted small' }, 'Photos indisponibles : ' + erreurs[0]) : null];
+  }
+  return [photosDiffere(list, opts)];
 }
 async function supDecision(s, action, patch) {
   await queueDec('d', { type: 'sig', id: uuid(), ts: new Date().toISOString(), par: 'DPMS', action, sig: s.id, patch });
@@ -3522,7 +3558,7 @@ async function supSigDetail(s, recharger) {
         s.statut === 'clos' ? [h('dt', null, 'Clos'), h('dd', null, `${s.closLe && s.closLe.length > 10 ? fmtDT(s.closLe) : fmtJour(s.closLe)}${s.closPar ? ' par ' + s.closPar : ''}`)] : null,
         s.notesAgents ? [h('dt', null, 'Message aux agents'), h('dd', null, s.notesAgents)] : null),
       s.desc ? h('p', null, s.desc) : null,
-      ...(await photoBlocks(s.photos))),
+      ...(await photoBlocks(s.photos, { vignette: await thumbOf(s) }))),
     await carteEchangesSup(s, recharger),
     h('div', { class: 'card' }, h('h2', null, 'Traitement'), ...journalActions(s)),
     s.pm && s.pm.hist.length ? h('div', { class: 'card' }, h('h2', null, 'Police municipale'),
