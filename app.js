@@ -1493,7 +1493,7 @@ VIEWS.plus = async () => {
     h('button', { class: 'tuile principal', onclick: () => go('suivi') }, h('span', { class: 'tuile-ico', html: ICO.alerte }),
       h('span', null, 'Traitement des signalements', h('br'), h('small', { style: 'font-weight:500' }, enCours.length ? `${aTransmettre} à transmettre · ${enCours.length} en cours` : 'aucun en cours'))),
     h('button', { class: 'sec', onclick: () => go('messagesAgents') }, 'Échanges avec le DPMS'),
-    h('button', { class: 'sec', onclick: () => go('mainCourante', {}) }, `Main courante (contacts usagers)${nbMC ? ` — ${nbMC} à traiter` : ''}`),
+    h('button', { class: 'sec', onclick: () => go('mainCourante', {}) }, `Suivi des usagers et demandes${nbMC ? ` — ${nbMC} à traiter` : ''}`),
     await carteControlesAFaire(),
     h('div', { class: 'card' }, h('h2', null, 'Signalements en cours par parking'),
       ...cfg.sites.map(s => h('div', { class: 'stat' }, h('span', null, s.nom), h('b', null, enCours.filter(x => x.site === s.id).length)))),
@@ -2326,9 +2326,9 @@ VIEWS.contact = async () => {
     ...corps.flat().filter(Boolean),
     k > 0 ? h('button', { class: 'link', onclick: back }, '◀ Étape précédente') : null);
 };
-VIEWS.contactOk = async ({ ref, id, ouvert }) => page('Main courante', null,
-  h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Enregistré dans la main courante'), h('p', null, `Référence ${ref}`),
-    ouvert ? h('p', { class: 'muted' }, 'Demande à traiter : la réponse apportée à la personne sera enregistrée depuis « Main courante ».') : null),
+VIEWS.contactOk = async ({ ref, id, ouvert }) => page('Usagers et demandes', null,
+  h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Demande enregistrée'), h('p', null, `Référence ${ref}`),
+    ouvert ? h('p', { class: 'muted' }, 'Demande à traiter : la réponse apportée à la personne s’enregistre depuis « Plus » → « Suivi des usagers et demandes ».') : null),
   h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'),
   h('button', { class: 'sec', onclick: () => go('contactFiche', { id }) }, 'Voir la fiche'));
 
@@ -2339,7 +2339,8 @@ VIEWS.mainCourante = async ({ f } = {}) => {
   const auj = localDate(), il7 = Date.now() - 7 * 86400000;
   const filtres = { atraiter: c => c.statut === 'ouvert', jour: c => localDate(new Date(c.quand)) === auj, semaine: c => new Date(c.quand).getTime() >= il7, tout: () => true };
   const liste = tous.filter(filtres[f]).sort((a, b) => f === 'atraiter' ? a.quand.localeCompare(b.quand) : b.quand.localeCompare(a.quand));
-  return page('Main courante', { back: true },
+  return page('Suivi des usagers et demandes', { back: true },
+    h('p', { class: 'muted small', style: 'margin:0 0 10px' }, 'Les demandes déjà enregistrées. Pour en noter une nouvelle : bouton ci-dessous, ou « Usager ou demande reçue » sur l’accueil.'),
     h('button', { class: 'ok big', onclick: () => { mcDraft = null; go('contact'); } }, 'Nouvelle entrée'),
     chips([{ val: 'atraiter', lbl: `À traiter (${tous.filter(filtres.atraiter).length})` }, { val: 'jour', lbl: 'Aujourd’hui' }, { val: 'semaine', lbl: '7 jours' }, { val: 'tout', lbl: 'Tout' }], f, v => go('mainCourante', { f: v }, { noPush: true })),
     liste.length ? liste.map(c => h('button', { class: 'list-item', onclick: () => go('contactFiche', { id: c.id }) },
@@ -2421,7 +2422,7 @@ VIEWS.contactFiche = async ({ id, mode }) => {
 async function carteMainCourante() {
   const l = await mainCourante(), auj = localDate();
   const ouverts = l.filter(c => c.statut === 'ouvert');
-  return h('div', { class: 'card' }, h('h2', null, 'Main courante'),
+  return h('div', { class: 'card' }, h('h2', null, 'Usagers et demandes (main courante)'),
     h('button', { class: 'list-item', onclick: () => go('mainCourante', { f: 'atraiter' }) }, h('div', { class: 'stat' }, h('span', null, 'Demandes à traiter', ouverts.some(c => joursDepuis(c.quand) >= 2) ? h('span', { class: 'badge b-bad' }, 'en attente') : null), h('b', null, ouverts.length))),
     h('button', { class: 'list-item', onclick: () => go('mainCourante', { f: 'jour' }) }, h('div', { class: 'stat' }, h('span', null, 'Contacts aujourd’hui'), h('b', null, l.filter(c => localDate(new Date(c.quand)) === auj).length))),
     h('div', { class: 'row' }, h('button', { class: 'sec', onclick: () => { mcDraft = null; go('contact'); } }, 'Nouvelle entrée'), h('button', { class: 'sec', onclick: () => go('mainCourante', {}) }, 'Toute la main courante')));

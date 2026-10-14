@@ -58,7 +58,7 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 ## 5. Utilisation
 
 ### Accueil des agents
-Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **Barrière ouverte**, **Usager ou demande reçue** ; au-dessus, **Messages du DPMS** quand il y en a ; en bas, **Urgence : appeler le DPMS** et **Plus** (traitement des signalements, échanges, main courante, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
+Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **Barrière ouverte**, **Usager ou demande reçue** ; au-dessus, **Messages du DPMS** quand il y en a ; en bas, **Urgence : appeler le DPMS** et **Plus** (traitement des signalements, échanges, suivi des usagers et demandes, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
 
 ### Ronde (agents) : un parcours guidé
 **Commencer ma ronde** → parking → agent, puis les étapes s'enchaînent (« Étape 3 sur 6 », barre de progression) :
