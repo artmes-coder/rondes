@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.6.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.7.0.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -107,6 +107,7 @@ Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, e
 
 ### Superviseur
 - **Signalements** : sur PC, liste et fiche côte à côte ; filtres par statut, parking, catégorie, recherche (plaque, référence, texte) ; photos en galerie, agrandies d'un clic (flèches du clavier, Échap) ; traitement, constats, suivi PM ; interventions facultatives (clore, rouvrir, modifier, écrire aux agents, notes internes).
+- **Clôturer une ronde oubliée** : bouton **Clôturer la ronde** sur toute ronde sans fin (carte « Rondes du jour » au-delà d'1 h, liste **Toutes les rondes**). Le téléphone qui porte la ronde l'arrête à sa prochaine connexion, envoie le contrôle quotidien déjà fait (marqué « partiel », il ne compte pas comme contrôle du jour) et affiche « Ronde clôturée par le DPMS ». Si l'agent avait terminé sa ronde hors réseau, sa propre fin de ronde prime. La ronde est marquée « clôturée par le DPMS » ; sa durée n'entre pas dans les moyennes.
 - **Rondes du jour** (haut de l'accueil) : une ronde attendue par jour et par parking ; heure de la ronde pour chaque parking, « Aucune ronde ce matin à … » passée l'heure limite, rondes ouvertes depuis plus d'1 h. Heure limite et jours concernés : **Listes, catégories et coordonnées**. Une ronde annulée ne compte pas.
 - **Synthèse hebdomadaire (PDF)** (Exports, ou touchez la notification du lundi) : semaine dernière ou en cours ; rondes par parking (nombre, durée et véhicules moyens, rondes non terminées, jours sans ronde), contrôles (quotidiens, mensuel, trimestriel, registres, points non conformes), signalements (nouveaux par catégorie, urgents ouverts, en cours par état, ouverts depuis plus de 30 jours, demandes d'action sans réponse), main courante (entrées, délai moyen de réponse, demandes en attente), barrières (ouvertures, durée cumulée, encore ouvertes). Jour et heure de l'annonce réglables. Le PDF est fabriqué sur l'appareil du superviseur : le relais ne peut pas lire les données, il ne l'envoie donc pas par courriel.
 - **Statistiques et graphiques** :

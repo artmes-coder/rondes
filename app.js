@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.6.1';
+const APP_VERSION = '2.7.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -814,6 +814,7 @@ async function fold() {
   const evSupprime = ev => (ev.t === 'signalement' && del.sigs.has(ev.data.id)) || (['revue', 'action', 'pm', 'msg'].includes(ev.t) && del.sigs.has(ev.data.sig)) || (ev.rid && del.rids.has(ev.rid) && ev.t !== 'signalement' && ev.t !== 'revue');
 
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [], regs = [], mcs = new Map();
+  const rondesCloses = new Map();   // rid → décision du DPMS « ronde clôturée »
   let cfg = null, vapid = null;
   const alertes = [];
   // Précédence causale : une saisie d'agent ne change le statut (clos / ouvert) que si l'appareil
@@ -883,9 +884,9 @@ async function fold() {
       } else if (ev.t === 'controle') {
         const c = ctl[ev.site] = ctl[ev.site] || { na: new Set() };
         const quand = ev.data.quand || ev.jour + 'T12:00:00';
-        if (!c[ev.data.niveau] || c[ev.data.niveau].at <= quand) c[ev.data.niveau] = { at: quand, agent: ev.agent, rid: ev.rid || null };
+        if (!ev.data.partiel && (!c[ev.data.niveau] || c[ev.data.niveau].at <= quand)) c[ev.data.niveau] = { at: quand, agent: ev.agent, rid: ev.rid || null };
         Object.entries(ev.data.items || {}).forEach(([k, v]) => { if (v === 'NA' && !(ev.vu != null && c.retabli && (c.retabli[k] || 0) > ev.vu)) c.na.add(k); });
-        ctlHist.push({ site: ev.site, niveau: ev.data.niveau, at: quand, ts, agent: ev.agent, items: ev.data.items, libelles: ev.data.libelles, rid: ev.rid });
+        ctlHist.push({ site: ev.site, niveau: ev.data.niveau, at: quand, ts, agent: ev.agent, items: ev.data.items, libelles: ev.data.libelles, rid: ev.rid, partiel: !!ev.data.partiel });
       } else if (ev.t === 'barriere') {
         const d = ev.data;
         const b = barr.get(d.bid) || { bid: d.bid, site: ev.site, barriere: d.barriere, ouverte: null, fermee: null };
@@ -898,7 +899,7 @@ async function fold() {
         const r = rondes.get(ev.rid) || { rid: ev.rid, site: ev.site, agent: ev.agent, dev: ev.dev, jour: ev.jour, nbSig: 0, nbRevue: 0, compte: null, alertes: [] };
         if (ev.t === 'ronde_debut') { r.debut = ts; r.qr = ev.data.qr; r.geoDebut = dec && dec.geo; }
         if (ev.t === 'ronde_agent') { r.agent = ev.data.nouveau; (r.changements = r.changements || []).push(`${ev.data.ancien} → ${ev.data.nouveau}`); }
-        if (ev.t === 'ronde_fin') { r.fin = ts; if (r.compte == null && ev.data.compte != null) r.compte = ev.data.compte; }
+        if (ev.t === 'ronde_fin') { r.fin = ts; r.closDPMS = false; if (r.compte == null && ev.data.compte != null) r.compte = ev.data.compte; }
         if (ev.t === 'checklist') r.checklist = ev.data.items;
         if (ev.t === 'comptage') r.compte = ev.data.total;
         if (ev.t === 'controle') { r.controles = r.controles || []; r.controles.push({ niveau: ev.data.niveau, nc: resumeControle(ev.data.items, ev.data.libelles).nc }); }
@@ -919,6 +920,11 @@ async function fold() {
       else if (d.type === 'vapid') { if (!vapid && d.pub && d.priv) vapid = { pub: d.pub, priv: d.priv }; }
       else if (d.type === 'contact') { mcAjout(mcs, d.contact, d.par || 'DPMS'); const c = mcs.get(d.contact && d.contact.id); if (c && c.statutN == null) marquer(c, e, 'dpms'); }
       else if (d.type === 'contact_suivi') mcSuivi(mcs, d.suivi, d.par || 'DPMS', { connu: () => true, marquer: x => marquer(x, e, 'dpms') });
+      else if (d.type === 'ronde_close' && d.rid) {
+        if (!rondesCloses.has(d.rid)) rondesCloses.set(d.rid, d);
+        const r = sup && rondes.get(d.rid);
+        if (r && !r.fin) { r.fin = d.fin || d.ts; r.closDPMS = true; }   // une fin déjà reçue de l'agent prime
+      }
       else if (d.type === 'registre') regs.push({ site: d.site, at: d.ts, note: d.note || '', par: d.par || 'DPMS' });
       else if (d.type === 'ctl_reactiver') { const c = ctl[d.site] = ctl[d.site] || { na: new Set() }; c.na.delete(d.item); (c.retabli = c.retabli || {})[d.item] = nDe(e); }
       else if (d.type === 'sig') {
@@ -955,6 +961,7 @@ async function fold() {
         prev = e;
       }
     }
+    for (const r of rondes.values()) if (r.closDPMS) r.alertes.push('clôturée par le DPMS (fin de ronde non faite par l’agent)');
     for (const r of rondes.values()) if (r.debut && !r.fin && Date.now() - new Date(r.debut).getTime() > 6 * 3600000) r.alertes.push('fin de ronde non reçue');
     await dbReplaceAll('rondes', [...rondes.values()]);
     await kvSet('alertes', alertes.sort((a, b) => (b.at || '').localeCompare(a.at || '')));
@@ -969,6 +976,7 @@ async function fold() {
   await dbReplaceAll('sigs', [...sigs.values()]);
   for (const x of sigs.values()) if (x.mc && mcs.has(x.mc)) mcs.get(x.mc).sigs.push(x.id);
   await kvSet('mainCourante', [...mcs.values()].sort((a, b) => b.quand.localeCompare(a.quand)));
+  await kvSet('rondesCloses', [...rondesCloses.keys()]);
   if (vapid) await kvSet('vapid', vapid);
   await kvSet('barrieres', [...barr.values()]);
   await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
@@ -1059,6 +1067,28 @@ async function prefsNotif() {
   if (nouveaux.length) { p.push(...nouveaux); await kvSet('notifPrefs', p); await kvSet('notifConnus', tous); }
   return p;
 }
+/* Ronde clôturée par le DPMS (agent qui a oublié de terminer) : le téléphone qui la porte l'arrête,
+   envoie ce qui a été contrôlé (contrôle quotidien partiel), sans fin de ronde de l'agent. */
+async function appliquerClotureDPMS() {
+  const ronde = await kvGet('ronde');
+  if (!ronde || !((await kvGet('rondesCloses')) || []).includes(ronde.rid)) return;
+  const st = await etatControles();
+  const sigsRonde = (await dbAll('sigs')).filter(s => ronde.sigsCrees.includes(s.id));
+  const pts = pointsSite(st, ronde.site, 'quotidien');
+  const rep = (ronde.ctl || {}).quotidien || {};
+  if (pts.some(c => rep[c.id] || ncDe(sigsRonde, c.id).length)) {
+    const items = {}; pts.forEach(c => { items[c.id] = ncDe(sigsRonde, c.id).length ? 'NC' : (rep[c.id] || 'NF'); });
+    await appendEvent('controle', ronde, { niveau: 'quotidien', items, libelles: Object.fromEntries(pts.map(c => [c.id, c.lbl])), quand: new Date().toISOString(), partiel: true });
+  }
+  await kvDel('ronde');
+  Object.keys(revueDraft).forEach(k => delete revueDraft[k]);
+  Geo.stop();
+  await kvSet('rondeCloseDPMS', { site: ronde.site, agent: ronde.agent, debut: ronde.debut, at: new Date().toISOString() });
+  await fold();
+  if (['ronde', 'revue', 'controle'].includes(state.view) || (state.view === 'signalement' && state.params && state.params.from === 'ronde')) { sigDraft = null; go('home'); }
+  else if (state.view === 'home') render();
+  setTimeout(() => syncNow(), 500);
+}
 /* Alertes tenues par le relais : « une ronde a commencé ici aujourd'hui » et « ronde pas finie au bout d'1 h » */
 async function opsPourRelais(batch) {
   const ops = [];
@@ -1142,6 +1172,7 @@ async function agentSync() {
   }
   const got = await pullAll(['p', 'd']);
   if (sent || got) await fold();
+  await appliquerClotureDPMS();
   for (const ev of envoyes) { const n = await notifPourSup(ev); if (n) _notifSup.push(n); }
   if (_notifSup.length) { const l = _notifSup; _notifSup = []; notifier('sup', l); }
   traiterOpsRelais();
@@ -1368,7 +1399,12 @@ async function agentHome() {
   const ronde = await kvGet('ronde');
   const ouvertes = await barrieresOuvertes();
   const cfg = state.cfg;
+  const closeDPMS = await kvGet('rondeCloseDPMS');
   return page('Rondes parkings', null,
+    closeDPMS ? h('div', { class: 'card', style: 'border:2px solid var(--warn);background:var(--warn-bg)' },
+      h('b', null, `Ronde clôturée par le DPMS`),
+      h('p', { style: 'margin:4px 0' }, `${siteNom(closeDPMS.site)} — ${closeDPMS.agent}, commencée à ${fmtHeure(closeDPMS.debut)}. Elle n’avait pas été terminée. Les contrôles déjà faits ont été envoyés.`),
+      h('button', { class: 'sec', onclick: safe(async () => { await kvDel('rondeCloseDPMS'); render(); }) }, 'J’ai compris')) : null,
     await carteMessagesAccueil(),
     ronde ? h('div', { class: 'card encours' },
       h('div', { class: 'small' }, 'Ronde en cours'),
@@ -1441,6 +1477,7 @@ VIEWS.choixAgent = async ({ site }) => page(`Ronde : ${siteNom(site)}`, { back: 
   ...state.cfg.agents.map(a => h('button', { class: 'big sec choix', onclick: safe(() => beginRonde(site, a)) }, a)));
 
 async function beginRonde(site, agent) {
+  await kvDel('rondeCloseDPMS');
   showBusy('Démarrage de la ronde…');
   Geo.start();
   if (navigator.onLine) await Promise.race([syncNow().catch(() => null), new Promise(r => setTimeout(r, 6000))]);   // clôtures et suppressions du DPMS
@@ -3325,7 +3362,8 @@ async function carteRondesJour() {
   return h('div', { class: 'card', style: alerte ? 'border-color:var(--bad)' : null },
     h('h2', null, 'Rondes du jour'),
     limite && manquants.length ? h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 6px' }, `Aucune ronde ce matin à ${manquants.map(x => x.nom).join(', ')}.`) : null,
-    ...longues.map(r => h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 6px' }, `Ronde de plus d’1 h — ${siteNom(r.site)} : ${r.agent}, commencée à ${fmtHeure(r.debut)}, toujours pas terminée.`)),
+    ...longues.map(r => h('div', { style: 'margin:0 0 8px' }, h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 4px' }, `Ronde de plus d’1 h — ${siteNom(r.site)} : ${r.agent}, commencée à ${fmtHeure(r.debut)}, toujours pas terminée.`),
+      h('button', { class: 'sec', style: 'width:auto;margin:0', onclick: safe(() => cloturerRonde(r)) }, 'Clôturer la ronde'))),
     ...lignes);
 }
 /* Registres de sécurité : contrôle mensuel par le DPMS (30 jours glissants) */
@@ -3394,16 +3432,26 @@ VIEWS.supControles = async () => {
       hist.length ? hist.slice(0, 150).map(x => {
         const r = resumeControle(x.items, x.libelles);
         return h('div', { class: 'stat', style: 'display:block' },
-          h('div', null, h('b', null, `${siteNom(x.site)} — ${NIVEAUX[x.niveau].lbl}`), ` — ${fmtDT(x.ts || x.at)} — ${x.agent}`),
+          h('div', null, h('b', null, `${siteNom(x.site)} — ${NIVEAUX[x.niveau].lbl}`), ` — ${fmtDT(x.ts || x.at)} — ${x.agent}`, x.partiel ? h('span', { class: 'badge b-warn' }, 'partiel : ronde clôturée par le DPMS') : null),
           h('div', { class: 'small' }, `${r.c} conforme(s)`, r.nc.length ? h('span', { style: 'color:var(--bad)' }, ` · non conforme : ${r.nc.join(', ')}`) : null,
             r.na.length ? ` · n’existe pas : ${r.na.join(', ')}` : '', r.nf.length ? ` · non faits : ${r.nf.join(', ')}` : ''));
       }) : h('p', { class: 'muted' }, 'Aucun contrôle enregistré.')));
 };
+async function cloturerRonde(r) {
+  const depuis = r.debut ? dureeTxt(Math.round((Date.now() - new Date(r.debut)) / 60000)) : '?';
+  if (!(await demander({ titre: 'Clôturer cette ronde ?', oui: 'Oui, clôturer', non: 'Non',
+    texte: `${siteNom(r.site)} — ${r.agent}, commencée le ${fmtDT(r.debut)} (il y a ${depuis}).\n\nÀ sa prochaine connexion, le téléphone qui porte la ronde l’arrête et envoie les contrôles déjà faits. Si l’agent termine sa ronde avant, c’est sa fin de ronde qui compte.` }))) return;
+  await queueDec('d', { type: 'ronde_close', id: uuid(), ts: new Date().toISOString(), rid: r.rid, par: 'DPMS' });
+  try { await rel('annulerDiffere', { id: await jeton('ronde', r.rid) }, 15000); } catch (e) { }   // plus d'alerte « ronde de plus d'1 h »
+  await fold(); syncNow();
+  toast('Ronde clôturée.'); render();
+}
 function rondeLigne(r) {
-  const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
+  const dur = r.debut && r.fin && !r.closDPMS ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
   const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => v === 'Anomalie' ? k : `${k} (${v.toLowerCase()})`) : [];
   return h('div', { class: 'stat', style: 'display:block' },
-    h('div', null, h('b', null, `${siteNom(r.site)} — ${r.agent}`), !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null),
+    h('div', null, h('b', null, `${siteNom(r.site)} — ${r.agent}`), !r.fin ? h('span', { class: 'badge b-warn' }, 'fin non reçue') : null, r.closDPMS ? h('span', { class: 'badge b-warn' }, 'clôturée par le DPMS') : null),
+    !r.fin && state.mode === 'superviseur' ? h('button', { class: 'sec', style: 'width:auto;margin:6px 0', onclick: safe(() => cloturerRonde(r)) }, 'Clôturer la ronde') : null,
     h('div', { class: 'muted small' }, `${fmtDT(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${dur != null ? ` (${dur} min)` : ''} — ${r.compte != null ? r.compte + ' véhicule(s), ' : ''}${r.nbSig} signalement(s), ${r.nbRevue} constat(s)`),
     anos.length ? h('div', { class: 'small' }, 'Anomalies : ' + anos.join(', ')) : null,
     (r.controles || []).length ? h('div', { class: 'small' }, (r.controles || []).map(c => `${NIVEAUX[c.niveau].lbl}${c.nc.length ? ' — non conforme : ' + c.nc.join(', ') : ' — conforme'}`).join(' ; ')) : null);
@@ -3912,7 +3960,7 @@ async function supExcel() {
   });
   const A2 = [['Parking', 'Agent', 'Début', 'Fin', 'Durée (min)', 'Véhicules comptés', 'Non-conformités', 'Signalements', 'Constats', 'Lat. départ', 'Lon. départ', 'Précision (m)', 'Points d’attention', 'Téléphone']];
   rondes.forEach(r => {
-    const dur = r.debut && r.fin ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : '';
+    const dur = r.debut && r.fin && !r.closDPMS ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : '';
     const anos = [...(r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => `${k} (${v})`) : []), ...(r.controles || []).flatMap(c => c.nc.map(x => `${x} (${NIVEAUX[c.niveau].lbl.toLowerCase()})`))].join(', ');
     A2.push([siteNom(r.site), r.agent, fmtDT(r.debut), fmtDT(r.fin), dur, r.compte != null ? r.compte : '', anos, r.nbSig, r.nbRevue, g(r.geoDebut, 'lat'), g(r.geoDebut, 'lon'), g(r.geoDebut, 'acc'), [...new Set(r.alertes || [])].join(' ; '), r.dev]);
   });
@@ -3948,7 +3996,7 @@ async function supExcel() {
       ...sigs.flatMap(s => (s.actions || []).map(a => [s.ref, siteNom(s.site), sigTitre(s), a.quand ? fmtDT(a.quand) : fmtJour(a.jour), ACTIONS[a.type], a.dest || '', a.texte || '', a.prevu ? fmtDT(a.prevu) : '', a.par || '']))],
       [11, 12, 40, 16, 26, 16, 50, 18, 12]],
     ['Contrôles', [['Date', 'Parking', 'Contrôle', 'Agent', 'Conformes', 'Non conformes', 'N’existe pas ici', 'Non faits', 'Observations'],
-      ...[...((await kvGet('controlesHist')) || []).map(x => { const r = resumeControle(x.items, x.libelles); return { at: x.ts || x.at, row: [fmtDT(x.ts || x.at), siteNom(x.site), NIVEAUX[x.niveau].lbl, x.agent, r.c, r.nc.join(', '), r.na.join(', '), r.nf.join(', '), ''] }; }),
+      ...[...((await kvGet('controlesHist')) || []).map(x => { const r = resumeControle(x.items, x.libelles); return { at: x.ts || x.at, row: [fmtDT(x.ts || x.at), siteNom(x.site), NIVEAUX[x.niveau].lbl, x.agent, r.c, r.nc.join(', '), r.na.join(', '), r.nf.join(', '), x.partiel ? 'Partiel : ronde clôturée par le DPMS' : ''] }; }),
         ...((await kvGet('registres')) || []).map(x => ({ at: x.at, row: [fmtDT(x.at), siteNom(x.site), 'Registre de sécurité', x.par, '', '', '', '', x.note] }))]
         .sort((a, b) => a.at.localeCompare(b.at)).map(x => x.row)],
       [16, 12, 20, 12, 10, 50, 30, 30, 40]],
@@ -3997,7 +4045,7 @@ async function donneesSynthese(p) {
   const joursAttendus = p.jours.filter(j => (rm.jours || [1, 2, 3, 4, 5, 6, 7]).includes(jourIso(j)) && j < finEff);
   const parSite = cfg.sites.map(x => {
     const rs = rondes.filter(r => r.site === x.id);
-    const durees = rs.filter(r => r.fin).map(r => Math.round((new Date(r.fin) - new Date(r.debut)) / 60000));
+    const durees = rs.filter(r => r.fin && !r.closDPMS).map(r => Math.round((new Date(r.fin) - new Date(r.debut)) / 60000));
     const comptes = rs.filter(r => r.compte != null).map(r => r.compte);
     const sans = rm.actif === false ? [] : joursAttendus.filter(j => !rs.some(r => localDate(new Date(r.debut)) === localDate(j)));
     const ctl = hist.filter(c => c.site === x.id);
@@ -4009,7 +4057,7 @@ async function donneesSynthese(p) {
       return t + Math.max(0, Math.round((z - a) / 60000));
     }, 0);
     return {
-      site: x, rondes: rs.length, nonTerminees: rs.filter(r => !r.fin).length, sans,
+      site: x, rondes: rs.length, nonTerminees: rs.filter(r => !r.fin || r.closDPMS).length, sans,
       dureeMoy: durees.length ? Math.round(durees.reduce((a, b) => a + b, 0) / durees.length) : null,
       vehMoy: comptes.length ? Math.round(comptes.reduce((a, b) => a + b, 0) / comptes.length) : null,
       ctlQuot: ctl.filter(c => c.niveau === 'quotidien').length,
