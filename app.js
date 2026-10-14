@@ -2433,6 +2433,26 @@ async function carteMainCourante() {
 /* import de sa réponse, publication. Agents : onglet Planning.           */
 /* ====================================================================== */
 const ABSENCES = { CA: 'Congés', MAL: 'Maladie', FOR: 'Formation', ABS: 'Absence' };
+/* Jours fériés (art. L3133-1 du code du travail) : 1er janvier, lundi de Pâques, 1er et 8 mai, Ascension,
+   lundi de Pentecôte, 14 juillet, 15 août, 1er et 11 novembre, 25 décembre. Parkings fermés ces jours-là
+   (règle « jours fériés travaillés : … » pour des exceptions). */
+function joursFeries(an) {
+  const a = an % 19, b = Math.floor(an / 100), c = an % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const hh = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - hh - k) % 7, m = Math.floor((a + 11 * hh + 22 * l) / 451);
+  const mois = Math.floor((hh + l - 7 * m + 114) / 31), jour = ((hh + l - 7 * m + 114) % 31) + 1;
+  const paques = localDate(new Date(an, mois - 1, jour));
+  const f2 = (mm, jj) => `${an}-${String(mm).padStart(2, '0')}-${String(jj).padStart(2, '0')}`;
+  return new Map([[f2(1, 1), 'Jour de l’an'], [ajJ(paques, 1), 'Lundi de Pâques'], [f2(5, 1), 'Fête du travail'], [f2(5, 8), 'Victoire 1945'],
+    [ajJ(paques, 39), 'Ascension'], [ajJ(paques, 50), 'Lundi de Pentecôte'], [f2(7, 14), 'Fête nationale'], [f2(8, 15), 'Assomption'],
+    [f2(11, 1), 'Toussaint'], [f2(11, 11), 'Armistice 1918'], [f2(12, 25), 'Noël']]);
+}
+function ferieFerme(iso) {   // nom du jour férié si les parkings sont fermés ce jour-là, sinon null
+  const nom = joursFeries(Number(iso.slice(0, 4))).get(iso);
+  if (!nom) return null;
+  const r = reglesPlanning();
+  if (r.feriesOuverts) return null;
+  return r.feriesTravailles.some(x => sansAccent(nom).includes(sansAccent(x)) || sansAccent(x).includes(sansAccent(nom))) ? null : nom;
+}
 const PLANNING_DEFAUT = {
   ancre: '2026-09-14',
   vacations: [{ code: 'MAT', lbl: 'Matin', debut: '08:00', fin: '15:00' }, { code: 'MID', lbl: 'Midi', debut: '10:30', fin: '17:30' }, { code: 'SOI', lbl: 'Soir', debut: '13:00', fin: '20:00' }],
@@ -2469,17 +2489,18 @@ const libelleCode = (code, pourAgents) => {
   const v = vacationsP().find(x => x.code === code);
   if (v) return `${v.lbl} ${v.debut.replace(':', 'h').replace('h00', 'h')}-${v.fin.replace(':', 'h').replace('h00', 'h')}`;
   if (code === 'R') return 'Repos';
+  if (code === 'F') return pourAgents ? 'Férié' : 'Férié (fermé)';
   if (ABSENCES[code]) return pourAgents ? 'Absent' : ABSENCES[code];
   return '';
 };
-const CODES_OK = () => new Set([...vacationsP().map(v => v.code), 'R', ...Object.keys(ABSENCES)]);
+const CODES_OK = () => new Set([...vacationsP().map(v => v.code), 'R', 'F', ...Object.keys(ABSENCES)]);
 function trouverNom(token, noms) {
   const t = sansAccent(token).replace(/\s+/g, ' ');
   if (!t) return null;
   return noms.find(n => sansAccent(n) === t) || noms.find(n => sansAccent(n).startsWith(t) || t.startsWith(sansAccent(n).split(' ')[0]) && sansAccent(n).split(' ')[0].length >= 3) || null;
 }
 function reglesPlanning() {
-  const r = { couverture: [480, 1200], heures: 70, incompatibles: [], interdits: [], internes: [] };
+  const r = { couverture: [480, 1200], heures: 70, incompatibles: [], interdits: [], internes: [], feriesOuverts: false, feriesTravailles: [] };
   for (const raw of (cfgPlanning().regles || '').split('\n')) {
     const i = raw.indexOf(':'); if (i < 0) continue;
     const k = sansAccent(raw.slice(0, i)), v = raw.slice(i + 1).trim();
@@ -2489,6 +2510,8 @@ function reglesPlanning() {
     else if (k.startsWith('jamais sur la meme vacation') || k.startsWith('jamais ensemble')) { if (noms.length > 1) r.incompatibles.push(noms); }
     else if (k.startsWith('jamais le ')) { const j = NOMS_JOURS.indexOf(k.slice(10).trim()); if (j >= 0) noms.forEach(n => r.interdits.push({ nom: n, jour: j })); }
     else if (k.startsWith('lignes internes') || k.startsWith('ligne interne')) r.internes.push(...noms);
+    else if (k.startsWith('jours feries travailles')) r.feriesTravailles.push(...noms);
+    else if (k.startsWith('jours feries')) r.feriesOuverts = /ouvert/.test(sansAccent(v));
   }
   return r;
 }
@@ -2522,6 +2545,11 @@ function verifierPlanning(grille, jours) {
   const vac = c => vacs.find(v => v.code === c);
   for (const iso of jours) {
     const g = grille[iso] || {}, wd = dDe(iso).getDay();
+    const ferie = ferieFerme(iso);
+    if (ferie) {   // parkings fermés : pas de couverture exigée ; quelqu'un de service est signalé
+      for (const n of [...agents, ...internes]) if (vac(g[n])) ajout(iso, `${n} est de service un jour férié (${ferie}, parkings fermés)`);
+      continue;
+    }
     // couverture continue
     const iv = [...agents, ...internes].map(n => vac(g[n])).filter(Boolean).map(v => [minDe(v.debut), minDe(v.fin)]).sort((a, b) => a[0] - b[0]);
     let t = regles.couverture[0]; const trous = [];
@@ -2549,7 +2577,7 @@ function verifierPlanning(grille, jours) {
       for (let i = 0; i < 14; i++) {
         const iso = ajJ(q, i), c = (grille[iso] || {})[n], v = vac(c);
         if (v) min += minDe(v.fin) - minDe(v.debut);
-        else if (ABSENCES[c]) { const vt = vac(codeType(n, iso)); if (vt) min += minDe(vt.fin) - minDe(vt.debut); }
+        else if (ABSENCES[c] || c === 'F') { const vt = vac(codeType(n, iso)); if (vt) min += minDe(vt.fin) - minDe(vt.debut); }   // absence ou férié un jour normalement travaillé
       }
       const h = Math.round(min / 6) / 10;
       if (h !== regles.heures) pb.push({ iso: q, msg: `${n} : ${String(h).replace('.', ',')} h sur la quinzaine du ${jourCourt(q)} (attendu ${regles.heures} h)`, niveau: 'bad', quinzaine: true });
@@ -2571,7 +2599,7 @@ async function grilleMois(m) {
     for (const n of [...agents, ...internes]) {
       const p = (motifs[iso] || {})[n] || (pub.jours[iso] || {})[n];
       base[iso][n] = p || '';
-      grille[iso][n] = (br && br.cells[iso] && br.cells[iso][n] != null) ? br.cells[iso][n] : (p || codeType(n, iso) || '');
+      grille[iso][n] = (br && br.cells[iso] && br.cells[iso][n] != null) ? br.cells[iso][n] : (p || (ferieFerme(iso) ? 'F' : codeType(n, iso)) || '');
     }
   }
   const publieMois = pub.pubs.filter(x => x.mois === m).slice(-1)[0] || null;
@@ -2609,15 +2637,16 @@ function promptClaude(m, G, consigne) {
     '',
     'VACATIONS ET CODES',
     ...cp.vacations.map(x => `${x.code} = ${x.lbl.toLowerCase()} ${x.debut}-${x.fin}`),
-    'R = repos ; CA = congés ; MAL = maladie ; FOR = formation ; ABS = autre absence',
+    'R = repos ; F = jour férié (parkings fermés) ; CA = congés ; MAL = maladie ; FOR = formation ; ABS = autre absence',
     '',
     'RÈGLES',
     `- Une présence continue de ${hDe(regles.couverture[0])} à ${hDe(regles.couverture[1])} chaque jour.`,
-    `- ${regles.heures} h par agent et par quinzaine ; une absence un jour normalement travaillé compte comme travaillée. Quinzaines : cycle de deux semaines commençant le ${jourLong(cp.ancre)}.`,
+    `- ${regles.heures} h par agent et par quinzaine ; une absence ou un jour férié un jour normalement travaillé compte comme travaillé. Quinzaines : cycle de deux semaines commençant le ${jourLong(cp.ancre)}.`,
     ...regles.incompatibles.map(g => `- ${g.join(' et ')} : jamais sur la même vacation (de préférence matin contre soir).`),
     ...regles.interdits.map(x => `- ${x.nom} ne travaille jamais le ${NOMS_JOURS[x.jour]}.`),
     ...(internes.length ? [`- Ligne(s) interne(s), non montrée(s) aux agents : ${internes.join(', ')}.`] : []),
-    '- Les absences (CA, MAL, FOR, ABS) sont imposées : ne les modifie jamais.',
+    (() => { const f = jours.filter(ferieFerme); return f.length ? `- Jours fériés : parkings fermés, personne ne travaille (code F pour tous) : ${f.map(iso => `${jourLong(iso)} (${ferieFerme(iso)})`).join(', ')}. Un jour férié normalement travaillé compte comme travaillé.` : '- Aucun jour férié sur la période.'; })(),
+    '- Les absences (CA, MAL, FOR, ABS) et les jours fériés (F) sont imposés : ne les modifie jamais.',
     '- Respecte au maximum les jours de repos du planning-type et change le moins de cases possible.',
     '',
     `PLANNING-TYPE (2 semaines ; la semaine 1 commence le ${jourLong(cp.ancre)})`,
@@ -2669,6 +2698,7 @@ function lireReponseClaude(texte, G) {
   for (const iso of G.jours) for (const n of vus) {
     const avant = G.grille[iso][n];
     if (ABSENCES[avant] && cells[iso][n] !== avant) { erreurs.push(`${n}, ${jourLong(iso)} : absence (${ABSENCES[avant].toLowerCase()}) conservée`); cells[iso][n] = avant; }
+    if (avant === 'F' && cells[iso][n] !== 'F' && ferieFerme(iso)) { erreurs.push(`${n}, ${jourLong(iso)} : jour férié conservé`); cells[iso][n] = 'F'; }
   }
   return { cells, erreurs, mois, lignes: [...vus] };
 }
@@ -2693,20 +2723,21 @@ VIEWS.planning = async ({ mois } = {}) => {
   const vac = c => vacationsP().find(x => x.code === c);
   const choisir = (iso, n) => {
     const actuel = G.grille[iso][n];
-    const opts = [...vacationsP().map(x => ({ c: x.code, l: `${x.lbl} ${x.debut}-${x.fin}` })), { c: 'R', l: 'Repos' }, ...Object.entries(ABSENCES).map(([c, l]) => ({ c, l }))];
+    const opts = [...vacationsP().map(x => ({ c: x.code, l: `${x.lbl} ${x.debut}-${x.fin}` })), { c: 'R', l: 'Repos' }, { c: 'F', l: 'Férié (fermé)' }, ...Object.entries(ABSENCES).map(([c, l]) => ({ c, l }))];
     const fermer = () => box.remove();
     const poser = c => safe(async () => { await majBrouillon(m, b => { (b.cells[iso] = b.cells[iso] || {})[n] = c; b.claude = (b.claude || []).filter(k => k !== iso + '|' + n); }); fermer(); recharger(); });
     const box = h('div', { class: 'confirm-contact', onclick: e => { if (e.target === box) fermer(); } }, h('div', { class: 'sheet' },
       h('h3', null, `${n} — ${jourLong(iso)}`),
-      h('p', { class: 'muted small' }, `Planning-type : ${libelleCode(codeType(n, iso)) || 'repos'}`),
+      h('p', { class: 'muted small' }, `Planning-type : ${libelleCode(codeType(n, iso)) || 'repos'}${ferieFerme(iso) ? ` · ${ferieFerme(iso)} : férié, parkings fermés` : ''}`),
       h('div', { class: 'plan-choix' }, ...opts.map(o => h('button', { class: `pc pc-${o.c}${o.c === actuel ? ' on' : ''}`, onclick: poser(o.c) }, h('b', null, o.c), ' ', o.l))),
-      h('button', { class: 'sec', onclick: poser(codeType(n, iso) || 'R') }, 'Revenir au planning-type'),
+      h('button', { class: 'sec', onclick: poser(ferieFerme(iso) ? 'F' : (codeType(n, iso) || 'R')) }, ferieFerme(iso) ? 'Revenir à « férié »' : 'Revenir au planning-type'),
       h('button', { class: 'link', onclick: fermer }, 'Fermer')));
     document.body.append(box);
   };
   const thJour = iso => {
     const d = dDe(iso), hors = moisDe(iso) !== m, pbj = (v.parJour[iso] || []).includes('bad');
-    return h('th', { class: `pj${hors ? ' hors' : ''}${d.getDay() === 0 || d.getDay() === 6 ? ' we' : ''}${pbj ? ' pb' : ''}${iso === auj ? ' auj' : ''}`, title: (v.pb.filter(p => p.iso === iso && !p.quinzaine).map(p => p.msg).join('\n')) || null },
+    const fer = ferieFerme(iso);
+    return h('th', { class: `pj${hors ? ' hors' : ''}${d.getDay() === 0 || d.getDay() === 6 ? ' we' : ''}${pbj ? ' pb' : ''}${iso === auj ? ' auj' : ''}${fer ? ' ferie' : ''}`, title: [fer ? `${fer} (férié, parkings fermés)` : null, ...v.pb.filter(p => p.iso === iso && !p.quinzaine).map(p => p.msg)].filter(Boolean).join('\n') || null },
       h('div', null, JC[d.getDay()]), h('div', null, d.getDate()));
   };
   const td = (iso, n) => {
@@ -2728,7 +2759,7 @@ VIEWS.planning = async ({ mois } = {}) => {
     chips(Object.entries(ABSENCES).map(([val, lbl]) => ({ val, lbl })), ab.c, x => ab.c = x),
     h('button', { class: 'sec', onclick: safe(async () => {
       if (!ab.du || !ab.au || ab.au < ab.du) throw new Error('Dates invalides.');
-      await majBrouillon(m, b => { for (let iso = ab.du; iso <= ab.au; iso = ajJ(iso, 1)) if (G.jours.includes(iso)) (b.cells[iso] = b.cells[iso] || {})[ab.n] = ab.c; });
+      await majBrouillon(m, b => { for (let iso = ab.du; iso <= ab.au; iso = ajJ(iso, 1)) if (G.jours.includes(iso) && !ferieFerme(iso)) (b.cells[iso] = b.cells[iso] || {})[ab.n] = ab.c; });   // les jours fériés restent fériés
       toast(`${ABSENCES[ab.c]} : ${ab.n}, du ${jourCourt(ab.du)} au ${jourCourt(ab.au)}.`); recharger();
     }) }, 'Ajouter l’absence'),
     h('p', { class: 'muted small' }, 'Ou touchez directement une case du tableau. Les motifs (congés, maladie…) ne sont visibles que des superviseurs ; les agents voient « Absent ».'));
@@ -2804,7 +2835,7 @@ VIEWS.planning = async ({ mois } = {}) => {
       h('p', { class: 'muted small', style: 'text-align:center;margin:4px 0' }, `Semaines complètes du ${jourLong(G.jours[0])} au ${jourLong(G.jours[G.jours.length - 1])} · `, statut)),
     formAbs,
     table,
-    h('div', { class: 'plan-legende' }, ...vacationsP().map(x => h('span', { class: `pc pc-${x.code}` }, `${x.code} ${x.debut}-${x.fin}`)), h('span', { class: 'pc pc-R' }, 'Repos (vide)'), ...Object.entries(ABSENCES).map(([c, l]) => h('span', { class: `pc pc-${c}` }, `${c} ${l}`)), h('span', { class: 'pc claude-ex' }, 'proposé par Claude'), h('span', { class: 'pc modif-ex' }, 'modifié depuis la publication')),
+    h('div', { class: 'plan-legende' }, ...vacationsP().map(x => h('span', { class: `pc pc-${x.code}` }, `${x.code} ${x.debut}-${x.fin}`)), h('span', { class: 'pc pc-R' }, 'Repos (vide)'), h('span', { class: 'pc pc-F' }, 'F Férié (fermé)'), ...Object.entries(ABSENCES).map(([c, l]) => h('span', { class: `pc pc-${c}` }, `${c} ${l}`)), h('span', { class: 'pc claude-ex' }, 'proposé par Claude'), h('span', { class: 'pc modif-ex' }, 'modifié depuis la publication')),
     h('div', { class: 'card', style: listePb.length ? 'border-color:var(--bad)' : 'border-color:var(--ok)' }, h('h2', null, `Contrôles${listePb.length ? ` : ${listePb.length} problème(s)` : ' : rien à signaler'}`),
       ...listePb.map(p => h('div', { class: 'small', style: 'color:var(--bad)' }, `${p.quinzaine ? '' : jourLong(p.iso) + ' : '}${p.msg}`)),
       infos.length ? h('details', null, h('summary', { class: 'small muted' }, `${infos.length} information(s) : jours de repos du planning-type travaillés`), ...infos.map(p => h('div', { class: 'small muted' }, `${jourLong(p.iso)} : ${p.msg}`))) : null),
@@ -2820,7 +2851,7 @@ VIEWS.planning = async ({ mois } = {}) => {
 async function exporterPlanning(m, G) {
   const L = [...G.agents, ...G.internes];
   const aoa = [['Agent', ...G.jours.map(iso => jourCourt(iso))], ...L.map(n => [n, ...G.jours.map(iso => G.grille[iso][n] === 'R' ? '' : G.grille[iso][n] || '')])];
-  aoa.push([], ['Codes', ...vacationsP().map(v => `${v.code} ${v.debut}-${v.fin}`), 'CA congés', 'MAL maladie', 'FOR formation', 'ABS absence']);
+  aoa.push([], ['Codes', ...vacationsP().map(v => `${v.code} ${v.debut}-${v.fin}`), 'F férié (fermé)', 'CA congés', 'MAL maladie', 'FOR formation', 'ABS absence']);
   await shareOrDownload(xlsxBlob([[`Planning ${m}`, aoa, [18, ...G.jours.map(() => 6)]]]), `planning_${m}.xlsx`, `Planning ${nomMois(m)}`);
 }
 
@@ -2865,7 +2896,8 @@ async function equipeDuJour(iso) {
   const pub = await planningPublie(), j = pub.jours[iso];
   if (!j) return null;
   const parVac = vacationsP().map(v => ({ v, noms: Object.entries(j).filter(([, c]) => c === v.code).map(([n]) => n) }));
-  return { parVac, absents: Object.entries(j).filter(([, c]) => c === 'ABS').map(([n]) => n), repos: Object.entries(j).filter(([, c]) => c === 'R' || !c).map(([n]) => n) };
+  const vals = Object.values(j);
+  return { parVac, ferie: vals.length && vals.every(c => c === 'F') ? (joursFeries(Number(iso.slice(0, 4))).get(iso) || 'Jour férié') : null, absents: Object.entries(j).filter(([, c]) => c === 'ABS').map(([n]) => n), repos: Object.entries(j).filter(([, c]) => c === 'R' || !c || c === 'F').map(([n]) => n) };
 }
 VIEWS.planningAgents = async ({ semaine, agent } = {}) => {
   const pub = await planningPublie(), auj = localDate();
@@ -2879,7 +2911,7 @@ VIEWS.planningAgents = async ({ semaine, agent } = {}) => {
     const e = await equipeDuJour(iso);
     return h('div', { class: 'card pa-jour' + (iso === auj ? ' auj' : '') },
       h('h3', null, jourLong(iso).replace(/^./, x => x.toUpperCase()), iso === auj ? h('span', { class: 'badge b-info' }, 'aujourd’hui') : null),
-      !e ? h('p', { class: 'muted' }, 'Pas encore de planning publié.') : [
+      !e ? h('p', { class: 'muted' }, 'Pas encore de planning publié.') : e.ferie ? h('div', { class: 'pa-l pc-F' }, h('b', null, `${e.ferie} : jour férié, parkings fermés`)) : [
         ...e.parVac.map(x => h('div', { class: `pa-l pc-${x.v.code}` }, h('span', { class: 'pa-v' }, `${x.v.lbl} ${x.v.debut.replace(':00', 'h').replace(':', 'h')}-${x.v.fin.replace(':00', 'h').replace(':', 'h')}`), h('b', null, x.noms.join(', ') || '—'))),
         e.absents.length ? h('div', { class: 'small muted' }, `Absent : ${e.absents.join(', ')}`) : null,
         e.repos.length ? h('div', { class: 'small muted' }, `Repos : ${e.repos.join(', ')}`) : null]);
@@ -2888,7 +2920,7 @@ VIEWS.planningAgents = async ({ semaine, agent } = {}) => {
   if (agent) {
     const m = moisDe(lundi), { jours: js } = periodeMois(m);
     corps = [h('div', { class: 'card' }, h('h2', null, `${agent} — ${nomMois(m)}`),
-      ...js.filter(iso => moisDe(iso) === m).map(iso => { const c = (pub.jours[iso] || {})[agent]; return h('div', { class: 'stat' + (iso === auj ? ' auj' : '') }, h('span', null, jourLong(iso)), h('b', { class: c ? `pa-c pc-${c}` : '' }, c ? (c === 'ABS' ? 'Absent' : libelleCode(c, true) || 'Repos') : '—')); }))];
+      ...js.filter(iso => moisDe(iso) === m).map(iso => { const c = (pub.jours[iso] || {})[agent]; return h('div', { class: 'stat' + (iso === auj ? ' auj' : '') }, h('span', null, jourLong(iso)), h('b', { class: c ? `pa-c pc-${c}` : '' }, c ? (c === 'ABS' ? 'Absent' : c === 'F' ? 'Férié' : libelleCode(c, true) || 'Repos') : '—')); }))];
   } else corps = await Promise.all(jours.map(carteJour));
   const m = moisDe(lundi);
   return page('Planning', { back: true },
@@ -2909,7 +2941,7 @@ async function cartePlanningAgents() {
   const nouveau = (await kvGet('planningVu')) !== pub.pubs[pub.pubs.length - 1].id;
   return h('button', { class: 'list-item', style: nouveau ? 'border:2px solid var(--accent)' : null, onclick: () => go('planningAgents', {}) },
     h('div', { class: 'l1' }, 'Planning', nouveau ? h('span', { class: 'badge b-warn' }, 'mis à jour') : null),
-    e ? h('div', { class: 'small' }, e.parVac.map(x => `${x.v.lbl} : ${x.noms.join(', ') || '—'}`).join(' · ')) : h('div', { class: 'muted small' }, 'Pas de planning aujourd’hui.'));
+    e ? h('div', { class: 'small' }, e.ferie ? `${e.ferie} : jour férié, parkings fermés` : e.parVac.map(x => `${x.v.lbl} : ${x.noms.join(', ') || '—'}`).join(' · ')) : h('div', { class: 'muted small' }, 'Pas de planning aujourd’hui.'));
 }
 async function cartePlanningSup() {
   const auj = localDate(), m = moisDe(auj), ms = moisSuivant(m), pub = await planningPublie();
@@ -3813,7 +3845,7 @@ async function programmerAlertes(force) {
   if (!v || !cfg) return;
   const r = await rel('abos', { cible: 'sup' }, 20000);
   const rm = cfg.rondeMatin, sy = cfg.synthese;
-  const empreinte = JSON.stringify({ a: (r.abos || []).map(a => [a.e, a.prefs]), rm, sy, s: cfg.sites.map(x => [x.id, x.nom]), k: v.pub });
+  const empreinte = JSON.stringify({ a: (r.abos || []).map(a => [a.e, a.prefs]), rm, sy, s: cfg.sites.map(x => [x.id, x.nom]), k: v.pub, an: new Date().getFullYear(), fr: cfg.planning && cfg.planning.regles });
   const prev = await kvGet('programme');
   if (!force && prev && prev.empreinte === empreinte && Date.now() - prev.at < 6 * 86400000) return;
   if (!force && prev && prev.ancien && Date.now() - prev.at < 6 * 3600000) return;   // relais pas encore mis à jour
@@ -3825,7 +3857,8 @@ async function programmerAlertes(force) {
       const idx = cfg.sites.map((x, i) => i).filter(i => m & (1 << i));
       messages[idx.join(',')] = await chiffrerPour(r.abos, 'alerte_ronde', { type: 'alerte_ronde', titre: 'Aucune ronde aujourd’hui', corps: `${idx.map(i => cfg.sites[i].nom).join(', ')} — aucune ronde avant ${rm.heure.replace(':', ' h ')}` });
     }
-    quotidiennes.push({ id: 'ronde-matin', heure: rm.heure, jours: rm.jours, jetons, messages });
+    const an = new Date().getFullYear(), exclure = [...joursFeries(an).keys(), ...joursFeries(an + 1).keys()].filter(ferieFerme);   // relais version 7 : pas d'alerte les jours fériés
+    quotidiennes.push({ id: 'ronde-matin', heure: rm.heure, jours: rm.jours, jetons, messages, exclure });
   }
   if (sy.actif !== false) hebdo.push({ id: 'synthese', jour: sy.jour, heure: sy.heure,
     messages: await chiffrerPour(r.abos, 'synthese', { type: 'synthese', titre: 'Synthèse de la semaine', corps: 'Rondes, contrôles, signalements, barrières : touchez pour ouvrir le PDF.', lien: '#synthese' }) });
@@ -3926,7 +3959,7 @@ async function carteRondesJour() {
   const rondes = await dbAll('rondes');
   const duJour = rondes.filter(r => r.debut && localDate(new Date(r.debut)) === auj);
   const longues = rondes.filter(r => r.debut && !r.fin && now - new Date(r.debut) > 3600000 && now - new Date(r.debut) < 86400000);
-  const attendu = rm.actif !== false && (rm.jours || []).includes(jourIso(now));
+  const attendu = rm.actif !== false && (rm.jours || []).includes(jourIso(now)) && !ferieFerme(localDate(now));
   const limite = attendu && now.getHours() * 60 + now.getMinutes() >= minutesDe(rm.heure);
   const lignes = state.cfg.sites.map(x => {
     const l = duJour.filter(r => r.site === x.id).sort((a, b) => a.debut.localeCompare(b.debut));
@@ -4620,7 +4653,7 @@ async function donneesSynthese(p) {
   const hist = ((await kvGet('controlesHist')) || []).filter(x => dans(x.ts || x.at));
   const st = await etatControles();
   const regs = await etatRegistres();
-  const joursAttendus = p.jours.filter(j => (rm.jours || [1, 2, 3, 4, 5, 6, 7]).includes(jourIso(j)) && j < finEff);
+  const joursAttendus = p.jours.filter(j => (rm.jours || [1, 2, 3, 4, 5, 6, 7]).includes(jourIso(j)) && j < finEff && !ferieFerme(localDate(j)));
   const parSite = cfg.sites.map(x => {
     const rs = rondes.filter(r => r.site === x.id);
     const durees = rs.filter(r => r.fin && !r.closDPMS).map(r => Math.round((new Date(r.fin) - new Date(r.debut)) / 60000));

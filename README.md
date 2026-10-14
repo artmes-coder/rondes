@@ -28,6 +28,8 @@ Sur un ordinateur, avec un **compte Google dédié au service**.
 
 **Alertes programmées (relais version 6)** : après la mise à jour en version 6, choisir la fonction **`installerAlertes`** dans la barre d'outils, **Exécuter**, puis accepter la nouvelle autorisation (exécution automatique toutes les 5 minutes). C'est ce déclencheur qui envoie « Aucune ronde aujourd'hui », « Ronde de plus d'1 h » et l'annonce de la synthèse du lundi, même si aucun téléphone n'est allumé. Ouvrir ensuite une fois l'application superviseur pour transmettre la programmation au relais.
 
+**Relais version 7** (facultatif, recommandé) : coller le nouveau code et créer une nouvelle version du déploiement, sans nouvelle autorisation. L'alerte « Aucune ronde aujourd'hui » n'est alors plus envoyée les jours fériés (parkings fermés).
+
 **Repartir de zéro** (efface tout) : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la barre d'outils, puis **Exécuter**. Chaque appareil doit ensuite être réinitialisé (Réglages) et reconfiguré.
 
 ## 3. Premier superviseur
@@ -111,6 +113,7 @@ Toute demande reçue (usager sur place, appel, courriel, service ou élu) est en
   3. Mois compliqué : **Préparer le prompt pour Claude** (avec une consigne facultative) copie un texte complet — règles, planning-type, absences, projet, problèmes, format de réponse. Le coller dans la conversation Claude consacrée au planning ; copier sa réponse ; **Appliquer la réponse de Claude** : le tableau se met à jour, les cases proposées par Claude sont encadrées en vert ; les absences saisies ne peuvent pas être modifiées par la proposition.
   4. **Publier** : les agents reçoivent une notification (« Planning de novembre publié », puis, à chaque modification, la liste des changements). Les cases modifiées depuis la dernière publication sont encadrées en orange. Export **Excel**.
 - **Rappel** : notification le 15 de chaque mois à 9 h, « Planning de … à préparer » (relais version 6), sauf si le mois suivant est déjà publié.
+- **Jours fériés** (1er janvier, lundi de Pâques, 1er et 8 mai, Ascension, lundi de Pentecôte, 14 juillet, 15 août, 1er et 11 novembre, 25 décembre, calculés automatiquement) : parkings fermés, toutes les cases en « F », aucune présence exigée, aucune ronde attendue ni alertée ; un jour férié normalement travaillé compte comme travaillé dans les heures de la quinzaine. Une absence saisie sur une période ne recouvre pas les jours fériés. Exceptions : règle `jours fériés travaillés : Lundi de Pentecôte` (par exemple), ou `jours fériés : ouverts`.
 - **Confidentialité** : les motifs d'absence et les lignes internes ne sont visibles que des superviseurs ; les agents voient « Absent ».
 
 **Agents** : carte **Planning** sur l'accueil (qui est du matin, du midi, du soir aujourd'hui ; « mis à jour » après une publication) ; onglet Planning par semaine, ou mois par agent ; notes du DPMS.

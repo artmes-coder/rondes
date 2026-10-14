@@ -1,5 +1,5 @@
 /**
- * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 6
+ * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 7
  *
  * Journal partagé entre les téléphones des agents et les appareils superviseurs.
  * Tout ce qui est stocké ici est chiffré sur les appareils avant l'envoi :
@@ -38,7 +38,7 @@ var PULL_OCTETS = 8000000;      // volume maximal renvoyé par relève
 var PULL_NOMBRE = 150;          // nombre maximal d'éléments renvoyés par relève
 
 function doGet() {
-  return json_({ ok: true, service: 'relais-rondes', v: 6 });
+  return json_({ ok: true, service: 'relais-rondes', v: 7 });
 }
 
 function doPost(e) {
@@ -288,7 +288,7 @@ function verifierAlertes() {
     al.envoyees = al.envoyees || {};
     var change = false;
     (al.quotidiennes || []).forEach(function (q) {
-      if (al.envoyees[q.id] === jour || heure < q.heure || (q.jours && q.jours.indexOf(jourSem) < 0)) return;
+      if (al.envoyees[q.id] === jour || heure < q.heure || (q.jours && q.jours.indexOf(jourSem) < 0) || (q.exclure && q.exclure.indexOf(jour) >= 0)) return;   // v7 : jours fériés exclus
       var manquants = [];
       (q.jetons || []).forEach(function (j, i) { if (pt[j] !== jour) manquants.push(i); });
       if (manquants.length && q.messages && q.messages[manquants.join(',')]) envoyerChiffres_(al.vapid, q.messages[manquants.join(',')]);
