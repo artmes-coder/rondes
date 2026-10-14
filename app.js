@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.7.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -588,7 +588,8 @@ function normalizeCfg(c) {
     if (nom !== CAT_AUTRE && !n.cats.some(c => c.nom === nom)) { const d = taxo.find(c => c.nom === nom); if (d) n.cats.push(d); }
   });
   n.contacts = n.contacts && typeof n.contacts === 'object' ? n.contacts : {};
-  n.rondeMatin = { actif: true, heure: '12:00', jours: [1, 2, 3, 4, 5, 6, 7], ...(n.rondeMatin || {}) };
+  n.rondeMatin = { actif: true, heure: '20:00', jours: [1, 2, 3, 4, 5, 6, 7], ...(n.rondeMatin || {}) };
+  if (!n.rondeMatin.v2) { if (n.rondeMatin.heure === '12:00') n.rondeMatin.heure = '20:00'; n.rondeMatin.v2 = true; }   // ancienne valeur par défaut : fin de service des agents à 20 h
   n.synthese = { actif: true, jour: 1, heure: '08:00', ...(n.synthese || {}) };
   n.v = 3;
   return n;
@@ -1054,7 +1055,7 @@ const NOTIF_TYPES = {
     ['action', 'Traitement (appels, courriels, interventions)'], ['pm', 'Suites de la police municipale'], ['msg', 'Réponses des agents'],
     ['barriere_ouverte', 'Barrière ouverte'], ['barriere_fermee', 'Barrière refermée'], ['ronde_fin', 'Ronde terminée'], ['ronde_annulee', 'Ronde annulée'],
     ['contact', 'Main courante (usagers, demandes, réponses)'],
-    ['alerte_ronde', 'Aucune ronde ce matin'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire']],
+    ['alerte_ronde', 'Aucune ronde dans la journée'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire']],
   agent: [['msg', 'Messages et demandes d’action du DPMS']]
 };
 const GROUPES_NOTIF = { urgent: 'Signalements', barriere_ouverte: 'Barrières', ronde_fin: 'Rondes', contact: 'Main courante', alerte_ronde: 'Alertes programmées (envoyées par le relais)' };
@@ -3253,7 +3254,7 @@ async function programmerAlertes(force) {
     const messages = {};
     for (let m = 1; m < (1 << cfg.sites.length); m++) {   // un message chiffré par combinaison de parkings sans ronde
       const idx = cfg.sites.map((x, i) => i).filter(i => m & (1 << i));
-      messages[idx.join(',')] = await chiffrerPour(r.abos, 'alerte_ronde', { type: 'alerte_ronde', titre: 'Aucune ronde ce matin', corps: `${idx.map(i => cfg.sites[i].nom).join(', ')} — heure limite ${rm.heure.replace(':', ' h ')}` });
+      messages[idx.join(',')] = await chiffrerPour(r.abos, 'alerte_ronde', { type: 'alerte_ronde', titre: 'Aucune ronde aujourd’hui', corps: `${idx.map(i => cfg.sites[i].nom).join(', ')} — aucune ronde avant ${rm.heure.replace(':', ' h ')}` });
     }
     quotidiennes.push({ id: 'ronde-matin', heure: rm.heure, jours: rm.jours, jetons, messages });
   }
@@ -3342,7 +3343,7 @@ async function supHome() {
 }
 /* Une ronde par jour et par parking ; ronde ouverte depuis plus d'1 h */
 const jourIso = (d = new Date()) => (d.getDay() || 7);
-const minutesDe = hm => { const [a, b] = String(hm || '12:00').split(':').map(Number); return a * 60 + (b || 0); };
+const minutesDe = hm => { const [a, b] = String(hm || '20:00').split(':').map(Number); return a * 60 + (b || 0); };
 async function carteRondesJour() {
   const rm = state.cfg.rondeMatin || {}, auj = localDate(), now = new Date();
   const rondes = await dbAll('rondes');
@@ -3361,7 +3362,7 @@ async function carteRondesJour() {
   const alerte = (limite && manquants.length) || longues.length;
   return h('div', { class: 'card', style: alerte ? 'border-color:var(--bad)' : null },
     h('h2', null, 'Rondes du jour'),
-    limite && manquants.length ? h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 6px' }, `Aucune ronde ce matin à ${manquants.map(x => x.nom).join(', ')}.`) : null,
+    limite && manquants.length ? h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 6px' }, `Aucune ronde aujourd’hui à ${manquants.map(x => x.nom).join(', ')}.`) : null,
     ...longues.map(r => h('div', { style: 'margin:0 0 8px' }, h('p', { style: 'color:var(--bad);font-weight:700;margin:0 0 4px' }, `Ronde de plus d’1 h — ${siteNom(r.site)} : ${r.agent}, commencée à ${fmtHeure(r.debut)}, toujours pas terminée.`),
       h('button', { class: 'sec', style: 'width:auto;margin:0', onclick: safe(() => cloturerRonde(r)) }, 'Clôturer la ronde'))),
     ...lignes);
@@ -4313,7 +4314,7 @@ VIEWS.supConfig = async () => {
     h('label', { class: 'f' }, 'Courriel d’urgence'), mail,
     h('label', { class: 'f' }, 'Géolocalisation GPS des saisies'),
     chips([{ val: false, lbl: 'Désactivée' }, { val: true, lbl: 'Activée' }], c.gps, v => c.gps = v),
-    h('label', { class: 'f' }, 'Une ronde par jour et par parking : alerte si aucune ronde avant'),
+    h('label', { class: 'f' }, 'Une ronde par jour et par parking : alerte si aucune ronde avant (fin de service)'),
     chips([{ val: true, lbl: 'Activée' }, { val: false, lbl: 'Désactivée' }], c.rondeMatin.actif !== false, v => c.rondeMatin.actif = v),
     hMatin, h('p', { class: 'muted small' }, 'Jours où une ronde est attendue :'),
     chips(JOURS.map((j, i) => ({ val: i + 1, lbl: j })), c.rondeMatin.jours, () => { }, { multi: true }),
@@ -4340,7 +4341,7 @@ VIEWS.supConfig = async () => {
           if (b.length) c.sites[k].barrieres = b;
         });
         Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, controles, motifs: lines(tMotifs), objetsContact: lines(tObjets), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8),
-          rondeMatin: { ...c.rondeMatin, heure: hMatin.value || '12:00', jours: [...c.rondeMatin.jours].sort() }, synthese: { ...c.synthese, jour: parseInt(jSynth.value, 10), heure: hSynth.value || '08:00' } });
+          rondeMatin: { ...c.rondeMatin, heure: hMatin.value || '20:00', jours: [...c.rondeMatin.jours].sort() }, synthese: { ...c.synthese, jour: parseInt(jSynth.value, 10), heure: hSynth.value || '08:00' } });
         await publishCfg(c);
         toast('Enregistré. Transmis à tous les appareils.');
         go('home');
