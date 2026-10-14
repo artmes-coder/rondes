@@ -1,5 +1,5 @@
 /**
- * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 7
+ * Relais chiffré — Rondes parkings, Ville de Cachan (DPMS) — version 8
  *
  * Journal partagé entre les téléphones des agents et les appareils superviseurs.
  * Tout ce qui est stocké ici est chiffré sur les appareils avant l'envoi :
@@ -31,19 +31,30 @@
  * anonymes (« une ronde a commencé aujourd'hui pour le jeton X ») et des messages
  * déjà chiffrés pour chaque appareil : il ne sait ni de quel parking il s'agit,
  * ni ce que disent les messages.
+ *
+ * VERSION 8 : les lectures (relève, photos, ping) ne bloquent plus le relais. Corrige
+ * le message « relais occupé » quand on configure un nouvel appareil. Aucune fonction
+ * à exécuter : il suffit de publier une nouvelle version du déploiement.
  */
 var DOSSIER = 'Relais rondes parkings (chiffré)';
 var TAILLE_MAX = 30000000;      // caractères par dépôt
 var PULL_OCTETS = 8000000;      // volume maximal renvoyé par relève
 var PULL_NOMBRE = 150;          // nombre maximal d'éléments renvoyés par relève
+var PULL_DUREE_MS = 15000;      // durée maximale d'une relève (le reste est envoyé à la relève suivante)
+// Opérations de simple lecture : elles ne prennent pas le verrou (version 8). Un appareil qui
+// récupère tout l'historique (téléphone qu'on configure) ne bloque plus les autres appareils.
+var LECTURES = { ping: 1, getVault: 1, pull: 1, abos: 1, media: 1 };
 
 function doGet() {
-  return json_({ ok: true, service: 'relais-rondes', v: 7 });
+  return json_({ ok: true, service: 'relais-rondes', v: 8 });
 }
 
 function doPost(e) {
   var req;
   try { req = JSON.parse(e.postData.contents); } catch (err) { return json_({ ok: false, err: 'requête illisible' }); }
+  if (req && LECTURES[req.op] === 1) {
+    try { return json_(traiter_(req)); } catch (err) { return json_({ ok: false, err: String((err && err.message) || err) }); }
+  }
   var lock = LockService.getScriptLock();
   try { lock.waitLock(25000); } catch (err) { return json_({ ok: false, err: 'relais occupé, réessayer' }); }
   try {
@@ -143,10 +154,11 @@ function traiter_(req) {
       var after = parseInt(req.after, 10) || 0;
       var liste = lireIndex_().filter(function (x) { return x.n > after && permis[x.k] && kinds.indexOf(x.k) >= 0; });
       liste.sort(function (a, b) { return a.n - b.n; });
-      var out = [], total = 0, last = after, more = false;
+      var out = [], total = 0, last = after, more = false, debut = Date.now();
+      var max = Math.min(PULL_NOMBRE, Math.max(1, parseInt(req.max, 10) || PULL_NOMBRE));
       for (var i = 0; i < liste.length; i++) {
         var x = liste[i];
-        if (out.length && (out.length >= PULL_NOMBRE || total + x.size > PULL_OCTETS)) { more = true; break; }
+        if (out.length && (out.length >= max || total + x.size > PULL_OCTETS || Date.now() - debut > PULL_DUREE_MS)) { more = true; break; }
         var data;
         try { data = DriveApp.getFileById(x.id).getBlob().getDataAsString(); } catch (err) { data = null; }
         out.push({ n: x.n, k: x.k, dev: x.dev || null, at: x.at, media: !!x.mid, data: data });

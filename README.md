@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.7.2.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.12.0.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -30,6 +30,8 @@ Sur un ordinateur, avec un **compte Google dédié au service**.
 
 **Relais version 7** (facultatif, recommandé) : coller le nouveau code et créer une nouvelle version du déploiement, sans nouvelle autorisation. L'alerte « Aucune ronde aujourd'hui » n'est alors plus envoyée les jours fériés (parkings fermés).
 
+**Relais version 8** (recommandé dès qu'il y a plusieurs appareils) : coller le nouveau code, puis **Déployer → Gérer les déploiements →** crayon sur le déploiement existant **→ Version : Nouvelle version → Déployer** (l'adresse du relais ne change pas ; ne pas créer un nouveau déploiement, qui changerait l'adresse). Aucune fonction à exécuter. Les lectures (relève, photos) ne bloquent plus le relais : fin des messages « relais occupé » quand un appareil récupère tout l'historique (configuration d'un nouveau téléphone). L'application réessaie d'elle-même quand le relais est occupé.
+
 **Repartir de zéro** (efface tout) : dans l'éditeur, choisir la fonction **`reinitialiserRelais`** dans la barre d'outils, puis **Exécuter**. Chaque appareil doit ensuite être réinitialisé (Réglages) et reconfiguré.
 
 ## 3. Premier superviseur
@@ -58,7 +60,9 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 ## 5. Utilisation
 
 ### Accueil des agents
-Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **Barrière ouverte**, **Usager ou demande reçue** ; au-dessus, **Messages du DPMS** quand il y en a ; en bas, **Urgence : appeler le DPMS** et **Plus** (traitement des signalements, échanges, suivi des usagers et demandes, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
+Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **Barrière ouverte**, **Usager ou demande reçue** ; au-dessus, **Messages du DPMS** quand il y en a ; puis **Suivi des signalements en cours** (avec leur nombre) ; en bas, **Urgence : appeler le DPMS** et **Plus** (échanges, suivi des usagers et demandes, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
+
+Quand un signalement n'a pas encore été transmis aux services, une **carte rouge « N signalement(s) à transmettre »** s'affiche en tête de l'accueil, sur tous les appareils agents, jusqu'à ce que la transmission soit indiquée.
 
 ### Ronde (agents) : un parcours guidé
 **Commencer ma ronde** → parking → agent, puis les étapes s'enchaînent (« Étape 3 sur 6 », barre de progression) :
@@ -78,9 +82,15 @@ Le contrôle trimestriel comprend la vérification des **dates d'entretien** aff
 ### Barrière ouverte (en étapes)
 Parking → barrière (celles déjà signalées ouvertes sont grisées) → motif → depuis quand (« Maintenant » ou « Plus tôt (oubli de déclaration) » avec l'heure) → qui → récapitulatif, commentaire facultatif, **Enregistrer l'ouverture**. Pendant une ronde, le parking et le rondier sont déjà connus. La barrière reste affichée en rouge sur l'accueil de tous les appareils jusqu'à **Barrière refermée** (maintenant ou plus tôt → qui → **Enregistrer la fermeture**).
 
-### Traitement des signalements (téléphone ou PC de la loge)
-Accueil → **Plus** → **Traitement des signalements** : liste regroupée par étape (*À transmettre aux services*, *Relancer si pas de réponse*, *Suivre l'intervention*, *Vérifier le passage*, *À clore si le problème est réglé*). La fiche d'un signalement montre la photo, puis **Que voulez-vous faire ?** :
-- **Transmettre** (ou **Relancer**) : « Appeler » et « Courriel » (message prérempli) pour chaque destinataire, « Un seul courriel à tous », « Courriel avec les photos ». Au retour dans l'application, une question demande de confirmer (« Avez-vous pu joindre… ? », « Avez-vous envoyé le courriel… ? ») : la réponse enregistre l'action, appel sans réponse compris ; un appel passé ou un courriel envoyé ramène l'agent à l'accueil. « Transmis autrement » pour une remise en main propre ;
+### Transmettre un signalement aux services
+L'appel (téléphone de service) ou le courriel (ordinateur de la loge) se fait **en dehors de l'application** ; l'application sert à dire **qui prévenir** et à **noter que c'est fait**.
+- Dès l'enregistrement d'un signalement (ou à la fin de la ronde), l'écran affiche **« Maintenant : prévenir le service »** avec le ou les services et leur numéro, et un grand bouton **Transmettre maintenant**. « Plus tard » ramène à l'accueil, où le signalement reste en rouge.
+- L'écran **Transmettre** montre le signalement (photo, parking, référence), « À faire : prévenir … », **Qui transmet ?**, puis une carte par service : numéro en grand (touchable sur le téléphone), adresse électronique avec **Copier l'adresse**, une précision facultative (nom de la personne jointe, n° de ticket) et les boutons **✓ J'ai appelé**, **✓ J'ai envoyé le courriel**, **Pas de réponse** (le signalement reste à transmettre), **Prévenu autrement**. « Texte à dire ou à envoyer » propose l'objet et le texte à copier, et les photos à télécharger pour les joindre au courriel.
+- Quand tous les services sont prévenus : **Signalement transmis**, puis le suivant s'il y en a. Le DPMS reçoit tout par l'application : un signalement adressé au seul DPMS n'est jamais « à transmettre ».
+
+### Suivi des signalements en cours (téléphone ou PC de la loge)
+Accueil → **Suivi des signalements en cours** : liste regroupée par étape (*À transmettre aux services*, *Relancer si pas de réponse*, *Suivre l'intervention*, *Vérifier le passage*, *À clore si le problème est réglé*). La fiche d'un signalement montre la photo, puis **Que voulez-vous faire ?** :
+- **Transmettre au service** (ou **Relancer le service**) : écran Transmettre ci-dessus ; pour un service déjà prévenu, **J'ai relancé ce service** ;
 - **Une réponse a été reçue**, **Une intervention est prévue** (date), **L'intervention a été réalisée** (l'application demande ensuite si le problème est réglé, et clôt le signalement si oui) : de qui, précisions, qui enregistre, **Enregistrer** ;
 - **Problème résolu : clore le signalement** ; **Ajouter une note** ;
 - **Historique** des actions et des constats, replié en bas de la fiche.

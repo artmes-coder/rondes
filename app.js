@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.7.2';
+const APP_VERSION = '2.12.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -251,7 +251,17 @@ async function decryptWithPass(pass, box) {
 /* ====================================================================== */
 /* Relais                                                                 */
 /* ====================================================================== */
+// « relais occupé » : un autre appareil utilise le relais ; rien n'a été traité, on peut réessayer sans risque
 async function relayCall(url, body, timeoutMs = 60000) {
+  for (let essai = 0; ; essai++) {
+    try { return await relayCall1(url, body, timeoutMs); }
+    catch (e) {
+      if (!/occup/i.test(e.code || '') || essai >= 3) throw e;
+      await new Promise(r => setTimeout(r, 3000 * (essai + 1) + Math.random() * 2000));
+    }
+  }
+}
+async function relayCall1(url, body, timeoutMs) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   let r;
@@ -266,7 +276,8 @@ async function relayCall(url, body, timeoutMs = 60000) {
       : j.err === 'aucun superviseur enregistré' ? 'Ce relais a été activé, mais l’activation n’est pas allée à son terme (aucune clé enregistrée). Réinitialisez le relais (fonction reinitialiserRelais), puis activez-le à nouveau.'
         : j.err === 'relais non initialisé' ? 'Le relais a été remis à zéro. Cet appareil doit être reconfiguré : Réglages → Réinitialiser cet appareil, puis configuration (superviseur : « activer un relais neuf » ; téléphones : nouveau QR).'
           : j.err === 'accès refusé' ? 'Le relais a été réactivé avec de nouveaux codes. Cet appareil doit être reconfiguré : Réglages → Réinitialiser cet appareil, puis nouveau QR ou « Ajouter cet appareil comme superviseur ».'
-            : 'relais : ' + (j.err || 'refus');
+            : /occup/i.test(j.err || '') ? 'Le relais est occupé par un autre appareil (envoi ou récupération en cours). Réessayez dans une minute.'
+              : 'relais : ' + (j.err || 'refus');
     const e = new Error(msg); e.code = j.err; throw e;
   }
   return j;
@@ -1201,7 +1212,7 @@ async function agentSync() {
 async function pullAll(kinds) {
   let after = (await kvGet('cursor')) || 0, got = 0;
   for (let guard = 0; guard < 400; guard++) {
-    const r = await rel('pull', { after, kinds }, 180000);
+    const r = await rel('pull', { after, kinds, max: 60 }, 180000);
     for (const x of r.entries) { if (x.data) await ingest(x); got++; }
     after = r.last;
     await kvSet('cursor', after);
@@ -1462,6 +1473,7 @@ async function agentHome() {
   const ouvertes = await barrieresOuvertes();
   const cfg = state.cfg;
   const closeDPMS = await kvGet('rondeCloseDPMS');
+  const nbEnCours = (await dbAll('sigs')).filter(s => s.statut === 'ouvert').length;
   const majRequise = await kvGet('majRequise');
   return page('Rondes parkings', null,
     majRequise ? bandeauMaj() : null,
@@ -1470,6 +1482,7 @@ async function agentHome() {
       h('p', { style: 'margin:4px 0' }, `${siteNom(closeDPMS.site)} — ${closeDPMS.agent}, commencée à ${fmtHeure(closeDPMS.debut)}. Elle n’avait pas été terminée. Les contrôles déjà faits ont été envoyés.`),
       h('button', { class: 'sec', onclick: safe(async () => { await kvDel('rondeCloseDPMS'); render(); }) }, 'J’ai compris')) : null,
     await carteMessagesAccueil(),
+    await carteATransmettre(),
     await cartePlanningAgents(),
     ronde ? h('div', { class: 'card encours' },
       h('div', { class: 'small' }, 'Ronde en cours'),
@@ -1482,7 +1495,8 @@ async function agentHome() {
     gros('barriere', 'Barrière ouverte', 'sec', () => go('barriere', {})),
     gros('usager', 'Usager ou demande reçue', 'sec', () => { mcDraft = null; go('contact'); }),
     ouvertes.length ? h('div', { class: 'card', style: 'border:2px solid var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
-    h('button', { class: 'sec', style: 'margin-top:18px', onclick: () => go('plus') }, 'Plus : suivi des signalements, réglages…'),
+    nbEnCours ? h('button', { class: 'sec', style: 'margin-top:18px', onclick: () => go('suivi') }, `Suivi des signalements en cours (${nbEnCours})`) : null,
+    h('button', { class: 'sec', style: 'margin-top:10px', onclick: () => go('plus') }, 'Plus : usagers, échanges, réglages…'),
     cfg.urgenceTel ? h('a', { class: 'btn danger', style: 'margin-top:10px', href: 'tel:' + cfg.urgenceTel }, 'Urgence : appeler le DPMS') : null,
     h('img', { class: 'logo-ville', src: 'logo-cachan.png', alt: 'Ville de Cachan — parkings' }),
     h('p', { class: 'muted small foot' }, enAttente ? `${enAttente} saisie(s) en attente d’envoi (envoi automatique dès qu’il y a du réseau)` : 'Tout est envoyé au DPMS.', ` · version ${APP_VERSION}`));
@@ -1496,8 +1510,7 @@ VIEWS.plus = async () => {
   const aTransmettre = enCours.filter(s => suiviEtat(s) === 'À transmettre').length;
   const nbMC = (await mainCourante()).filter(c => c.statut === 'ouvert').length;
   return page('Plus', { back: true },
-    h('button', { class: 'tuile principal', onclick: () => go('suivi') }, h('span', { class: 'tuile-ico', html: ICO.alerte }),
-      h('span', null, 'Traitement des signalements', h('br'), h('small', { style: 'font-weight:500' }, enCours.length ? `${aTransmettre} à transmettre · ${enCours.length} en cours` : 'aucun en cours'))),
+    h('button', { class: 'sec', onclick: () => go('suivi') }, `Suivi des signalements en cours (${enCours.length}${aTransmettre ? `, dont ${aTransmettre} à transmettre` : ''})`),
     h('button', { class: 'sec', onclick: () => go('messagesAgents') }, 'Échanges avec le DPMS'),
     h('button', { class: 'sec', onclick: () => go('mainCourante', {}) }, `Suivi des usagers et demandes${nbMC ? ` — ${nbMC} à traiter` : ''}`),
     await carteControlesAFaire(),
@@ -1837,10 +1850,14 @@ async function etapeFin(ronde) {
 }
 VIEWS.rondeFinie = async ({ site, agent }) => {
   const enAttente = (await dbAll('events')).length;
+  const aTrans = await sigsATransmettre();
   return page('Ronde terminée', null,
     h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Ronde terminée'), h('p', null, `${siteNom(site)} — ${agent}`),
       h('p', { class: enAttente ? 'muted' : '' }, enAttente ? (navigator.onLine ? 'Envoi au DPMS en cours…' : 'Pas de réseau : la ronde partira automatiquement dès qu’il y en aura.') : 'Ronde envoyée au DPMS.')),
-    h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'));
+    aTrans.length ? h('div', { class: 'card a-transmettre' }, h('div', { class: 'at-titre' }, `Maintenant : ${aTrans.length} signalement${aTrans.length > 1 ? 's' : ''} à transmettre`),
+      h('p', { class: 'small', style: 'margin:4px 0 8px' }, 'Appelez ou écrivez aux services concernés, puis indiquez-le dans l’application.'),
+      h('button', { class: 'danger big', onclick: () => go('transmettre', { id: aTrans[0].id }, { noPush: true }) }, 'Transmettre maintenant')) : null,
+    h('button', { class: (aTrans.length ? 'sec' : '') + ' big', onclick: () => go('home') }, aTrans.length ? 'Plus tard (retour à l’accueil)' : 'Retour à l’accueil'));
 };
 async function annulerRonde() {
   const ronde = await kvGet('ronde');
@@ -2027,11 +2044,21 @@ VIEWS.signalement = async ({ cat, from, ctl, mc }) => {
     ...corps,
     k > 0 ? h('button', { class: 'link', onclick: back }, '◀ Étape précédente') : null);
 };
-VIEWS.sigEnregistre = async ({ ref }) => page('Signalement enregistré', null,
+VIEWS.sigEnregistre = async ({ ref }) => {
+  const s = (await dbAll('sigs')).find(x => x.ref === ref);
+  const reste = s ? destsATransmettre(s) : [];
+  const tel = dn => ((state.cfg.contacts || {})[dn] || {}).tel;
+  return page('Signalement enregistré', null,
   h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Signalement enregistré'), h('p', null, `Référence ${ref}`),
-    h('p', { class: 'muted' }, navigator.onLine ? 'Il est envoyé au DPMS.' : 'Pas de réseau : il partira automatiquement dès qu’il y en aura.')),
-  h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'),
+    h('p', { class: 'muted' }, navigator.onLine ? 'Le DPMS le reçoit par l’application.' : 'Pas de réseau : il partira automatiquement dès qu’il y en aura.')),
+  reste.length ? h('div', { class: 'card a-transmettre' },
+    h('div', { class: 'at-titre' }, 'Maintenant : prévenir le service'),
+    h('p', { style: 'margin:4px 0 8px' }, reste.map(dn => tel(dn) ? `${dn} (${tel(dn)})` : dn).join(' · ')),
+    h('p', { class: 'small', style: 'margin:0 0 8px' }, 'Appelez ou envoyez un courriel, puis indiquez-le dans l’application.'),
+    h('button', { class: 'danger big', onclick: () => go('transmettre', { id: s.id }, { noPush: true }) }, 'Transmettre maintenant'),
+    h('button', { class: 'link', onclick: () => go('home') }, 'Plus tard : il reste en rouge sur l’accueil')) : h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'),
   h('button', { class: 'sec', onclick: () => { sigDraft = null; go('signalement', { from: 'hr' }, { noPush: true }); } }, 'Faire un autre signalement'));
+};
 /* Destinataire propre à un parking : « Designa (Dumotel) » n'est proposé que pour les signalements de Dumotel */
 function destSite(nom) {
   const m = /\(([^)]+)\)\s*$/.exec(nom || ''); if (!m) return null;
@@ -3051,12 +3078,14 @@ async function programmerRappelPlanning(abos) {
 /* ====================================================================== */
 const ACTIONS = {
   tel: 'Appel ou message téléphonique', mail: 'Courriel envoyé', autre: 'Transmis autrement', relance: 'Relance',
-  reponse: 'Réponse reçue', prevue: 'Intervention prévue', faite: 'Intervention réalisée', note: 'Note'
+  reponse: 'Réponse reçue', prevue: 'Intervention prévue', faite: 'Intervention réalisée', note: 'Note', echec: 'Appel sans réponse'
 };
 const SUIVIS = ['À transmettre', 'En attente de réponse', 'Réponse reçue', 'Intervention prévue', 'Intervention réalisée'];
 function suiviEtat(s) {
-  const a = (s.actions || []).filter(x => x.type !== 'note');
-  if (!a.length) return 'À transmettre';
+  const a = (s.actions || []).filter(x => x.type !== 'note' && x.type !== 'echec');
+  const reste = destsATransmettre(s).length;
+  if (reste && !a.some(x => ['reponse', 'prevue', 'faite'].includes(x.type))) return 'À transmettre';   // tant qu'un service n'a pas été prévenu
+  if (!a.length) return 'En attente de réponse';
   return { reponse: 'Réponse reçue', prevue: 'Intervention prévue', faite: 'Intervention réalisée' }[a[a.length - 1].type] || 'En attente de réponse';
 }
 function suiviBadge(s) {
@@ -3513,6 +3542,111 @@ async function cartePush() {
 
 /* ---------- Vues de traitement (équipe : téléphone agents ou PC de la loge) ---------- */
 /* Liste à traiter, regroupée par étape */
+/* ---------- Transmission aux services : appel ou courriel faits « à l'extérieur »
+   (téléphone de service, ordinateur de la loge), puis indiqués dans l'application ---------- */
+const DEST_AUTO_RE = /\bdpms\b/i;   // le DPMS reçoit tout par l'application : rien à transmettre
+const TYPES_TRANSMIS = ['tel', 'mail', 'autre', 'relance'];
+function destsATransmettre(s) {
+  return (s.dests || []).filter(dn => !DEST_AUTO_RE.test(dn) && !(s.actions || []).some(a => a.dest === dn && TYPES_TRANSMIS.includes(a.type)));
+}
+async function sigsATransmettre() {
+  return (await dbAll('sigs')).filter(s => s.statut === 'ouvert' && suiviEtat(s) === 'À transmettre')
+    .sort((a, b) => (b.urgent - a.urgent) || (a.ts || a.jour || '').localeCompare(b.ts || b.jour || ''));
+}
+async function copier(texte, quoi) {
+  try { await navigator.clipboard.writeText(texte); toast(`${quoi} copié.`); }
+  catch (e) { prompt(`Copiez ${quoi.toLowerCase()} :`, texte); }
+}
+let _transPar = null;
+VIEWS.transmettre = async ({ id } = {}) => {
+  const liste = await sigsATransmettre();
+  let s = id ? await dbGet('sigs', id) : liste[0];
+  if (!s) return page('Transmettre', { back: () => go('home') }, h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Tout est transmis'), h('p', null, 'Aucun signalement n’attend d’être transmis.')), h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'));
+  const ronde = await kvGet('ronde');
+  if (!_transPar) _transPar = ronde ? ronde.agent : null;
+  const rang = liste.findIndex(x => x.id === s.id), total = liste.length;
+  const reste = destsATransmettre(s);
+  const suivant = liste.find(x => x.id !== s.id);
+  const recharger = () => go('transmettre', { id: s.id }, { noPush: true, keepScroll: true });
+  const sujet = `[Parking ${siteNom(s.site)}] ${sigTitre(s)} — ${s.ref}`;
+  const texte = texteSignalement(s);
+  const precisions = {};
+  const enregistrer = (dn, type) => safe(async () => {
+    if (!_transPar) { toast('Indiquez d’abord qui transmet (en haut).', true); document.querySelector('.qui-transmet') && document.querySelector('.qui-transmet').scrollIntoView({ behavior: 'smooth' }); return; }
+    const p = (precisions[dn] && precisions[dn].value || '').trim();
+    await appendEvent('action', { site: s.site, agent: _transPar }, { sig: s.id, ref: s.ref, type, dest: dn, texte: type === 'echec' ? ('Pas de réponse' + (p ? ' — ' + p : '')) : p, prevu: null, quand: new Date().toISOString() });
+    await fold(); syncNow();
+    const maj = await dbGet('sigs', s.id);
+    toast(type === 'echec' ? `Noté : ${dn} pas joint. Réessayez plus tard.` : type === 'relance' ? `Relance de ${dn} notée.` : `Noté : ${dn} ${type === 'tel' ? 'appelé' : type === 'mail' ? 'prévenu par courriel' : 'prévenu'}.`);
+    if (type !== 'echec' && type !== 'relance' && !destsATransmettre(maj).length) go('transmisOk', { id: s.id }, { noPush: true });
+    else recharger();
+  });
+  const carteDest = dn => {
+    const c = (state.cfg.contacts || {})[dn] || {};
+    const fait = (s.actions || []).filter(a => a.dest === dn && TYPES_TRANSMIS.includes(a.type)).pop();
+    const echec = (s.actions || []).filter(a => a.dest === dn && a.type === 'echec').pop();
+    precisions[dn] = h('input', { type: 'text', placeholder: 'Précision (facultatif) : nom de la personne jointe, n° de ticket…' });
+    return h('div', { class: 'card dest' + (fait ? ' fait' : '') },
+      h('div', { class: 'dest-nom' }, dn, fait ? h('span', { class: 'badge b-ok' }, `${ACTIONS[fait.type].toLowerCase()} ${fmtQuand(fait.quand || fait.jour)}${fait.par ? ' — ' + fait.par : ''}`) : echec ? h('span', { class: 'badge b-warn' }, `pas joint ${fmtQuand(echec.quand || echec.jour)}`) : h('span', { class: 'badge b-bad' }, 'à prévenir')),
+      c.tel ? h('div', { class: 'dest-l' }, h('span', { class: 'muted small' }, 'Téléphone'), h('a', { class: 'dest-tel', href: 'tel:' + c.tel.replace(/\s/g, '') }, c.tel)) : null,
+      c.mail ? h('div', { class: 'dest-l' }, h('span', { class: 'muted small' }, 'Courriel'), h('span', { class: 'dest-mail' }, c.mail), h('button', { class: 'sec mini', onclick: () => copier(c.mail, 'Adresse') }, 'Copier l’adresse')) : null,
+      !c.tel && !c.mail ? h('p', { class: 'muted small' }, 'Coordonnées non renseignées : demandez-les au DPMS.') : null,
+      fait ? [precisions[dn], h('div', { class: 'dest-btns' }, h('button', { class: 'sec', onclick: enregistrer(dn, 'relance') }, 'J’ai relancé ce service'))] : [
+        precisions[dn],
+        h('p', { class: 'small', style: 'margin:10px 0 4px;font-weight:600' }, 'Une fois fait, touchez :'),
+        h('div', { class: 'dest-btns' },
+          h('button', { class: 'ok', onclick: enregistrer(dn, 'tel') }, '✓ J’ai appelé'),
+          h('button', { class: 'ok', onclick: enregistrer(dn, 'mail') }, '✓ J’ai envoyé le courriel')),
+        h('div', { class: 'dest-btns' },
+          h('button', { class: 'sec', onclick: enregistrer(dn, 'echec') }, 'Pas de réponse'),
+          h('button', { class: 'sec', onclick: enregistrer(dn, 'autre') }, 'Prévenu autrement'))]);
+  };
+  const th = await thumbOf(s);
+  return page('Transmettre', { back: () => go('home') },
+    total > 1 && rang >= 0 ? h('p', { class: 'compte-etape' }, `Signalement ${rang + 1} sur ${total} à transmettre`) : null,
+    h('div', { class: 'card' + (s.urgent ? ' urgent-bord' : '') },
+      h('div', { style: 'display:flex;gap:12px;align-items:flex-start' },
+        th ? h('img', { src: th, alt: '', class: 'vignette' }) : null,
+        h('div', { style: 'flex:1;min-width:0' },
+          h('b', { style: 'font-size:19px' }, sigTitre(s)), s.urgent ? h('span', { class: 'badge b-bad' }, 'URGENT') : null,
+          h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${s.ref} — signalé ${depuisJours(s.jour)}${s.agent ? ' par ' + s.agent : ''}`),
+          s.desc ? h('div', { class: 'small' }, s.desc) : null))),
+    h('div', { class: 'banner warn', style: 'font-size:16px' }, h('b', null, 'À faire : '), reste.length ? `prévenir ${reste.join(', ')}` : 'rien de plus',
+      ' — par téléphone (téléphone de service) ou par courriel (ordinateur de la loge), puis l’indiquer ici.'),
+    h('div', { class: 'card qui-transmet' }, h('p', { class: 'question', style: 'margin-top:0' }, 'Qui transmet ?'), chips(state.cfg.agents, _transPar, v => { _transPar = v; })),
+    ...(s.dests || []).filter(dn => !DEST_AUTO_RE.test(dn)).map(carteDest),
+    h('details', { class: 'card' }, h('summary', null, 'Texte à dire ou à envoyer (copier)'),
+      h('p', { class: 'small', style: 'margin:8px 0 4px' }, h('b', null, 'Objet : '), sujet),
+      h('pre', { class: 'texte-sig' }, texte),
+      h('div', { class: 'row' },
+        h('button', { class: 'sec', onclick: () => copier(sujet, 'Objet') }, 'Copier l’objet'),
+        h('button', { class: 'sec', onclick: () => copier(texte, 'Texte') }, 'Copier le texte')),
+      (s.photos || []).length ? h('button', { class: 'sec', onclick: safe(async () => { showBusy('Photos…'); try { const { photos } = await photosDe(s.photos); hideBusy(); photos.forEach((p, i) => download(p.blob, `${s.ref}-${i + 1}.jpg`)); toast(`${photos.length} photo(s) téléchargée(s) : joignez-les au courriel.`); } finally { hideBusy(); } }) }, 'Télécharger les photos (pour le courriel)') : null),
+    suivant ? h('button', { class: 'link', onclick: () => go('transmettre', { id: suivant.id }, { noPush: true }) }, 'Passer au signalement suivant (celui-ci restera à transmettre)') : null,
+    h('button', { class: 'link', onclick: () => go('suiviSig', { id: s.id }) }, 'Voir la fiche complète'));
+};
+VIEWS.transmisOk = async ({ id }) => {
+  const s = await dbGet('sigs', id);
+  const liste = await sigsATransmettre();
+  return page('Transmis', null,
+    h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, 'Signalement transmis'), h('p', null, s ? `${sigTitre(s)} — ${s.ref}` : ''),
+      h('p', { class: 'muted' }, 'Il passe en « en attente de réponse ». Quand le service répond ou intervient, indiquez-le dans « Suivi des signalements ».')),
+    liste.length ? h('button', { class: 'danger big', onclick: () => go('transmettre', { id: liste[0].id }, { noPush: true }) }, `Transmettre le suivant (${liste.length} restant${liste.length > 1 ? 's' : ''})`) : null,
+    h('button', { class: (liste.length ? 'sec' : 'ok') + ' big', onclick: () => go('home') }, 'Retour à l’accueil'));
+};
+async function carteATransmettre() {
+  const liste = await sigsATransmettre();
+  if (!liste.length) return null;
+  const vieux = liste.filter(s => joursDepuis(s.ts || s.jour) >= 1).length;
+  return h('div', { class: 'card a-transmettre' },
+    h('div', { class: 'at-titre' }, `${liste.length} signalement${liste.length > 1 ? 's' : ''} à transmettre`),
+    h('p', { class: 'small', style: 'margin:2px 0 8px' }, vieux ? `dont ${vieux} depuis plus d’un jour. ` : '', 'Appelez ou écrivez au service concerné, puis indiquez-le dans l’application.'),
+    ...liste.slice(0, 3).map(s => h('button', { class: 'list-item', onclick: () => go('transmettre', { id: s.id }) },
+      h('div', { class: 'l1' }, sigTitre(s), s.urgent ? h('span', { class: 'badge b-bad' }, 'URGENT') : null),
+      h('div', { class: 'muted small' }, `${siteNom(s.site)} — ${depuisJours(s.jour)} — à prévenir : ${destsATransmettre(s).join(', ')}`))),
+    liste.length > 3 ? h('p', { class: 'muted small' }, `… et ${liste.length - 3} autre(s).`) : null,
+    h('button', { class: 'danger big', onclick: () => go('transmettre', { id: liste[0].id }) }, 'Transmettre maintenant'));
+}
 const PROCHAINE = { 'À transmettre': 'À transmettre aux services', 'En attente de réponse': 'Relancer si pas de réponse', 'Réponse reçue': 'Suivre l’intervention', 'Intervention prévue': 'Vérifier le passage', 'Intervention réalisée': 'À clore si le problème est réglé' };
 VIEWS.suivi = async () => {
   const enCours = (await dbAll('sigs')).filter(s => s.statut === 'ouvert').sort((a, b) => (b.urgent - a.urgent) || (a.jour || '').localeCompare(b.jour || ''));
@@ -3524,7 +3658,7 @@ VIEWS.suivi = async () => {
     for (const s of l) {
       const th = await thumbOf(s);
       const nl = await nonLus(s);
-      items.push(h('button', { class: 'list-item', onclick: () => go('suiviSig', { id: s.id }) },
+      items.push(h('button', { class: 'list-item', onclick: () => go(e === 'À transmettre' ? 'transmettre' : 'suiviSig', { id: s.id }) },
         h('div', { style: 'display:flex;gap:12px;align-items:center' },
           th ? h('img', { src: th, alt: '', class: 'vignette' }) : h('div', { class: 'vignette vide' }),
           h('div', { style: 'flex:1;min-width:0' },
@@ -3533,7 +3667,8 @@ VIEWS.suivi = async () => {
     }
     groupes.push(h('h2', { class: 'groupe' + (e === 'À transmettre' ? ' rouge' : '') }, `${PROCHAINE[e]} (${l.length})`), ...items);
   }
-  return page('Traitement des signalements', { back: true },
+  return page('Suivi des signalements', { back: true },
+    h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'Touchez un signalement pour indiquer du nouveau : réponse du service, intervention prévue ou faite, problème réglé.'),
     groupes.length ? groupes : h('p', { class: 'muted' }, 'Aucun signalement en cours.'));
 };
 
@@ -3573,7 +3708,7 @@ VIEWS.suiviSig = async ({ id, mode }) => {
       (s.messages || []).length ? h('button', { class: 'sec', onclick: () => go('echanges', { id: s.id }) }, icoCourrier(await nonLus(s), !!s.demande), 'Échanges avec le DPMS') : null,
       s.statut === 'clos' ? h('div', { class: 'banner ok' }, 'Ce signalement est clos.') : [
         h('p', { class: 'question' }, 'Que voulez-vous faire ?'),
-        h('button', { class: 'choix', onclick: () => ouvrir('transmettre') }, suiviEtat(s) === 'À transmettre' ? 'Transmettre (appel ou courriel)' : 'Relancer (appel ou courriel)'),
+        h('button', { class: 'choix' + (suiviEtat(s) === 'À transmettre' ? ' rouge' : ''), onclick: () => go('transmettre', { id: s.id }) }, suiviEtat(s) === 'À transmettre' ? 'Transmettre au service (appel ou courriel)' : 'Relancer le service (appel ou courriel)'),
         h('button', { class: 'choix', onclick: () => ouvrir('reponse') }, ACTIONS_EQUIPE.reponse.titre),
         h('button', { class: 'choix', onclick: () => ouvrir('prevue') }, ACTIONS_EQUIPE.prevue.titre),
         h('button', { class: 'choix', onclick: () => ouvrir('faite') }, ACTIONS_EQUIPE.faite.titre),
@@ -3585,12 +3720,7 @@ VIEWS.suiviSig = async ({ id, mode }) => {
           ...s.suivi.map(v => h('p', { class: 'small', style: 'margin:2px 0' }, `${fmtJour(v.jour)} — ${v.agent || ''} : ${VERDICTS[v.verdict]}${v.comment ? ' — ' + v.comment : ''}`))] : null));
   }
 
-  if (mode === 'transmettre') {
-    return page(suiviEtat(s) === 'À transmettre' ? 'Transmettre' : 'Relancer', { back: menu },
-      await resume(false),
-      contactsBloc(s),
-      h('button', { class: 'link', onclick: () => ouvrir('autre') }, 'Transmis autrement (en main propre, à la loge…)'));
-  }
+  if (mode === 'transmettre') return VIEWS.transmettre({ id });
 
   const def = ACTIONS_EQUIPE[mode];
   const cle = id + '|' + mode;
