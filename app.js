@@ -2903,7 +2903,7 @@ async function exporterPlanning(m, G) {
 VIEWS.planningParam = async ({ prefill } = {}) => {
   const c = JSON.parse(JSON.stringify(state.cfg)); c.planning = { ...PLANNING_DEFAUT, ...(c.planning || {}) };
   if (prefill) { c.planning.type = prefill.type; if (prefill.regles) c.planning.regles = prefill.regles; if (prefill.ancre) c.planning.ancre = prefill.ancre; }
-  const tType = h('textarea', { value: c.planning.type, style: 'min-height:160px;font-family:ui-monospace,Consolas,monospace;font-size:14px', placeholder: 'Yacine : R MAT MAT MAT MAT SOI MAT | R MAT MAT MAT MAT R R' });
+  const tType = h('textarea', { value: c.planning.type, style: 'min-height:160px;font-family:ui-monospace,Consolas,monospace;font-size:14px', placeholder: 'Agent 1 : R MAT MAT MAT MAT SOI MAT | R MAT MAT MAT MAT R R' });
   const tRegles = h('textarea', { value: c.planning.regles, style: 'min-height:140px' });
   const ancre = h('input', { type: 'date', value: c.planning.ancre });
   const vacs = c.planning.vacations.map(v => ({ v, lbl: h('input', { type: 'text', value: v.lbl }), d: h('input', { type: 'time', value: v.debut }), f: h('input', { type: 'time', value: v.fin }) }));
