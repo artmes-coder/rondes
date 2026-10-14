@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.7.1.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.7.2.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -102,6 +102,19 @@ Toute demande reçue (usager sur place, appel, courriel, service ou élu) est en
 - **Fiche** : **Répondre par courriel** (courriel pré-rempli avec la référence ; au retour, l'application demande si la réponse est partie, réglée ou d'attente), **Appeler** (même confirmation, ou « pas de réponse »), **Enregistrer une réponse déjà donnée** (sur place, téléphone, courriel, courrier), note, clore sans réponse, rouvrir ; le DPMS peut annuler une saisie erronée.
 - **Horodatage** : heure de réception, heure de chaque réponse et délai de la première réponse ; liste « À traiter » (les plus anciennes en premier), carte sur l'accueil superviseur, onglet **Main courante** de l'Excel complet, rubrique de la synthèse hebdomadaire (entrées par canal et par objet, délai moyen de réponse, demandes en attente), notification « Main courante » (réglable).
 
+### Planning des agents
+**Superviseur** : carte **Planning des agents** de l'accueil (mois en cours et mois suivant ; à partir du 15, « planning du mois suivant à préparer »).
+- **Une fois** : **Planning-type et règles** — le cycle de deux semaines (une ligne par agent : `Nom : 7 codes semaine 1 | 7 codes semaine 2`, R = repos), le lundi d'une semaine 1, les règles contrôlées (`couverture : 08:00-20:00`, `heures par quinzaine : 70`, `jamais sur la même vacation : Nom1, Nom2`, `jamais le dimanche : Nom`, `lignes internes : Vacataire`) et les horaires des vacations.
+- **Chaque mois** (semaines complètes, du lundi qui précède le 1er au dimanche qui suit le dernier jour) :
+  1. **Absences connues** : agent, dates, congés / maladie / formation / absence ; ou toucher une case du tableau pour la changer.
+  2. Le tableau est pré-rempli par le planning-type ; les **contrôles** s'affichent en direct (présence continue, vacations incompatibles, jours interdits, heures par quinzaine — une absence un jour normalement travaillé compte comme travaillée ; jours de repos du planning-type travaillés, pour information).
+  3. Mois compliqué : **Préparer le prompt pour Claude** (avec une consigne facultative) copie un texte complet — règles, planning-type, absences, projet, problèmes, format de réponse. Le coller dans la conversation Claude consacrée au planning ; copier sa réponse ; **Appliquer la réponse de Claude** : le tableau se met à jour, les cases proposées par Claude sont encadrées en vert ; les absences saisies ne peuvent pas être modifiées par la proposition.
+  4. **Publier** : les agents reçoivent une notification (« Planning de novembre publié », puis, à chaque modification, la liste des changements). Les cases modifiées depuis la dernière publication sont encadrées en orange. Export **Excel**.
+- **Rappel** : notification le 15 de chaque mois à 9 h, « Planning de … à préparer » (relais version 6), sauf si le mois suivant est déjà publié.
+- **Confidentialité** : les motifs d'absence et les lignes internes ne sont visibles que des superviseurs ; les agents voient « Absent ».
+
+**Agents** : carte **Planning** sur l'accueil (qui est du matin, du midi, du soir aujourd'hui ; « mis à jour » après une publication) ; onglet Planning par semaine, ou mois par agent ; notes du DPMS.
+
 ### Police municipale
 Signalements de véhicules (ou tout ce qui est adressé à la PM) avec plaque, emplacement, photos et constats. Observations, puis **Traité** (clôt le signalement) ou **Non traité** (le laisse ouvert, observation visible des agents). Export Excel.
 
@@ -135,6 +148,8 @@ Sécurité incendie | Ateliers          ← catégorie de signalement | destinat
 ```
 
 ## 6. Bon à savoir
+
+- **Mises à jour** : chaque appareil vérifie la présence d'une nouvelle version à chaque retour sur l'application et toutes les 15 minutes, et l'installe dès que l'écran ne contient aucune saisie en cours (jamais au milieu d'un signalement). La version figure en bas de l'accueil. Un appareil qui reçoit une information d'une version plus récente affiche « Mettre à jour maintenant ».
 
 - Ne jamais vider les données du navigateur sur un téléphone agents : les saisies pas encore envoyées n'existent que sur lui.
 - **Synchronisation** : chaque appareil n'envoie que ses propres saisies, une seule fois ; il ne renvoie jamais ce qu'il a reçu. Plusieurs téléphones agents peuvent être configurés avec le même QR. Les décisions prises pendant une relève attendent leur tour dans la file de l'appareil ; une décision reçue deux fois (renvoi après une réponse perdue du relais) n'est appliquée qu'une fois. Une suppression faite par le DPMS s'applique sur tous les appareils à leur relève ; les saisies d'agents qui visent un signalement supprimé sont ignorées (ni affichées, ni notifiées, ni exportées).

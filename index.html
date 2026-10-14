@@ -164,6 +164,39 @@ button.big.rep{min-height:60px;margin-top:8px}
 .rondier.compact{padding:6px 12px}
 .rondier.compact b{font-size:19px}
 .nav-points{margin-top:8px;justify-content:space-between}
+/* Planning */
+.plan-scroll{overflow-x:auto;margin:10px 0;border:1px solid var(--line);border-radius:12px;background:#fff}
+table.plan{border-collapse:separate;border-spacing:0;font-size:13px;min-width:100%}
+table.plan th,table.plan td{border-right:1px solid #e3e7ee;border-bottom:1px solid #e3e7ee;text-align:center;padding:0}
+table.plan th.nom{position:sticky;left:0;z-index:2;background:#fff;text-align:left;padding:6px 10px;white-space:nowrap;font-weight:700;min-width:110px}
+table.plan thead th{background:#f3f5f8;font-weight:600;padding:4px 0;min-width:34px;line-height:1.15}
+table.plan thead th.we{background:#e9edf3}
+table.plan thead th.hors,table.plan td.hors{opacity:.55}
+table.plan thead th.pb{background:var(--bad-bg);color:var(--bad);box-shadow:inset 0 -3px 0 var(--bad)}
+table.plan thead th.auj{box-shadow:inset 0 3px 0 var(--accent)}
+table.plan td{height:34px;min-width:34px;cursor:pointer;font-weight:700;font-size:11px;color:#fff}
+table.plan tr.interne th.nom{color:var(--muted);font-weight:500}
+table.plan td.modif{box-shadow:inset 0 0 0 3px #ffb000}
+table.plan td.claude{box-shadow:inset 0 0 0 3px #19c37d}
+.pc-MAT{background:#0b63b6;color:#fff}.pc-MID{background:#7030a0;color:#fff}.pc-SOI{background:#c0262d;color:#fff}
+.pc-R,.pc-vide{background:#fff;color:var(--muted)}
+.pc-CA{background:#f0a020;color:#fff}.pc-MAL{background:#6b7280;color:#fff}.pc-FOR{background:#0f8a7a;color:#fff}.pc-ABS{background:#8a5a2b;color:#fff}
+.plan-legende{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+.plan-legende .pc{padding:3px 8px;border-radius:6px;font-size:12px;font-weight:600;border:1px solid var(--line)}
+.plan-legende .claude-ex{box-shadow:inset 0 0 0 3px #19c37d;background:#fff;color:var(--ink)}
+.plan-legende .modif-ex{box-shadow:inset 0 0 0 3px #ffb000;background:#fff;color:var(--ink)}
+.plan-choix{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
+.plan-choix button.pc{min-height:52px;font-size:16px;justify-content:flex-start;border:2px solid transparent}
+.plan-choix button.pc-R{border-color:var(--line)}
+.plan-choix button.pc.on{outline:4px solid var(--accent);outline-offset:1px}
+table.plan-h{border-collapse:collapse;font-size:14px}
+table.plan-h th,table.plan-h td{padding:4px 10px;border-bottom:1px solid var(--line);text-align:left}
+table.plan-h td.ok{color:var(--ok);font-weight:700}table.plan-h td.bad{color:var(--bad);font-weight:700}
+.pa-jour h3{margin:0 0 8px;display:flex;gap:8px;align-items:center}
+.pa-jour.auj{border:2px solid var(--accent)}
+.pa-l{display:flex;justify-content:space-between;gap:10px;padding:8px 12px;border-radius:10px;margin:4px 0;font-size:17px}
+.pa-l .pa-v{font-weight:600;opacity:.95}
+.pa-c{padding:2px 8px;border-radius:6px}
 /* Contrôle de ronde : liste déroulante des thèmes */
 .themes{display:flex;flex-direction:column;gap:10px}
 .theme{background:#fff;border:2px solid var(--line);border-left-width:10px;border-radius:14px;overflow:hidden}

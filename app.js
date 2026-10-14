@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.7.1';
+const APP_VERSION = '2.7.2';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -591,6 +591,7 @@ function normalizeCfg(c) {
   n.rondeMatin = { actif: true, heure: '20:00', jours: [1, 2, 3, 4, 5, 6, 7], ...(n.rondeMatin || {}) };
   if (!n.rondeMatin.v2) { if (n.rondeMatin.heure === '12:00') n.rondeMatin.heure = '20:00'; n.rondeMatin.v2 = true; }   // ancienne valeur par défaut : fin de service des agents à 20 h
   n.synthese = { actif: true, jour: 1, heure: '08:00', ...(n.synthese || {}) };
+  n.planning = { ...PLANNING_DEFAUT, ...(n.planning || {}) };
   n.v = 3;
   return n;
 }
@@ -682,6 +683,7 @@ function go(view, params = {}, opts = {}) {
 }
 let _renderSeq = 0;
 async function render() {
+  if (_majPrete && state.view === 'home' && appliquerMiseAJour()) return;
   const root = document.getElementById('app');
   const fn = VIEWS[state.view] || VIEWS.home;
   const my = ++_renderSeq;
@@ -789,6 +791,8 @@ function pmBanner(s) {
 /* Reconstitution de l'état à partir du journal                           */
 /* ====================================================================== */
 const ORD_LOCAL = 1e15;
+const TYPES_DEC = new Set(['cfg', 'action', 'msg', 'demande_close', 'vapid', 'contact', 'contact_suivi', 'ronde_close', 'registre', 'ctl_reactiver', 'sig', 'suppr', 'annul_suppr', 'planning']);
+const TYPES_EV = new Set(['signalement', 'revue', 'action', 'pm', 'barriere', 'ronde_debut', 'ronde_fin', 'ronde_annulee', 'ronde_agent', 'comptage', 'controle', 'msg', 'checklist', 'contact', 'contact_suivi']);
 async function fold() {
   const sup = state.mode === 'superviseur';
   const { entries, decQueue } = await (async () => {
@@ -816,6 +820,7 @@ async function fold() {
 
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [], regs = [], mcs = new Map();
   const rondesCloses = new Map();   // rid → décision du DPMS « ronde clôturée »
+  const planning = { jours: {}, notes: {}, pubs: [] }, planMotifs = {};
   let cfg = null, vapid = null;
   const alertes = [];
   // Précédence causale : une saisie d'agent ne change le statut (clos / ouvert) que si l'appareil
@@ -823,6 +828,9 @@ async function fold() {
   // Sinon (décision du DPMS ou d'un autre appareil qu'il ignorait) : le constat est conservé, le statut ne bouge pas.
   const nDe = e => e.local ? Infinity : (e.n || 0);
   const decVues = new Set();
+  let inconnu = false;
+  for (const { e } of items) if ((e.kind === 'dec' && e.dec && e.dec.type && !TYPES_DEC.has(e.dec.type)) || (e.kind === 'ev' && e.ev && !TYPES_EV.has(e.ev.t))) inconnu = true;
+  if (inconnu !== !!(await kvGet('majRequise'))) { await kvSet('majRequise', inconnu); if (inconnu) chercherMiseAJour(true); }
   const connu = (x, ev) => ev.vu == null || x.statutDev === ev.dev || (x.statutN || 0) <= ev.vu;
   const marquer = (x, e, qui) => { x.statutN = nDe(e); x.statutDev = qui; };
   for (const { e } of items) {
@@ -921,6 +929,11 @@ async function fold() {
       else if (d.type === 'vapid') { if (!vapid && d.pub && d.priv) vapid = { pub: d.pub, priv: d.priv }; }
       else if (d.type === 'contact') { mcAjout(mcs, d.contact, d.par || 'DPMS'); const c = mcs.get(d.contact && d.contact.id); if (c && c.statutN == null) marquer(c, e, 'dpms'); }
       else if (d.type === 'contact_suivi') mcSuivi(mcs, d.suivi, d.par || 'DPMS', { connu: () => true, marquer: x => marquer(x, e, 'dpms') });
+      else if (d.type === 'planning' && d.du && d.au && d.jours) {
+        for (let iso = d.du; iso <= d.au; iso = ajJ(iso, 1)) planning.jours[iso] = d.jours[iso] || {};
+        planning.notes[d.mois] = d.notes || '';
+        planning.pubs.push({ id: d.id, ts: d.ts, mois: d.mois, du: d.du, au: d.au, chg: d.chg || [] });
+      }
       else if (d.type === 'ronde_close' && d.rid) {
         if (!rondesCloses.has(d.rid)) rondesCloses.set(d.rid, d);
         const r = sup && rondes.get(d.rid);
@@ -933,8 +946,12 @@ async function fold() {
         if (s) { Object.assign(s, d.patch); if (d.patch && 'statut' in d.patch) marquer(s, e, 'dpms'); s.journalDPMS.push({ ts: d.ts, action: d.action, par: d.par || 'DPMS' }); }
       }
     } else if (e.kind === 'note' && sup) {
-      const s = sigs.get(e.dec.sig);
-      if (s) s.notes = e.dec.text;
+      if (e.dec.type === 'planning_motifs' && e.dec.du && e.dec.au) {   // motifs d'absence et lignes internes : superviseurs seulement
+        for (let iso = e.dec.du; iso <= e.dec.au; iso = ajJ(iso, 1)) planMotifs[iso] = { ...((e.dec.motifs || {})[iso] || {}), ...((e.dec.internes || {})[iso] || {}) };
+      } else {
+        const s = sigs.get(e.dec.sig);
+        if (s) s.notes = e.dec.text;
+      }
     }
   }
 
@@ -978,6 +995,8 @@ async function fold() {
   for (const x of sigs.values()) if (x.mc && mcs.has(x.mc)) mcs.get(x.mc).sigs.push(x.id);
   await kvSet('mainCourante', [...mcs.values()].sort((a, b) => b.quand.localeCompare(a.quand)));
   await kvSet('rondesCloses', [...rondesCloses.keys()]);
+  await kvSet('planning', planning);
+  if (sup) await kvSet('planningMotifs', planMotifs);
   if (vapid) await kvSet('vapid', vapid);
   await kvSet('barrieres', [...barr.values()]);
   await kvSet('supprimes', { sigs: [...del.sigs], rids: [...del.rids] });
@@ -1055,15 +1074,15 @@ const NOTIF_TYPES = {
     ['action', 'Traitement (appels, courriels, interventions)'], ['pm', 'Suites de la police municipale'], ['msg', 'Réponses des agents'],
     ['barriere_ouverte', 'Barrière ouverte'], ['barriere_fermee', 'Barrière refermée'], ['ronde_fin', 'Ronde terminée'], ['ronde_annulee', 'Ronde annulée'],
     ['contact', 'Main courante (usagers, demandes, réponses)'],
-    ['alerte_ronde', 'Aucune ronde dans la journée'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire']],
-  agent: [['msg', 'Messages et demandes d’action du DPMS']]
+    ['alerte_ronde', 'Aucune ronde dans la journée'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire'], ['rappel_planning', 'Rappel du 15 : planning du mois suivant']],
+  agent: [['msg', 'Messages et demandes d’action du DPMS'], ['planning', 'Planning publié ou modifié']]
 };
 const GROUPES_NOTIF = { urgent: 'Signalements', barriere_ouverte: 'Barrières', ronde_fin: 'Rondes', contact: 'Main courante', alerte_ronde: 'Alertes programmées (envoyées par le relais)' };
 const typesNotif = () => NOTIF_TYPES[state.mode === 'superviseur' ? 'superviseur' : 'agent'];
 async function prefsNotif() {
   const p = await kvGet('notifPrefs'), tous = typesNotif().map(x => x[0]);
   if (!p) return tous;
-  const connus = (await kvGet('notifConnus')) || tous.filter(t => t !== 'contact');   // types ajoutés après le choix : cochés d'office
+  const connus = (await kvGet('notifConnus')) || tous.filter(t => !['contact', 'planning', 'rappel_planning'].includes(t));   // types ajoutés après le choix : cochés d'office
   const nouveaux = tous.filter(t => !connus.includes(t));
   if (nouveaux.length) { p.push(...nouveaux); await kvSet('notifPrefs', p); await kvSet('notifConnus', tous); }
   return p;
@@ -1215,6 +1234,36 @@ async function noteIllisible(x) {
   const l = (await kvGet('illisibles')) || [];
   l.push({ n: x.n, k: x.k, at: x.at }); await kvSet('illisibles', l.slice(-100));
 }
+
+/* ---------- Mise à jour de l'application ----------
+   Le téléphone ou l'ordinateur peut rester ouvert des jours : la présence d'une nouvelle version est vérifiée
+   à chaque retour sur l'application et toutes les 15 min ; elle est installée dès que l'écran ne contient
+   aucune saisie en cours (accueil, listes), jamais au milieu d'un signalement. */
+let _swReg = null, _majPrete = false, _majVerifiee = 0;
+function chercherMiseAJour(force) {
+  if (!_swReg || (!force && Date.now() - _majVerifiee < 15 * 60000)) return;
+  _majVerifiee = Date.now();
+  _swReg.update().catch(() => { });
+}
+function saisieEnCours() {
+  if (VUES_SAISIE.includes(state.view) || ['contact', 'changerRondier', 'supConfig'].includes(state.view)) return true;
+  if (state.params && state.params.mode) return true;
+  if (document.getElementById('busy') || document.querySelector('.demande, .confirm-contact, .lightbox')) return true;
+  return [...document.querySelectorAll('main textarea, main input[type=text], main input[type=search], main input[type=email], main input[type=tel]')].some(x => x.value && x.value.trim() && x.defaultValue !== x.value);
+}
+function appliquerMiseAJour() {
+  if (!_majPrete || saisieEnCours()) return false;
+  _majPrete = false; location.reload(); return true;
+}
+if ('serviceWorker' in navigator) {
+  const avaitControleur = !!navigator.serviceWorker.controller;   // premier chargement : pas une mise à jour
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.type === 'maj') { if (e.ports && e.ports[0]) e.ports[0].postMessage('ok'); _majPrete = true; appliquerMiseAJour(); }
+  });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (avaitControleur) { _majPrete = true; appliquerMiseAJour(); } });
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { chercherMiseAJour(); appliquerMiseAJour(); } });
+setInterval(() => { chercherMiseAJour(); appliquerMiseAJour(); }, 60000);
 
 /* ====================================================================== */
 /* VUES                                                                   */
@@ -1401,12 +1450,15 @@ async function agentHome() {
   const ouvertes = await barrieresOuvertes();
   const cfg = state.cfg;
   const closeDPMS = await kvGet('rondeCloseDPMS');
+  const majRequise = await kvGet('majRequise');
   return page('Rondes parkings', null,
+    majRequise ? bandeauMaj() : null,
     closeDPMS ? h('div', { class: 'card', style: 'border:2px solid var(--warn);background:var(--warn-bg)' },
       h('b', null, `Ronde clôturée par le DPMS`),
       h('p', { style: 'margin:4px 0' }, `${siteNom(closeDPMS.site)} — ${closeDPMS.agent}, commencée à ${fmtHeure(closeDPMS.debut)}. Elle n’avait pas été terminée. Les contrôles déjà faits ont été envoyés.`),
       h('button', { class: 'sec', onclick: safe(async () => { await kvDel('rondeCloseDPMS'); render(); }) }, 'J’ai compris')) : null,
     await carteMessagesAccueil(),
+    await cartePlanningAgents(),
     ronde ? h('div', { class: 'card encours' },
       h('div', { class: 'small' }, 'Ronde en cours'),
       h('div', { class: 'grand' }, `${siteNom(ronde.site)} — ${ronde.agent}`),
@@ -2369,6 +2421,514 @@ async function carteMainCourante() {
     h('div', { class: 'row' }, h('button', { class: 'sec', onclick: () => { mcDraft = null; go('contact'); } }, 'Nouvelle entrée'), h('button', { class: 'sec', onclick: () => go('mainCourante', {}) }, 'Toute la main courante')));
 }
 /* ====================================================================== */
+/* PLANNING MENSUEL                                                       */
+/* Superviseur : grille du mois (semaines complètes), pré-remplie par le  */
+/* planning-type, absences saisies, contrôles, prompt pour Claude et      */
+/* import de sa réponse, publication. Agents : onglet Planning.           */
+/* ====================================================================== */
+const ABSENCES = { CA: 'Congés', MAL: 'Maladie', FOR: 'Formation', ABS: 'Absence' };
+const PLANNING_DEFAUT = {
+  ancre: '2026-09-14',
+  vacations: [{ code: 'MAT', lbl: 'Matin', debut: '08:00', fin: '15:00' }, { code: 'MID', lbl: 'Midi', debut: '10:30', fin: '17:30' }, { code: 'SOI', lbl: 'Soir', debut: '13:00', fin: '20:00' }],
+  type: '',
+  regles: 'couverture : 08:00-20:00\nheures par quinzaine : 70'
+};
+const NOMS_JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+const JC = ['D', 'L', 'Ma', 'Me', 'J', 'V', 'S'];
+const sansAccent = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const dISO = d => localDate(d);
+const dDe = iso => { const [y, m, j] = iso.split('-').map(Number); return new Date(y, m - 1, j); };
+const ajJ = (iso, n) => { const d = dDe(iso); d.setDate(d.getDate() + n); return dISO(d); };
+const ecartJ = (a, b) => Math.round((dDe(b) - dDe(a)) / 86400000);
+const jourCourt = iso => { const d = dDe(iso); return `${JC[d.getDay()]} ${d.getDate()}`; };
+const jourLong = iso => { const d = dDe(iso); return `${NOMS_JOURS[d.getDay()]} ${d.getDate()} ${MOIS_LONGS[d.getMonth()]}`; };
+const nomMois = m => { const [y, mm] = m.split('-').map(Number); return `${MOIS_LONGS[mm - 1]} ${y}`; };
+const moisDe = iso => iso.slice(0, 7);
+const moisSuivant = (m, n = 1) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm - 1 + n, 1); return dISO(d).slice(0, 7); };
+function periodeMois(m) {   // semaines complètes : du lundi qui précède le 1er au dimanche qui suit le dernier jour
+  const [y, mm] = m.split('-').map(Number);
+  const p = new Date(y, mm - 1, 1), d = new Date(y, mm, 0);
+  p.setDate(p.getDate() - ((p.getDay() + 6) % 7)); d.setDate(d.getDate() + (7 - d.getDay()) % 7);
+  const jours = []; for (let x = new Date(p); x <= d; x.setDate(x.getDate() + 1)) jours.push(dISO(x));
+  return { du: jours[0], au: jours[jours.length - 1], jours };
+}
+const minDe = hm => { const [a, b] = String(hm).split(':').map(Number); return a * 60 + (b || 0); };
+const hDe = min => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+/* Configuration : planning-type et règles (texte modifiable par le superviseur) */
+function cfgPlanning() { return { ...PLANNING_DEFAUT, ...((state.cfg && state.cfg.planning) || {}) }; }
+function vacationsP() { return cfgPlanning().vacations; }
+const estVacation = code => vacationsP().some(v => v.code === code);
+const libelleCode = (code, pourAgents) => {
+  const v = vacationsP().find(x => x.code === code);
+  if (v) return `${v.lbl} ${v.debut.replace(':', 'h').replace('h00', 'h')}-${v.fin.replace(':', 'h').replace('h00', 'h')}`;
+  if (code === 'R') return 'Repos';
+  if (ABSENCES[code]) return pourAgents ? 'Absent' : ABSENCES[code];
+  return '';
+};
+const CODES_OK = () => new Set([...vacationsP().map(v => v.code), 'R', ...Object.keys(ABSENCES)]);
+function trouverNom(token, noms) {
+  const t = sansAccent(token).replace(/\s+/g, ' ');
+  if (!t) return null;
+  return noms.find(n => sansAccent(n) === t) || noms.find(n => sansAccent(n).startsWith(t) || t.startsWith(sansAccent(n).split(' ')[0]) && sansAccent(n).split(' ')[0].length >= 3) || null;
+}
+function reglesPlanning() {
+  const r = { couverture: [480, 1200], heures: 70, incompatibles: [], interdits: [], internes: [] };
+  for (const raw of (cfgPlanning().regles || '').split('\n')) {
+    const i = raw.indexOf(':'); if (i < 0) continue;
+    const k = sansAccent(raw.slice(0, i)), v = raw.slice(i + 1).trim();
+    const noms = v.split(/[,;]/).map(x => x.trim()).filter(Boolean);
+    if (k.startsWith('couverture')) { const m = /(\d{1,2}[:h]\d{2})\s*-\s*(\d{1,2}[:h]\d{2})/.exec(v); if (m) r.couverture = [minDe(m[1].replace('h', ':')), minDe(m[2].replace('h', ':'))]; }
+    else if (k.startsWith('heures')) { const n = parseFloat(v.replace(',', '.')); if (n > 0) r.heures = n; }
+    else if (k.startsWith('jamais sur la meme vacation') || k.startsWith('jamais ensemble')) { if (noms.length > 1) r.incompatibles.push(noms); }
+    else if (k.startsWith('jamais le ')) { const j = NOMS_JOURS.indexOf(k.slice(10).trim()); if (j >= 0) noms.forEach(n => r.interdits.push({ nom: n, jour: j })); }
+    else if (k.startsWith('lignes internes') || k.startsWith('ligne interne')) r.internes.push(...noms);
+  }
+  return r;
+}
+function typePlanning() {   // { nom: [14 codes] }, ordre conservé
+  const out = [];
+  for (const raw of (cfgPlanning().type || '').split('\n')) {
+    const i = raw.indexOf(':'); if (i < 0) continue;
+    const nom = raw.slice(0, i).trim(); if (!nom) continue;
+    const codes = raw.slice(i + 1).replace(/\|/g, ' ').split(/\s+/).map(x => x.trim().toUpperCase()).filter(Boolean).map(x => x === '-' || x === '—' ? 'R' : x);
+    if (codes.length === 14) out.push({ nom, codes });
+  }
+  return out;
+}
+function lignesPlanning() {   // agents du planning-type (ou liste des agents), puis lignes internes
+  const t = typePlanning(), r = reglesPlanning();
+  const agents = t.length ? t.map(x => x.nom) : (state.cfg.agents || []).slice();
+  return { agents, internes: r.internes.filter(n => !agents.includes(n)) };
+}
+function codeType(nom, iso) {
+  const t = typePlanning().find(x => x.nom === nom);
+  if (!t) return '';
+  const k = ((ecartJ(cfgPlanning().ancre, iso) % 14) + 14) % 14;
+  return t.codes[k] || '';
+}
+
+/* Contrôles */
+function verifierPlanning(grille, jours) {
+  const regles = reglesPlanning(), { agents, internes } = lignesPlanning(), vacs = vacationsP();
+  const pb = [], parJour = {};
+  const ajout = (iso, msg, niveau = 'bad') => { pb.push({ iso, msg, niveau }); (parJour[iso] = parJour[iso] || []).push(niveau); };
+  const vac = c => vacs.find(v => v.code === c);
+  for (const iso of jours) {
+    const g = grille[iso] || {}, wd = dDe(iso).getDay();
+    // couverture continue
+    const iv = [...agents, ...internes].map(n => vac(g[n])).filter(Boolean).map(v => [minDe(v.debut), minDe(v.fin)]).sort((a, b) => a[0] - b[0]);
+    let t = regles.couverture[0]; const trous = [];
+    for (const [a, b] of iv) { if (a > t) trous.push([t, Math.min(a, regles.couverture[1])]); t = Math.max(t, b); if (t >= regles.couverture[1]) break; }
+    if (t < regles.couverture[1]) trous.push([t, regles.couverture[1]]);
+    trous.filter(([a, b]) => b > a).forEach(([a, b]) => ajout(iso, `personne de ${hDe(a)} à ${hDe(b)}`));
+    // jamais sur la même vacation
+    for (const groupe of regles.incompatibles) {
+      const ns = groupe.map(x => trouverNom(x, agents)).filter(Boolean);
+      for (let i = 0; i < ns.length; i++) for (let j = i + 1; j < ns.length; j++) if (vac(g[ns[i]]) && g[ns[i]] === g[ns[j]]) ajout(iso, `${ns[i]} et ${ns[j]} sur la même vacation (${vac(g[ns[i]]).lbl.toLowerCase()})`);
+    }
+    // jours interdits
+    for (const x of regles.interdits) { const n = trouverNom(x.nom, agents); if (n && x.jour === wd && vac(g[n])) ajout(iso, `${n} ne travaille jamais le ${NOMS_JOURS[wd]}`); }
+    // repos du planning-type travaillé (information)
+    for (const n of agents) if (vac(g[n]) && codeType(n, iso) === 'R') ajout(iso, `${n} travaille un jour de repos du planning-type`, 'info');
+  }
+  // heures par quinzaine (une absence un jour normalement travaillé compte comme travaillée)
+  const heures = {};
+  const anc = cfgPlanning().ancre;
+  const debQ = iso => ajJ(iso, -(((ecartJ(anc, iso) % 14) + 14) % 14));
+  const quinz = [...new Set(jours.map(debQ))].filter(q => jours.includes(q) && jours.includes(ajJ(q, 13)));
+  for (const n of agents) {
+    heures[n] = quinz.map(q => {
+      let min = 0;
+      for (let i = 0; i < 14; i++) {
+        const iso = ajJ(q, i), c = (grille[iso] || {})[n], v = vac(c);
+        if (v) min += minDe(v.fin) - minDe(v.debut);
+        else if (ABSENCES[c]) { const vt = vac(codeType(n, iso)); if (vt) min += minDe(vt.fin) - minDe(vt.debut); }
+      }
+      const h = Math.round(min / 6) / 10;
+      if (h !== regles.heures) pb.push({ iso: q, msg: `${n} : ${String(h).replace('.', ',')} h sur la quinzaine du ${jourCourt(q)} (attendu ${regles.heures} h)`, niveau: 'bad', quinzaine: true });
+      return { du: q, h };
+    });
+  }
+  return { pb, parJour, heures, quinz };
+}
+
+/* État : publié (journal), brouillon (local au superviseur) */
+async function planningPublie() { return (await kvGet('planning')) || { jours: {}, notes: {}, pubs: [] }; }
+async function grilleMois(m) {
+  const pub = await planningPublie(), motifs = state.mode === 'superviseur' ? ((await kvGet('planningMotifs')) || {}) : {};
+  const br = ((await kvGet('planningBrouillons')) || {})[m];
+  const { jours } = periodeMois(m), { agents, internes } = lignesPlanning();
+  const base = {}, grille = {};
+  for (const iso of jours) {
+    base[iso] = {}; grille[iso] = {};
+    for (const n of [...agents, ...internes]) {
+      const p = (motifs[iso] || {})[n] || (pub.jours[iso] || {})[n];
+      base[iso][n] = p || '';
+      grille[iso][n] = (br && br.cells[iso] && br.cells[iso][n] != null) ? br.cells[iso][n] : (p || codeType(n, iso) || '');
+    }
+  }
+  const publieMois = pub.pubs.filter(x => x.mois === m).slice(-1)[0] || null;
+  return { jours, agents, internes, base, grille, brouillon: br || null, publieMois, notes: br && br.notes != null ? br.notes : (pub.notes[m] || ''), pub };
+}
+async function majBrouillon(m, fn) {
+  await kvUpdate('planningBrouillons', all => {
+    const a = all || {}; const b = a[m] || { cells: {}, notes: null, claude: [] };
+    fn(b); b.maj = new Date().toISOString(); a[m] = b; return a;
+  });
+}
+const normCode = c => c && c !== 'R' ? c : 'R';   // case vide = repos
+function differences(G, avant, jours, lignes) {
+  const out = [];
+  for (const iso of jours) for (const n of lignes) { const a = normCode((avant[iso] || {})[n]), b = normCode((G[iso] || {})[n]); if (a !== b) out.push({ iso, n, a, b }); }
+  return out;
+}
+
+/* Prompt pour Claude */
+function promptClaude(m, G, consigne) {
+  const { jours, agents, internes } = G, cp = cfgPlanning(), regles = reglesPlanning(), v = verifierPlanning(G.grille, jours);
+  const L = [...agents, ...internes], larg = Math.max(...L.map(n => n.length), 8);
+  const ligne = (n, codes) => n.padEnd(larg) + ' : ' + codes.map(c => (c || 'R').padEnd(3)).join(' ');
+  const absences = [];
+  for (const n of agents) {   // périodes consécutives regroupées
+    let deb = null, code = null;
+    jours.concat([null]).forEach((iso, k) => {
+      const c = iso ? G.grille[iso][n] : null;
+      if (deb && c !== code) { const fin = jours[k - 1]; absences.push(`${n} : ${ABSENCES[code].toLowerCase()} ${deb === fin ? 'le ' + jourLong(deb) : `du ${jourLong(deb)} au ${jourLong(fin)}`}`); deb = null; }
+      if (iso && ABSENCES[c] && !deb) { deb = iso; code = c; }
+    });
+  }
+  return [
+    `Tu m'aides à établir le planning des agents de surveillance des parkings municipaux. Mois de ${nomMois(m)}, en semaines complètes : du ${jourLong(jours[0])} au ${jourLong(jours[jours.length - 1])} (${jours.length} jours).`,
+    '',
+    'VACATIONS ET CODES',
+    ...cp.vacations.map(x => `${x.code} = ${x.lbl.toLowerCase()} ${x.debut}-${x.fin}`),
+    'R = repos ; CA = congés ; MAL = maladie ; FOR = formation ; ABS = autre absence',
+    '',
+    'RÈGLES',
+    `- Une présence continue de ${hDe(regles.couverture[0])} à ${hDe(regles.couverture[1])} chaque jour.`,
+    `- ${regles.heures} h par agent et par quinzaine ; une absence un jour normalement travaillé compte comme travaillée. Quinzaines : cycle de deux semaines commençant le ${jourLong(cp.ancre)}.`,
+    ...regles.incompatibles.map(g => `- ${g.join(' et ')} : jamais sur la même vacation (de préférence matin contre soir).`),
+    ...regles.interdits.map(x => `- ${x.nom} ne travaille jamais le ${NOMS_JOURS[x.jour]}.`),
+    ...(internes.length ? [`- Ligne(s) interne(s), non montrée(s) aux agents : ${internes.join(', ')}.`] : []),
+    '- Les absences (CA, MAL, FOR, ABS) sont imposées : ne les modifie jamais.',
+    '- Respecte au maximum les jours de repos du planning-type et change le moins de cases possible.',
+    '',
+    `PLANNING-TYPE (2 semaines ; la semaine 1 commence le ${jourLong(cp.ancre)})`,
+    ...typePlanning().map(t => `${t.nom.padEnd(larg)} : ${t.codes.slice(0, 7).join(' ')} | ${t.codes.slice(7).join(' ')}`),
+    '',
+    'ABSENCES SAISIES',
+    ...(absences.length ? absences : ['aucune']),
+    '',
+    'PROJET ACTUEL (planning-type et absences)',
+    ''.padEnd(larg) + '   ' + jours.map(iso => jourCourt(iso).replace(' ', '').padEnd(3)).join(' '),
+    ...L.map(n => ligne(n, jours.map(iso => G.grille[iso][n]))),
+    '',
+    'CONTRÔLES DU PROJET',
+    ...(v.pb.filter(p => p.niveau === 'bad').length ? v.pb.filter(p => p.niveau === 'bad').map(p => `- ${p.quinzaine ? '' : jourLong(p.iso) + ' : '}${p.msg}`) : ['- aucun problème détecté']),
+    '',
+    'DEMANDE',
+    consigne && consigne.trim() ? consigne.trim() : 'Propose le planning définitif en corrigeant les problèmes ci-dessus, en tenant compte des absences.',
+    '',
+    'FORMAT DE RÉPONSE OBLIGATOIRE',
+    `Explique brièvement tes choix (cases modifiées et pourquoi, points restant à arbitrer), puis termine ta réponse par le bloc ci-dessous, dans un bloc de code : une ligne par agent, exactement ${jours.length} codes séparés par des espaces, du ${jourCourt(jours[0])} au ${jourCourt(jours[jours.length - 1])}, uniquement les codes listés plus haut.`,
+    '```',
+    `=== PLANNING-CLAUDE ${m} ===`,
+    ...L.map(n => `${n} : …`),
+    '=== FIN ===',
+    '```'
+  ].join('\n');
+}
+function lireReponseClaude(texte, G) {
+  const t = String(texte || '').replace(/\r/g, '');
+  const d = t.search(/=+\s*PLANNING-CLAUDE/i);
+  if (d < 0) throw new Error('Bloc « === PLANNING-CLAUDE … === » introuvable : copiez toute la réponse de Claude, ou au moins son bloc final.');
+  const f = t.slice(d).search(/=+\s*FIN\s*=+/i);
+  const bloc = t.slice(d, f < 0 ? undefined : d + f).split('\n');
+  const mois = (/PLANNING-CLAUDE\s+(\d{4}-\d{2})/i.exec(bloc[0]) || [])[1] || null;
+  const L = [...G.agents, ...G.internes], ok = CODES_OK(), cells = {}, erreurs = [], vus = new Set();
+  for (const raw of bloc.slice(1)) {
+    const i = raw.indexOf(':'); if (i < 0) continue;
+    const nom = trouverNom(raw.slice(0, i).replace(/[`*]/g, ''), L);
+    if (!nom) { if (raw.trim() && !/^`/.test(raw.trim())) erreurs.push(`ligne ignorée (agent inconnu) : « ${raw.slice(0, i).trim()} »`); continue; }
+    const codes = raw.slice(i + 1).replace(/\|/g, ' ').split(/\s+/).map(x => x.trim().toUpperCase().replace(/[^A-Z]/g, '')).filter(Boolean).map(x => x === 'REPOS' ? 'R' : x);
+    if (codes.length !== G.jours.length) { erreurs.push(`${nom} : ${codes.length} codes au lieu de ${G.jours.length} — ligne non appliquée`); continue; }
+    const mauvais = codes.filter(c => !ok.has(c));
+    if (mauvais.length) { erreurs.push(`${nom} : codes inconnus (${[...new Set(mauvais)].join(', ')}) — ligne non appliquée`); continue; }
+    vus.add(nom);
+    G.jours.forEach((iso, k) => { (cells[iso] = cells[iso] || {})[nom] = codes[k]; });
+  }
+  if (!vus.size) throw new Error('Aucune ligne exploitable dans le bloc de Claude.' + (erreurs.length ? ' ' + erreurs[0] : ''));
+  // absences imposées : jamais remplacées par la proposition
+  for (const iso of G.jours) for (const n of vus) {
+    const avant = G.grille[iso][n];
+    if (ABSENCES[avant] && cells[iso][n] !== avant) { erreurs.push(`${n}, ${jourLong(iso)} : absence (${ABSENCES[avant].toLowerCase()}) conservée`); cells[iso][n] = avant; }
+  }
+  return { cells, erreurs, mois, lignes: [...vus] };
+}
+
+/* Vue superviseur */
+let _planSel = null;   // { iso, n } case en cours de choix
+VIEWS.planning = async ({ mois } = {}) => {
+  if (state.mode !== 'superviseur') return VIEWS.planningAgents({});
+  const auj = localDate();
+  const m = mois || (Number(auj.slice(8)) >= 15 ? moisSuivant(moisDe(auj)) : moisDe(auj));
+  const G = await grilleMois(m);
+  const recharger = () => go('planning', { mois: m }, { noPush: true, keepScroll: true });
+  const lignes = [...G.agents, ...G.internes];
+  if (!typePlanning().length) {
+    return page('Planning', { back: true },
+      h('div', { class: 'banner warn' }, 'Le planning-type n’est pas encore saisi : il sert à pré-remplir chaque mois et à contrôler les repos.'),
+      h('button', { class: 'ok big', onclick: () => go('planningParam') }, 'Saisir le planning-type et les règles'));
+  }
+  const v = verifierPlanning(G.grille, G.jours);
+  const diffs = differences(G.grille, G.base, G.jours, lignes);
+  const importes = new Set((G.brouillon && G.brouillon.claude) || []);
+  const vac = c => vacationsP().find(x => x.code === c);
+  const choisir = (iso, n) => {
+    const actuel = G.grille[iso][n];
+    const opts = [...vacationsP().map(x => ({ c: x.code, l: `${x.lbl} ${x.debut}-${x.fin}` })), { c: 'R', l: 'Repos' }, ...Object.entries(ABSENCES).map(([c, l]) => ({ c, l }))];
+    const fermer = () => box.remove();
+    const poser = c => safe(async () => { await majBrouillon(m, b => { (b.cells[iso] = b.cells[iso] || {})[n] = c; b.claude = (b.claude || []).filter(k => k !== iso + '|' + n); }); fermer(); recharger(); });
+    const box = h('div', { class: 'confirm-contact', onclick: e => { if (e.target === box) fermer(); } }, h('div', { class: 'sheet' },
+      h('h3', null, `${n} — ${jourLong(iso)}`),
+      h('p', { class: 'muted small' }, `Planning-type : ${libelleCode(codeType(n, iso)) || 'repos'}`),
+      h('div', { class: 'plan-choix' }, ...opts.map(o => h('button', { class: `pc pc-${o.c}${o.c === actuel ? ' on' : ''}`, onclick: poser(o.c) }, h('b', null, o.c), ' ', o.l))),
+      h('button', { class: 'sec', onclick: poser(codeType(n, iso) || 'R') }, 'Revenir au planning-type'),
+      h('button', { class: 'link', onclick: fermer }, 'Fermer')));
+    document.body.append(box);
+  };
+  const thJour = iso => {
+    const d = dDe(iso), hors = moisDe(iso) !== m, pbj = (v.parJour[iso] || []).includes('bad');
+    return h('th', { class: `pj${hors ? ' hors' : ''}${d.getDay() === 0 || d.getDay() === 6 ? ' we' : ''}${pbj ? ' pb' : ''}${iso === auj ? ' auj' : ''}`, title: (v.pb.filter(p => p.iso === iso && !p.quinzaine).map(p => p.msg).join('\n')) || null },
+      h('div', null, JC[d.getDay()]), h('div', null, d.getDate()));
+  };
+  const td = (iso, n) => {
+    const c = G.grille[iso][n], base = G.base[iso][n], modif = normCode(c) !== normCode(base) && G.publieMois, cl = importes.has(iso + '|' + n);
+    return h('td', { class: `pc pc-${c || 'vide'}${moisDe(iso) !== m ? ' hors' : ''}${modif ? ' modif' : ''}${cl ? ' claude' : ''}`, onclick: () => choisir(iso, n), title: `${n} — ${jourLong(iso)} : ${libelleCode(c) || '—'}` }, c === 'R' ? '' : c);
+  };
+  const semaines = []; for (let i = 0; i < G.jours.length; i += 7) semaines.push(G.jours.slice(i, i + 7));
+  const table = h('div', { class: 'plan-scroll' }, h('table', { class: 'plan' },
+    h('thead', null, h('tr', null, h('th', { class: 'nom' }, ''), ...G.jours.map(thJour))),
+    h('tbody', null, ...lignes.map(n => h('tr', { class: G.internes.includes(n) ? 'interne' : null },
+      h('th', { class: 'nom' }, n, G.internes.includes(n) ? h('span', { class: 'muted small' }, ' (interne)') : null), ...G.jours.map(iso => td(iso, n)))))));
+  // absences : saisie rapide
+  const ab = { n: G.agents[0], du: G.jours.find(x => moisDe(x) === m), au: G.jours.find(x => moisDe(x) === m), c: 'CA' };
+  const formAbs = h('div', { class: 'card' }, h('h2', null, '1. Absences connues'),
+    h('div', { class: 'row' },
+      h('select', { onchange: e => ab.n = e.target.value }, ...G.agents.map(n => h('option', { value: n }, n))),
+      h('input', { type: 'date', value: ab.du, min: G.jours[0], max: G.jours[G.jours.length - 1], onchange: e => ab.du = e.target.value }),
+      h('input', { type: 'date', value: ab.au, min: G.jours[0], max: G.jours[G.jours.length - 1], onchange: e => ab.au = e.target.value })),
+    chips(Object.entries(ABSENCES).map(([val, lbl]) => ({ val, lbl })), ab.c, x => ab.c = x),
+    h('button', { class: 'sec', onclick: safe(async () => {
+      if (!ab.du || !ab.au || ab.au < ab.du) throw new Error('Dates invalides.');
+      await majBrouillon(m, b => { for (let iso = ab.du; iso <= ab.au; iso = ajJ(iso, 1)) if (G.jours.includes(iso)) (b.cells[iso] = b.cells[iso] || {})[ab.n] = ab.c; });
+      toast(`${ABSENCES[ab.c]} : ${ab.n}, du ${jourCourt(ab.du)} au ${jourCourt(ab.au)}.`); recharger();
+    }) }, 'Ajouter l’absence'),
+    h('p', { class: 'muted small' }, 'Ou touchez directement une case du tableau. Les motifs (congés, maladie…) ne sont visibles que des superviseurs ; les agents voient « Absent ».'));
+  // Claude
+  const consigne = h('textarea', { placeholder: 'Consigne particulière (facultatif). Ex. : Nassiha demande à échanger son samedi 21 avec Saïd.', style: 'min-height:70px' });
+  const reponse = h('textarea', { placeholder: 'Collez ici la réponse de Claude (au moins le bloc === PLANNING-CLAUDE … === FIN ===)', style: 'min-height:90px' });
+  const carteClaude = h('div', { class: 'card' }, h('h2', null, '2. Proposition de Claude (mois compliqué)'),
+    consigne,
+    h('button', { class: 'sec', onclick: safe(async () => {
+      const txt = promptClaude(m, G, consigne.value);
+      let copie = false; try { await navigator.clipboard.writeText(txt); copie = true; } catch (e) { }
+      const fermer = () => box.remove();
+      const box = h('div', { class: 'confirm-contact', onclick: e => { if (e.target === box) fermer(); } }, h('div', { class: 'sheet', style: 'max-width:900px' },
+        h('h3', null, copie ? 'Prompt copié' : 'Prompt prêt à copier'),
+        h('p', { class: 'small' }, 'Ouvrez votre conversation « planning » dans Claude, collez, envoyez. Puis copiez la réponse de Claude et revenez ici : « Appliquer la réponse de Claude ».'),
+        h('textarea', { readonly: true, value: txt, style: 'min-height:320px;font-family:ui-monospace,Consolas,monospace;font-size:12px' }),
+        h('button', { class: 'ok', onclick: safe(async () => { await navigator.clipboard.writeText(txt); toast('Copié.'); }) }, 'Copier'),
+        h('button', { class: 'link', onclick: fermer }, 'Fermer')));
+      document.body.append(box);
+    }) }, 'Préparer le prompt pour Claude'),
+    reponse,
+    h('button', { class: 'sec', onclick: safe(async () => {
+      if (!reponse.value.trim()) { try { reponse.value = await navigator.clipboard.readText(); } catch (e) { } }
+      const r = lireReponseClaude(reponse.value, G);
+      if (r.mois && r.mois !== m && !(await demander({ titre: 'Autre mois ?', texte: `La réponse de Claude concerne ${nomMois(r.mois)}, vous êtes sur ${nomMois(m)}. L’appliquer quand même ?`, oui: 'Appliquer', non: 'Annuler' }))) return;
+      const changes = [];
+      for (const iso of G.jours) for (const n of r.lignes) if (normCode(r.cells[iso][n]) !== normCode(G.grille[iso][n])) changes.push(iso + '|' + n);
+      await majBrouillon(m, b => { for (const iso of G.jours) for (const n of r.lignes) (b.cells[iso] = b.cells[iso] || {})[n] = r.cells[iso][n]; b.claude = changes; });
+      if (r.erreurs.length) toast(`Proposition appliquée (${changes.length} case(s) modifiée(s)). ${r.erreurs.length} remarque(s) : ${r.erreurs.slice(0, 2).join(' ; ')}`, true);
+      else toast(`Proposition de Claude appliquée : ${changes.length} case(s) modifiée(s), surlignées dans le tableau.`);
+      recharger();
+    }) }, 'Appliquer la réponse de Claude'));
+  // publication
+  const notes = h('textarea', { value: G.notes || '', placeholder: 'Notes affichées aux agents sous le planning (ex. : les parkings sont ouverts et gardés).', style: 'min-height:60px', onchange: safe(async e => { const val = e.target.value; await majBrouillon(m, b => { b.notes = val; }); }) });
+  const nbBad = v.pb.filter(p => p.niveau === 'bad').length;
+  const publier = safe(async () => {
+    const notesVal = notes.value.trim();
+    const avantPub = G.publieMois ? differences(G.grille, G.base, G.jours, G.agents) : [];
+    if (!(await demander({ titre: G.publieMois ? 'Publier les modifications ?' : `Publier le planning de ${nomMois(m)} ?`, oui: 'Publier', non: 'Annuler',
+      texte: (nbBad ? `Attention : ${nbBad} problème(s) restent signalés par les contrôles.\n\n` : '') + (G.publieMois ? `${avantPub.length} case(s) modifiée(s) pour les agents.` : 'Les agents le verront dans leur onglet Planning et recevront une notification.') }))) return;
+    const jours = {}, motifs = {}, internes = {};
+    for (const iso of G.jours) {
+      jours[iso] = {};
+      for (const n of G.agents) { const c = G.grille[iso][n] || 'R'; jours[iso][n] = ABSENCES[c] ? 'ABS' : c; if (ABSENCES[c]) (motifs[iso] = motifs[iso] || {})[n] = c; }
+      for (const n of G.internes) { const c = G.grille[iso][n]; if (c) (internes[iso] = internes[iso] || {})[n] = c; }
+    }
+    const lib = c => c === 'ABS' ? 'absent' : (libelleCode(c, true) || 'repos').toLowerCase();
+    const chg = G.publieMois ? differences(jours, Object.fromEntries(G.jours.map(iso => [iso, Object.fromEntries(G.agents.map(n => [n, (G.pub.jours[iso] || {})[n] || '']))])), G.jours, G.agents) : [];
+    const notif = G.publieMois
+      ? { titre: `Planning de ${nomMois(m)} modifié`, corps: chg.length ? chg.slice(0, 6).map(x => `${jourCourt(x.iso)} : ${x.n} ${lib(x.b)}`).join(' · ') + (chg.length > 6 ? ` … (${chg.length} changements)` : '') : 'Notes mises à jour.' }
+      : { titre: `Planning de ${nomMois(m)} publié`, corps: 'Consultez-le dans l’application : bouton Planning.' };
+    const id = uuid(), ts = new Date().toISOString();
+    await queueDec('d', { type: 'planning', id, ts, mois: m, du: G.jours[0], au: G.jours[G.jours.length - 1], jours, notes: notesVal, chg: chg.map(x => ({ iso: x.iso, n: x.n, b: x.b })), notif });
+    await queueDec('n', { type: 'planning_motifs', id, ts, du: G.jours[0], au: G.jours[G.jours.length - 1], motifs, internes });
+    await kvUpdate('planningBrouillons', a => { const x = a || {}; delete x[m]; return x; });
+    await fold(); syncNow();
+    toast(`Planning de ${nomMois(m)} publié.`); recharger();
+  });
+  const statut = G.publieMois
+    ? (diffs.length || (G.brouillon && G.brouillon.notes != null && G.brouillon.notes !== (G.pub.notes[m] || '')) ? h('span', { class: 'badge b-warn' }, `publié le ${fmtDT(G.publieMois.ts)} — ${diffs.length} modification(s) non publiée(s)`) : h('span', { class: 'badge b-ok' }, `publié le ${fmtDT(G.publieMois.ts)}`))
+    : h('span', { class: 'badge b-bad' }, 'pas encore publié');
+  const heures = h('div', { class: 'card' }, h('h2', null, 'Heures par quinzaine'),
+    h('table', { class: 'plan-h' }, h('tr', null, h('th', null, ''), ...v.quinz.map(q => h('th', null, `du ${jourCourt(q)}`))),
+      ...G.agents.map(n => h('tr', null, h('th', null, n), ...(v.heures[n] || []).map(x => h('td', { class: x.h === reglesPlanning().heures ? 'ok' : 'bad' }, `${String(x.h).replace('.', ',')} h`))))));
+  const listePb = v.pb.filter(p => p.niveau === 'bad');
+  const infos = v.pb.filter(p => p.niveau === 'info');
+  return page('Planning', { back: true },
+    h('div', { class: 'card plan-tete' },
+      h('div', { class: 'row', style: 'align-items:center' },
+        h('button', { class: 'sec', style: 'width:auto', onclick: () => go('planning', { mois: moisSuivant(m, -1) }, { noPush: true }) }, '‹'),
+        h('h2', { style: 'margin:0;flex:1;text-align:center;text-transform:none;font-size:22px' }, nomMois(m)),
+        h('button', { class: 'sec', style: 'width:auto', onclick: () => go('planning', { mois: moisSuivant(m, 1) }, { noPush: true }) }, '›')),
+      h('p', { class: 'muted small', style: 'text-align:center;margin:4px 0' }, `Semaines complètes du ${jourLong(G.jours[0])} au ${jourLong(G.jours[G.jours.length - 1])} · `, statut)),
+    formAbs,
+    table,
+    h('div', { class: 'plan-legende' }, ...vacationsP().map(x => h('span', { class: `pc pc-${x.code}` }, `${x.code} ${x.debut}-${x.fin}`)), h('span', { class: 'pc pc-R' }, 'Repos (vide)'), ...Object.entries(ABSENCES).map(([c, l]) => h('span', { class: `pc pc-${c}` }, `${c} ${l}`)), h('span', { class: 'pc claude-ex' }, 'proposé par Claude'), h('span', { class: 'pc modif-ex' }, 'modifié depuis la publication')),
+    h('div', { class: 'card', style: listePb.length ? 'border-color:var(--bad)' : 'border-color:var(--ok)' }, h('h2', null, `Contrôles${listePb.length ? ` : ${listePb.length} problème(s)` : ' : rien à signaler'}`),
+      ...listePb.map(p => h('div', { class: 'small', style: 'color:var(--bad)' }, `${p.quinzaine ? '' : jourLong(p.iso) + ' : '}${p.msg}`)),
+      infos.length ? h('details', null, h('summary', { class: 'small muted' }, `${infos.length} information(s) : jours de repos du planning-type travaillés`), ...infos.map(p => h('div', { class: 'small muted' }, `${jourLong(p.iso)} : ${p.msg}`))) : null),
+    heures,
+    carteClaude,
+    h('div', { class: 'card' }, h('h2', null, '3. Publication'), notes,
+      h('button', { class: 'ok big', onclick: publier }, G.publieMois ? 'Publier les modifications aux agents' : `Publier le planning de ${nomMois(m)}`),
+      G.brouillon ? h('button', { class: 'link', onclick: safe(async () => { if (!(await demander({ titre: 'Abandonner le brouillon ?', texte: 'Le tableau revient au planning publié (ou au planning-type).', oui: 'Oui, abandonner', non: 'Non', danger: true }))) return; await kvUpdate('planningBrouillons', a => { const x = a || {}; delete x[m]; return x; }); recharger(); }) }, 'Abandonner les modifications non publiées') : null),
+    h('div', { class: 'row' },
+      h('button', { class: 'sec', onclick: safe(() => exporterPlanning(m, G)) }, 'Excel'),
+      h('button', { class: 'sec', onclick: () => go('planningParam') }, 'Planning-type et règles')));
+};
+async function exporterPlanning(m, G) {
+  const L = [...G.agents, ...G.internes];
+  const aoa = [['Agent', ...G.jours.map(iso => jourCourt(iso))], ...L.map(n => [n, ...G.jours.map(iso => G.grille[iso][n] === 'R' ? '' : G.grille[iso][n] || '')])];
+  aoa.push([], ['Codes', ...vacationsP().map(v => `${v.code} ${v.debut}-${v.fin}`), 'CA congés', 'MAL maladie', 'FOR formation', 'ABS absence']);
+  await shareOrDownload(xlsxBlob([[`Planning ${m}`, aoa, [18, ...G.jours.map(() => 6)]]]), `planning_${m}.xlsx`, `Planning ${nomMois(m)}`);
+}
+
+/* Paramètres : planning-type, règles, horaires */
+VIEWS.planningParam = async () => {
+  const c = JSON.parse(JSON.stringify(state.cfg)); c.planning = { ...PLANNING_DEFAUT, ...(c.planning || {}) };
+  const tType = h('textarea', { value: c.planning.type, style: 'min-height:160px;font-family:ui-monospace,Consolas,monospace;font-size:14px', placeholder: 'Yacine : R MAT MAT MAT MAT SOI MAT | R MAT MAT MAT MAT R R' });
+  const tRegles = h('textarea', { value: c.planning.regles, style: 'min-height:140px' });
+  const ancre = h('input', { type: 'date', value: c.planning.ancre });
+  const vacs = c.planning.vacations.map(v => ({ v, lbl: h('input', { type: 'text', value: v.lbl }), d: h('input', { type: 'time', value: v.debut }), f: h('input', { type: 'time', value: v.fin }) }));
+  return page('Planning-type et règles', { back: () => go('planning') },
+    h('div', { class: 'card' }, h('h2', null, 'Planning-type (cycle de 2 semaines)'),
+      h('p', { class: 'muted small' }, 'Une ligne par agent : nom, deux-points, 7 codes de la semaine 1 (lundi → dimanche), « | », 7 codes de la semaine 2. R = repos. Les noms doivent correspondre à ceux de la liste des agents.'),
+      tType,
+      h('label', { class: 'f' }, 'Lundi d’une semaine 1 (début du cycle et des quinzaines)'), ancre),
+    h('div', { class: 'card' }, h('h2', null, 'Règles contrôlées'),
+      h('p', { class: 'muted small' }, 'Une règle par ligne : « couverture : 08:00-20:00 » · « heures par quinzaine : 70 » · « jamais sur la même vacation : Nom1, Nom2 » · « jamais le dimanche : Nom » · « lignes internes : Vacataire » (lignes du tableau non montrées aux agents).'),
+      tRegles),
+    h('div', { class: 'card' }, h('h2', null, 'Vacations'),
+      ...vacs.map(x => h('div', { class: 'row', style: 'align-items:center' }, h('b', { style: 'width:52px;flex:none' }, x.v.code), x.lbl, x.d, x.f))),
+    h('button', { class: 'ok big', onclick: safe(async () => {
+      c.planning.type = tType.value.trim(); c.planning.regles = tRegles.value.trim(); c.planning.ancre = ancre.value || c.planning.ancre;
+      c.planning.vacations = vacs.map(x => ({ code: x.v.code, lbl: x.lbl.value.trim() || x.v.lbl, debut: x.d.value || x.v.debut, fin: x.f.value || x.v.fin }));
+      const anc = dDe(c.planning.ancre); if (anc.getDay() !== 1) throw new Error('La date de début de cycle doit être un lundi.');
+      const ancien = state.cfg.planning; state.cfg.planning = c.planning;
+      const t = typePlanning(), lignesBrutes = c.planning.type.split('\n').filter(l => l.trim());
+      state.cfg.planning = ancien;
+      if (t.length !== lignesBrutes.length) throw new Error('Planning-type : chaque ligne doit contenir un nom, « : », puis 14 codes.');
+      const ok = new Set([...c.planning.vacations.map(v => v.code), 'R']);
+      const mauvais = t.flatMap(x => x.codes).filter(x => !ok.has(x));
+      if (mauvais.length) throw new Error(`Codes inconnus dans le planning-type : ${[...new Set(mauvais)].join(', ')}`);
+      c.cfgId = randCode(8);
+      await publishCfg(c);
+      toast('Planning-type et règles enregistrés.'); go('planning');
+    }) }, 'Enregistrer'));
+};
+
+/* Agents : onglet Planning (lecture seule, sans motif d'absence) */
+async function equipeDuJour(iso) {
+  const pub = await planningPublie(), j = pub.jours[iso];
+  if (!j) return null;
+  const parVac = vacationsP().map(v => ({ v, noms: Object.entries(j).filter(([, c]) => c === v.code).map(([n]) => n) }));
+  return { parVac, absents: Object.entries(j).filter(([, c]) => c === 'ABS').map(([n]) => n), repos: Object.entries(j).filter(([, c]) => c === 'R' || !c).map(([n]) => n) };
+}
+VIEWS.planningAgents = async ({ semaine, agent } = {}) => {
+  const pub = await planningPublie(), auj = localDate();
+  const lundi = semaine || ajJ(auj, -((dDe(auj).getDay() + 6) % 7));
+  const derniere = pub.pubs.slice(-1)[0];
+  await kvSet('planningVu', derniere ? derniere.id : null);
+  const nav = p => go('planningAgents', { semaine: lundi, agent, ...p }, { noPush: true });
+  const noms = [...new Set(Object.values(pub.jours).flatMap(j => Object.keys(j)))];
+  const jours = []; for (let i = 0; i < 7; i++) jours.push(ajJ(lundi, i));
+  const carteJour = async iso => {
+    const e = await equipeDuJour(iso);
+    return h('div', { class: 'card pa-jour' + (iso === auj ? ' auj' : '') },
+      h('h3', null, jourLong(iso).replace(/^./, x => x.toUpperCase()), iso === auj ? h('span', { class: 'badge b-info' }, 'aujourd’hui') : null),
+      !e ? h('p', { class: 'muted' }, 'Pas encore de planning publié.') : [
+        ...e.parVac.map(x => h('div', { class: `pa-l pc-${x.v.code}` }, h('span', { class: 'pa-v' }, `${x.v.lbl} ${x.v.debut.replace(':00', 'h').replace(':', 'h')}-${x.v.fin.replace(':00', 'h').replace(':', 'h')}`), h('b', null, x.noms.join(', ') || '—'))),
+        e.absents.length ? h('div', { class: 'small muted' }, `Absent : ${e.absents.join(', ')}`) : null,
+        e.repos.length ? h('div', { class: 'small muted' }, `Repos : ${e.repos.join(', ')}`) : null]);
+  };
+  let corps;
+  if (agent) {
+    const m = moisDe(lundi), { jours: js } = periodeMois(m);
+    corps = [h('div', { class: 'card' }, h('h2', null, `${agent} — ${nomMois(m)}`),
+      ...js.filter(iso => moisDe(iso) === m).map(iso => { const c = (pub.jours[iso] || {})[agent]; return h('div', { class: 'stat' + (iso === auj ? ' auj' : '') }, h('span', null, jourLong(iso)), h('b', { class: c ? `pa-c pc-${c}` : '' }, c ? (c === 'ABS' ? 'Absent' : libelleCode(c, true) || 'Repos') : '—')); }))];
+  } else corps = await Promise.all(jours.map(carteJour));
+  const m = moisDe(lundi);
+  return page('Planning', { back: true },
+    derniere ? h('div', { class: 'card', style: 'border-color:var(--navy)' }, h('b', null, `Mise à jour du ${fmtDT(derniere.ts)}`),
+      derniere.chg && derniere.chg.length ? h('div', { class: 'small' }, derniere.chg.slice(0, 8).map(x => `${jourCourt(x.iso)} : ${x.n} ${x.b === 'ABS' ? 'absent' : (libelleCode(x.b, true) || 'repos').toLowerCase()}`).join(' · ')) : null) : null,
+    h('div', { class: 'row', style: 'align-items:center' },
+      h('button', { class: 'sec', style: 'width:auto', onclick: () => nav({ semaine: ajJ(lundi, agent ? -28 : -7) }) }, '‹'),
+      h('b', { style: 'flex:1;text-align:center' }, agent ? nomMois(m) : `${dDe(lundi).getDate()} → ${jourLong(ajJ(lundi, 6)).replace(/^\S+ /, '')}`),
+      h('button', { class: 'sec', style: 'width:auto', onclick: () => nav({ semaine: ajJ(lundi, agent ? 35 : 7) }) }, '›')),
+    noms.length ? chips([{ val: '', lbl: 'Toute l’équipe' }, ...noms.map(n => ({ val: n, lbl: n }))], agent || '', x => nav({ agent: x || undefined })) : null,
+    ...corps,
+    pub.notes[m] ? h('div', { class: 'card' }, h('h2', null, 'Notes'), h('p', { style: 'white-space:pre-wrap' }, pub.notes[m])) : null);
+};
+async function cartePlanningAgents() {
+  const pub = await planningPublie();
+  if (!pub.pubs.length) return null;
+  const e = await equipeDuJour(localDate());
+  const nouveau = (await kvGet('planningVu')) !== pub.pubs[pub.pubs.length - 1].id;
+  return h('button', { class: 'list-item', style: nouveau ? 'border:2px solid var(--accent)' : null, onclick: () => go('planningAgents', {}) },
+    h('div', { class: 'l1' }, 'Planning', nouveau ? h('span', { class: 'badge b-warn' }, 'mis à jour') : null),
+    e ? h('div', { class: 'small' }, e.parVac.map(x => `${x.v.lbl} : ${x.noms.join(', ') || '—'}`).join(' · ')) : h('div', { class: 'muted small' }, 'Pas de planning aujourd’hui.'));
+}
+async function cartePlanningSup() {
+  const auj = localDate(), m = moisDe(auj), ms = moisSuivant(m), pub = await planningPublie();
+  const br = (await kvGet('planningBrouillons')) || {};
+  const etat = mm => { const p = pub.pubs.filter(x => x.mois === mm).slice(-1)[0]; return p ? `publié le ${fmtJour(p.ts.slice(0, 10))}` : br[mm] ? 'brouillon en cours' : 'pas encore préparé'; };
+  const aFaire = Number(auj.slice(8)) >= 15 && !pub.pubs.some(x => x.mois === ms);
+  return h('div', { class: 'card', style: aFaire ? 'border-color:var(--warn)' : null }, h('h2', null, 'Planning des agents'),
+    aFaire ? h('p', { style: 'color:var(--warn);font-weight:700;margin:0 0 6px' }, `Planning de ${nomMois(ms)} à préparer.`) : null,
+    h('button', { class: 'list-item', onclick: () => go('planning', { mois: m }) }, h('div', { class: 'stat' }, h('span', null, nomMois(m)), h('span', { class: 'muted small' }, etat(m)))),
+    h('button', { class: 'list-item', onclick: () => go('planning', { mois: ms }) }, h('div', { class: 'stat' }, h('span', null, nomMois(ms)), h('span', { class: 'muted small' }, etat(ms)))));
+}
+/* Rappel du 15 : notification programmée sur le relais (alerte différée), refaite chaque mois */
+async function programmerRappelPlanning(abos) {
+  const auj = new Date(), m = moisDe(localDate());
+  const pub = await planningPublie();
+  let cible = moisSuivant(m), quand = new Date(auj.getFullYear(), auj.getMonth(), 15, 9, 0);
+  if (quand <= auj || pub.pubs.some(x => x.mois === cible)) { cible = moisSuivant(m, 2); quand = new Date(auj.getFullYear(), auj.getMonth() + 1, 15, 9, 0); }
+  const id = await jeton('planning', cible);
+  const empreinte = JSON.stringify([cible, (abos || []).map(a => [a.e, a.prefs])]);
+  const prev = await kvGet('rappelPlanning');
+  if (prev && prev.empreinte === empreinte) return;
+  const messages = await chiffrerPour(abos, 'rappel_planning', { type: 'rappel_planning', titre: `Planning de ${nomMois(cible)} à préparer`, corps: 'Saisissez les absences connues, puis préparez la proposition avec Claude.', lien: '#planning' });
+  if (prev && prev.id && prev.id !== id) { try { await rel('annulerDiffere', { id: prev.id }, 15000); } catch (e) { } }
+  if (Object.keys(messages).length) await rel('differer', { id, apres: quand.toISOString(), messages }, 20000);
+  await kvSet('rappelPlanning', { empreinte, id, cible, at: Date.now() });
+}
+/* ====================================================================== */
 /* TRAITEMENT DES SIGNALEMENTS (dispatch vers les services et prestataires) */
 /* ====================================================================== */
 const ACTIONS = {
@@ -3236,6 +3796,7 @@ async function supSync() {
   await fold();
   if (await assurerVapid()) { await viderFileSup(); await fold(); }
   try { await programmerAlertes(); } catch (e) { console.warn('alertes non programmées :', e.message); }
+  try { if (await kvGet('vapid')) { const r = await rel('abos', { cible: 'sup' }, 20000); await programmerRappelPlanning(r.abos); } } catch (e) { console.warn('rappel du planning non programmé :', e.message); }
   if (_notifAgents.length) { const l = _notifAgents; _notifAgents = []; notifier('agents', l); }
   return { got };
 }
@@ -3275,6 +3836,7 @@ async function viderFileSup() {
       ? b64u.enc(await sealBytesFor(await getPubKey(), fflate.deflateSync(te.encode(JSON.stringify(it.d)))))
       : await encJSON(it.d);
     const r = await rel('putDec', { kind: it.kind, data });
+    if (it.d && it.d.type === 'planning' && it.d.notif) _notifAgents.push({ type: 'planning', titre: it.d.notif.titre, corps: it.d.notif.corps, lien: '#planning' });
     if (it.d && it.d.type === 'msg') _notifAgents.push({ type: 'msg', titre: `${it.d.demande ? 'Demande d’action' : 'Message'} du DPMS — ${it.d.ref || ''}`, corps: it.d.texte || '' });
     // déplacement atomique : la décision passe de la file au journal local dans la même transaction
     const db = await openDB(); const t = db.transaction(['entries', 'kv'], 'readwrite');
@@ -3285,6 +3847,10 @@ async function viderFileSup() {
   }
 }
 
+function bandeauMaj() {
+  return h('div', { class: 'banner warn' }, 'Une version plus récente de l’application est utilisée par un autre appareil : certaines informations ne s’affichent pas ici. ',
+    h('button', { class: 'sec', style: 'margin-top:6px', onclick: () => { chercherMiseAJour(true); setTimeout(() => location.reload(), 2500); } }, 'Mettre à jour maintenant'));
+}
 async function supHome() {
   const sigs = await dbAll('sigs');
   const devs = (await kvGet('devs')) || {};
@@ -3298,7 +3864,9 @@ async function supHome() {
   const queue = (await kvGet('decQueue')) || [];
   const barrOuv = await barrieresOuvertes();
   const vehPM = sigs.filter(s => isVehicule(s.cat) && pmEtat(s) === 'À traiter').length;
+  const majRequise = await kvGet('majRequise');
   return page('Rondes parkings', null,
+    majRequise ? bandeauMaj() : null,
     h('div', { class: 'card' },
       h('div', { class: 'stat' },
         h('span', null, state.sync.busy ? 'Relève en cours…' : lastSync ? `Relevé ${fmtQuand(lastSync)}` : 'Jamais relevé'),
@@ -3309,6 +3877,7 @@ async function supHome() {
       h('div', { class: 'l1' }, `${alertes.length} point(s) d’attention`, h('span', { class: 'badge b-warn' }, 'à lire')),
       h('div', { class: 'muted small' }, alertes[0].msg)) : null,
     await carteRondesJour(),
+    await cartePlanningSup(),
     await carteMessagesAccueil(),
     await carteAppareil(),
     await alerteRegistres(),
@@ -4358,7 +4927,7 @@ async function boot() {
       h('div', { class: 'banner bad' }, 'Cette application doit être ouverte depuis son adresse https:// (pas depuis un fichier).')));
     return;
   }
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(e => console.warn('SW', e));
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => { _swReg = r; return r.update(); }).catch(e => console.warn('SW', e));
   state.mode = (await kvGet('mode')) || null;
   state.conn = (await kvGet('conn')) || null;
   state.cfg = normalizeCfg((await kvGet('cfg')) || null);
@@ -4373,6 +4942,9 @@ async function boot() {
   } else if (hash === '#synthese' && state.mode === 'superviseur') {
     history.replaceState(null, '', location.pathname + location.search);
     go('synthese');
+  } else if (hash === '#planning' && state.mode) {
+    history.replaceState(null, '', location.pathname + location.search);
+    go(state.mode === 'superviseur' ? 'planning' : 'planningAgents');
   } else render();
   if (state.mode) syncNow().then(refreshIfHome);
 }
@@ -4380,10 +4952,12 @@ window.addEventListener('hashchange', () => {
   const hash = location.hash;
   if (hash && /^#(join|site|cfg|sup)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
   else if (hash === '#synthese' && state.mode === 'superviseur') { history.replaceState(null, '', location.pathname + location.search); go('synthese'); }
+  else if (hash === '#planning' && state.mode) { history.replaceState(null, '', location.pathname + location.search); go(state.mode === 'superviseur' ? 'planning' : 'planningAgents'); }
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(confirmerContact, 600); });
 setTimeout(confirmerContact, 1500);
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+  if (e.data === 'lien:#planning' && state.mode) { go(state.mode === 'superviseur' ? 'planning' : 'planningAgents'); syncNow().then(() => render()); return; }
   if (e.data === 'lien:#synthese' && state.mode === 'superviseur') { go('synthese'); syncNow().then(() => { if (state.view === 'synthese') render(); }); return; }
   if ((e.data === 'sync' || String(e.data).startsWith('lien:')) && state.mode) syncNow().then(refreshIfHome);
 });

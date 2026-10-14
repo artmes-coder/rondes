@@ -6,7 +6,7 @@
  * Il ne voit passer aucune donnée de ronde (tout est en base locale ou chiffré vers le relais).
  * Notifications : texte chiffré par l'appareil émetteur pour cet appareil ; le relais et Google ne peuvent pas le lire.
  */
-const CACHE = 'rondes-cachan-2.7.1';
+const CACHE = 'rondes-cachan-2.7.2';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest'];
 const STATIC = ['./logo-cachan.png', './notif-icon.png', './notif-badge.png', './icon-192.png', './icon-512.png', './lib/fflate.js', './lib/qrcode.js', './lib/jsQR.js', './lib/xlsx.mini.min.js', './lib/chart.umd.min.js', './lib/jspdf.umd.min.js'];
 const NET_TIMEOUT = 4000;
@@ -22,9 +22,15 @@ self.addEventListener('activate', e => {
     const anciens = keys.filter(k => k.startsWith('rondes-cachan') && k !== CACHE);
     await Promise.all(anciens.map(k => caches.delete(k)));
     await self.clients.claim();
-    if (anciens.length) {   // mise à jour : recharger les pages ouvertes avec l'ancienne version
+    if (anciens.length) {   // mise à jour : chaque page se recharge d'elle-même dès qu'aucune saisie n'est en cours
       const wins = await self.clients.matchAll({ type: 'window' });
-      wins.forEach(w => { try { w.navigate(w.url); } catch (err) { } });
+      await Promise.all(wins.map(w => new Promise(res => {
+        // les versions récentes répondent et se rechargent elles-mêmes au bon moment ; les anciennes sont rechargées ici
+        const canal = new MessageChannel();
+        const t = setTimeout(() => { try { w.navigate(w.url.split('#')[0]).catch(() => { }); } catch (err) { } res(); }, 3000);   // sans le # : sinon pas de rechargement
+        canal.port1.onmessage = () => { clearTimeout(t); res(); };
+        try { w.postMessage({ type: 'maj' }, [canal.port2]); } catch (err) { clearTimeout(t); res(); }
+      })));
     }
   })());
 });
