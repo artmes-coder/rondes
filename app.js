@@ -2471,10 +2471,10 @@ const jourLong = iso => { const d = dDe(iso); return `${NOMS_JOURS[d.getDay()]} 
 const nomMois = m => { const [y, mm] = m.split('-').map(Number); return `${MOIS_LONGS[mm - 1]} ${y}`; };
 const moisDe = iso => iso.slice(0, 7);
 const moisSuivant = (m, n = 1) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm - 1 + n, 1); return dISO(d).slice(0, 7); };
-function periodeMois(m) {   // semaines complètes : du lundi qui précède le 1er au dimanche qui suit le dernier jour
+function periodeMois(m) {   // semaines dont le lundi tombe dans le mois : du 1er lundi au dimanche qui suit le dernier lundi
   const [y, mm] = m.split('-').map(Number);
   const p = new Date(y, mm - 1, 1), d = new Date(y, mm, 0);
-  p.setDate(p.getDate() - ((p.getDay() + 6) % 7)); d.setDate(d.getDate() + (7 - d.getDay()) % 7);
+  p.setDate(p.getDate() + (8 - p.getDay()) % 7); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + 6);
   const jours = []; for (let x = new Date(p); x <= d; x.setDate(x.getDate() + 1)) jours.push(dISO(x));
   return { du: jours[0], au: jours[jours.length - 1], jours };
 }
@@ -2633,7 +2633,7 @@ function promptClaude(m, G, consigne) {
     });
   }
   return [
-    `Tu m'aides à établir le planning des agents de surveillance des parkings municipaux. Mois de ${nomMois(m)}, en semaines complètes : du ${jourLong(jours[0])} au ${jourLong(jours[jours.length - 1])} (${jours.length} jours).`,
+    `Tu m'aides à établir le planning des agents de surveillance des parkings municipaux. Planning de ${nomMois(m)} (les semaines dont le lundi tombe dans le mois) : du ${jourLong(jours[0])} au ${jourLong(jours[jours.length - 1])} (${jours.length} jours).`,
     '',
     'VACATIONS ET CODES',
     ...cp.vacations.map(x => `${x.code} = ${x.lbl.toLowerCase()} ${x.debut}-${x.fin}`),
@@ -2766,7 +2766,9 @@ VIEWS.planning = async ({ mois } = {}) => {
   // Claude
   const consigne = h('textarea', { placeholder: 'Consigne particulière (facultatif). Ex. : Nassiha demande à échanger son samedi 21 avec Saïd.', style: 'min-height:70px' });
   const reponse = h('textarea', { placeholder: 'Collez ici la réponse de Claude (au moins le bloc === PLANNING-CLAUDE … === FIN ===)', style: 'min-height:90px' });
+  const sansPb = !v.pb.some(p => p.niveau === 'bad');
   const carteClaude = h('div', { class: 'card' }, h('h2', null, '2. Proposition de Claude (mois compliqué)'),
+    sansPb ? h('div', { class: 'banner ok', style: 'margin-bottom:8px' }, 'Aucun problème détecté : pas besoin de Claude, vous pouvez publier directement (étape 3).') : h('p', { class: 'small', style: 'color:var(--bad);margin:0 0 6px' }, 'Des problèmes restent à arbitrer : vous pouvez les corriger à la main dans le tableau, ou demander une proposition à Claude.'),
     consigne,
     h('button', { class: 'sec', onclick: safe(async () => {
       const txt = promptClaude(m, G, consigne.value);
@@ -2832,7 +2834,7 @@ VIEWS.planning = async ({ mois } = {}) => {
         h('button', { class: 'sec', style: 'width:auto', onclick: () => go('planning', { mois: moisSuivant(m, -1) }, { noPush: true }) }, '‹'),
         h('h2', { style: 'margin:0;flex:1;text-align:center;text-transform:none;font-size:22px' }, nomMois(m)),
         h('button', { class: 'sec', style: 'width:auto', onclick: () => go('planning', { mois: moisSuivant(m, 1) }, { noPush: true }) }, '›')),
-      h('p', { class: 'muted small', style: 'text-align:center;margin:4px 0' }, `Semaines complètes du ${jourLong(G.jours[0])} au ${jourLong(G.jours[G.jours.length - 1])} · `, statut)),
+      h('p', { class: 'muted small', style: 'text-align:center;margin:4px 0' }, `Du ${jourLong(G.jours[0])} au ${jourLong(G.jours[G.jours.length - 1])} (semaines commençant en ${MOIS_LONGS[Number(m.slice(5)) - 1]}) · `, statut)),
     formAbs,
     table,
     h('div', { class: 'plan-legende' }, ...vacationsP().map(x => h('span', { class: `pc pc-${x.code}` }, `${x.code} ${x.debut}-${x.fin}`)), h('span', { class: 'pc pc-R' }, 'Repos (vide)'), h('span', { class: 'pc pc-F' }, 'F Férié (fermé)'), ...Object.entries(ABSENCES).map(([c, l]) => h('span', { class: `pc pc-${c}` }, `${c} ${l}`)), h('span', { class: 'pc claude-ex' }, 'proposé par Claude'), h('span', { class: 'pc modif-ex' }, 'modifié depuis la publication')),
@@ -2846,6 +2848,7 @@ VIEWS.planning = async ({ mois } = {}) => {
       G.brouillon ? h('button', { class: 'link', onclick: safe(async () => { if (!(await demander({ titre: 'Abandonner le brouillon ?', texte: 'Le tableau revient au planning publié (ou au planning-type).', oui: 'Oui, abandonner', non: 'Non', danger: true }))) return; await kvUpdate('planningBrouillons', a => { const x = a || {}; delete x[m]; return x; }); recharger(); }) }, 'Abandonner les modifications non publiées') : null),
     h('div', { class: 'row' },
       h('button', { class: 'sec', onclick: safe(() => exporterPlanning(m, G)) }, 'Excel'),
+      G.publieMois ? h('button', { class: 'sec', onclick: safe(() => telechargerPlanningPDF(m)) }, 'PDF (version agents)') : null,
       h('button', { class: 'sec', onclick: () => go('planningParam') }, 'Planning-type et règles')));
 };
 async function exporterPlanning(m, G) {
@@ -2923,7 +2926,10 @@ VIEWS.planningAgents = async ({ semaine, agent } = {}) => {
       ...js.filter(iso => moisDe(iso) === m).map(iso => { const c = (pub.jours[iso] || {})[agent]; return h('div', { class: 'stat' + (iso === auj ? ' auj' : '') }, h('span', null, jourLong(iso)), h('b', { class: c ? `pa-c pc-${c}` : '' }, c ? (c === 'ABS' ? 'Absent' : c === 'F' ? 'Férié' : libelleCode(c, true) || 'Repos') : '—')); }))];
   } else corps = await Promise.all(jours.map(carteJour));
   const m = moisDe(lundi);
+  const moisPub = [...new Set(pub.pubs.map(x => x.mois))].sort();
+  const moisPdf = moisPub.includes(m) ? m : moisPub.filter(x => x <= m).pop() || moisPub[0];
   return page('Planning', { back: true },
+    moisPdf ? h('button', { class: 'sec', onclick: safe(() => telechargerPlanningPDF(moisPdf)) }, `Télécharger le planning de ${nomMois(moisPdf)} (PDF)`) : null,
     derniere ? h('div', { class: 'card', style: 'border-color:var(--navy)' }, h('b', null, `Mise à jour du ${fmtDT(derniere.ts)}`),
       derniere.chg && derniere.chg.length ? h('div', { class: 'small' }, derniere.chg.slice(0, 8).map(x => `${jourCourt(x.iso)} : ${x.n} ${x.b === 'ABS' ? 'absent' : (libelleCode(x.b, true) || 'repos').toLowerCase()}`).join(' · ')) : null) : null,
     h('div', { class: 'row', style: 'align-items:center' },
@@ -2934,6 +2940,64 @@ VIEWS.planningAgents = async ({ semaine, agent } = {}) => {
     ...corps,
     pub.notes[m] ? h('div', { class: 'card' }, h('h2', null, 'Notes'), h('p', { style: 'white-space:pre-wrap' }, pub.notes[m])) : null);
 };
+/* PDF du planning publié, au format du tableau papier (une grille par semaine) — sans motif d'absence */
+async function pdfPlanning(m) {
+  const pub = await planningPublie();
+  const p = pub.pubs.filter(x => x.mois === m).slice(-1)[0];
+  if (!p) throw new Error(`Le planning de ${nomMois(m)} n'est pas encore publié.`);
+  const { jsPDF } = await chargerScript('lib/jspdf.umd.min.js', 'jspdf');
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const txt = t => String(t == null ? '' : t).replace(/[\u202f\u00a0]/g, ' ').replace(/[^\x00-\xff‘’“”–—•…€Œœ]/g, '?');
+  const { jours } = periodeMois(m);
+  const noms = [...new Set(jours.flatMap(iso => Object.keys(pub.jours[iso] || {})))];
+  const ordre = typePlanning().map(t => t.nom); noms.sort((a, b) => (ordre.indexOf(a) + 1 || 99) - (ordre.indexOf(b) + 1 || 99));
+  const M = 12, W = 210, colN = 44, colJ = (W - 2 * M - colN) / 7, hl = 7;
+  const jourNum = d => d.getDate() === 1 ? '1er' : String(d.getDate());
+  const datePetite = iso => { const d = dDe(iso); return `${jourNum(d)} ${MOIS[d.getMonth()]}`; };
+  const dateLongue = iso => { const d = dDe(iso); return `${jourNum(d)} ${MOIS_LONGS[d.getMonth()]}`; };
+  const STY = { MAT: [[0, 112, 192], [255, 255, 255], 'MATIN'], MID: [[112, 48, 160], [255, 255, 255], 'MIDI'], SOI: [[220, 0, 0], [255, 255, 255], 'SOIR'],
+    R: [[242, 242, 242], [128, 128, 128], 'REPOS'], ABS: [[255, 255, 255], [90, 96, 105], 'ABSENT'], F: [[230, 233, 238], [90, 96, 105], 'FÉRIÉ'] };
+  const vacs = vacationsP();
+  let y = 16;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(0, 0, 0);
+  doc.text(txt('PARKINGS MUNICIPAUX — PLANNING DES AGENTS DE SURVEILLANCE'), M, y); y += 6;
+  doc.setFontSize(11); doc.text(txt(`Du ${NOMS_JOURS[dDe(jours[0]).getDay()]} ${dateLongue(jours[0])} au ${NOMS_JOURS[dDe(jours[jours.length - 1]).getDay()]} ${dateLongue(jours[jours.length - 1])} ${jours[jours.length - 1].slice(0, 4)}`), M, y); y += 7;
+  const cell = (x, yy, w, hh, fond, couleur, texte, gras, taille) => {
+    if (fond) { doc.setFillColor(...fond); doc.rect(x, yy, w, hh, 'F'); }
+    doc.setDrawColor(190, 190, 190); doc.setLineWidth(0.2); doc.rect(x, yy, w, hh);
+    if (texte) { doc.setFont('helvetica', gras ? 'bold' : 'normal'); doc.setFontSize(taille || 9); doc.setTextColor(...(couleur || [0, 0, 0])); doc.text(txt(texte), x + w / 2, yy + hh / 2 + 1.3, { align: 'center' }); }
+  };
+  for (let i = 0; i < jours.length; i += 7) {
+    const sem = jours.slice(i, i + 7);
+    const hBloc = hl * (3 + noms.length) + 5;
+    if (y + hBloc > 275) { doc.addPage(); y = 16; }
+    const d0 = dDe(sem[0]), d6 = dDe(sem[6]);
+    const titreSem = d0.getMonth() === d6.getMonth() ? `Semaine du ${jourNum(d0)} au ${dateLongue(sem[6])}` : `Semaine du ${dateLongue(sem[0])} au ${dateLongue(sem[6])}`;
+    cell(M + colN, y, colJ * 7, hl, [217, 217, 217], [0, 0, 0], titreSem, true, 10); y += hl;
+    sem.forEach((iso, k) => cell(M + colN + k * colJ, y, colJ, hl - 1, null, [0, 0, 0], NOMS_JOURS[dDe(iso).getDay()].replace(/^./, c => c.toUpperCase()), true, 9)); y += hl - 1;
+    sem.forEach((iso, k) => cell(M + colN + k * colJ, y, colJ, hl - 1, ferieFerme(iso) ? [230, 233, 238] : null, [0, 0, 0], datePetite(iso), true, 10)); y += hl - 1;
+    for (const n of noms) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
+      doc.text(txt(n), M + 1, y + hl / 2 + 1.3);
+      sem.forEach((iso, k) => { const c = (pub.jours[iso] || {})[n] || 'R'; const st = STY[c] || STY.R; cell(M + colN + k * colJ, y, colJ, hl, st[0], st[1], st[2], c !== 'R' && c !== 'F' && c !== 'ABS', c === 'R' ? 8.5 : 10); });
+      y += hl;
+    }
+    y += 5;
+  }
+  if (y + 30 > 285) { doc.addPage(); y = 16; }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(0, 0, 0); doc.text('LÉGENDE', M, y + 4); y += 7;
+  const leg = [...vacs.map(v => [v.code, `${v.debut.replace(':', 'h')} – ${v.fin.replace(':', 'h')}`]), ['R', 'Jour de repos'], ['F', 'Jour férié : parkings fermés'], ['ABS', 'Absent']];
+  for (const [c, l] of leg) { const st = STY[c] || STY.R; cell(M + colN, y, colJ, 6, st[0], st[1], st[2], c !== 'R' && c !== 'F' && c !== 'ABS', 9); doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(0, 0, 0); doc.text(txt(l), M + colN + colJ + 3, y + 4.3); y += 6.5; }
+  if (pub.notes[m]) { y += 3; doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.splitTextToSize(txt(pub.notes[m]), W - 2 * M).forEach(l => { if (y > 285) { doc.addPage(); y = 16; } doc.text(l, M, y); y += 5; }); }
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(120, 120, 120);
+  doc.text(txt(`Planning validé le ${fmtDT(p.ts)}`), M, 292);
+  return { blob: doc.output('blob'), nom: `planning_${m}.pdf` };
+}
+async function telechargerPlanningPDF(m) {
+  showBusy('Préparation du PDF…');
+  try { const { blob, nom } = await pdfPlanning(m); hideBusy(); await shareOrDownload(blob, nom, `Planning ${nomMois(m)}`); }
+  finally { hideBusy(); }
+}
 async function cartePlanningAgents() {
   const pub = await planningPublie();
   if (!pub.pubs.length) return null;
