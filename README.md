@@ -149,6 +149,7 @@ Sécurité incendie | Ateliers          ← catégorie de signalement | destinat
 - Odeur de fumée ou de brûlé !        ← « ! » : urgent par défaut
 - Tags ou graffitis | Ateliers, DPMS, Police municipale   ← destinataires propres à la sous-catégorie
 ```
+Destinataires propres à un parking : « Designa (Dumotel) », « Bachman (Hénouille) », « Skidata (Arobase) ». Une catégorie peut les citer tous (`Barrières, bornes et caisses | Designa (Dumotel), Bachman (Hénouille), Skidata (Arobase)`) : chaque signalement ne propose que celui de son parking.
 
 ## 6. Bon à savoir
 

@@ -1374,7 +1374,7 @@ function parseLink(text) {
   let hash = '';
   try { hash = new URL(text, appBaseURL()).hash; } catch (e) { hash = ''; }
   if (!hash && text.startsWith('#')) hash = text;
-  const m = /^#(join|site|cfg|sup|ptype)=(.+)$/.exec(hash);
+  const m = /^#(join|site|cfg|sup|ptype|dests)=(.+)$/.exec(hash);
   return m ? { kind: m[1], val: m[2] } : null;
 }
 async function handleLink(text, fromScan) {
@@ -1386,6 +1386,12 @@ async function handleLink(text, fromScan) {
     if (state.mode === 'superviseur') { toast('Cet appareil est superviseur : configuration ignorée.', true); go('home'); return; }
     if (estEquipe()) { if (confirm('Reconfigurer cet appareil avec ce QR ?')) await safe(setupEquipe)(j); else go('home'); return; }
     state.pendingJoin = j; go('home'); return;
+  }
+  if (l.kind === 'dests') {   // lien « destinataires » préparé par Claude : pré-remplit l'écran, le superviseur vérifie et enregistre
+    let p = null; try { p = JSON.parse(td.decode(fflate.inflateSync(b64u.dec(l.val)))); } catch (e) { p = null; }
+    if (!p || !Array.isArray(p.dests)) { toast('Lien illisible.', true); go('home'); return; }
+    if (state.mode !== 'superviseur') { toast('Ce lien s’ouvre sur l’application superviseur.', true); go('home'); return; }
+    go('supConfig', { prefillDests: p }); return;
   }
   if (l.kind === 'ptype') {   // lien « planning-type et règles » préparé par Claude : pré-remplit l'écran, le superviseur vérifie et enregistre
     let p = null; try { p = JSON.parse(td.decode(fflate.inflateSync(b64u.dec(l.val)))); } catch (e) { p = null; }
@@ -1919,14 +1925,14 @@ VIEWS.signalement = async ({ cat, from, ctl, mc }) => {
     const sp = liste.find(x => x.lbl === v), sc = c && c.subs.find(x => x.lbl === v);
     if (sp && sp.urgent) { d.urgent = true; d.urgentAuto = true; } else if (d.urgentAuto) { d.urgent = false; d.urgentAuto = false; }
     if (!d.destsTouche) {   // destinataires propres à la sous-catégorie, sinon ceux de la catégorie
-      const ds = ((sc && sc.dests && sc.dests.length) ? sc.dests : (c && c.dests) || []).filter(x => cfg.dests.includes(x));
+      const ds = ((sc && sc.dests && sc.dests.length) ? sc.dests : (c && c.dests) || []).filter(x => cfg.dests.includes(x)).filter(destPourSite(d.site));
       d.dests.splice(0, d.dests.length, ...ds);
     }
   };
 
   let corps;
   if (d.etape === 'parking') {
-    corps = [h('p', { class: 'question' }, 'Dans quel parking ?'), ...choixListe(cfg.sites.map(x => ({ val: x.id, lbl: x.nom })), d.site, v => { d.site = v; suivante(); })];
+    corps = [h('p', { class: 'question' }, 'Dans quel parking ?'), ...choixListe(cfg.sites.map(x => ({ val: x.id, lbl: x.nom })), d.site, v => { if (v !== d.site) { d.site = v; if (!d.destsTouche) d.dests.splice(0, d.dests.length, ...d.dests.filter(destPourSite(v))); } suivante(); })];
   } else if (d.etape === 'agent') {
     corps = [h('p', { class: 'question' }, 'Qui fait le signalement ?'), ...choixListe(cfg.agents, d.agent, v => { d.agent = v; suivante(); })];
   } else if (d.etape === 'cat') {
@@ -1955,7 +1961,7 @@ VIEWS.signalement = async ({ cat, from, ctl, mc }) => {
       h('button', { class: 'ok big', onclick: () => { if (descOblig() && !d.desc.trim()) { toast('Décrivez le problème.', true); return; } suivante(); } }, 'Suivant')];
   } else {   // envoi
     const cases = h('div');
-    const drawCases = () => cases.replaceChildren(...cfg.dests.map(x => {
+    const drawCases = () => cases.replaceChildren(...cfg.dests.filter(destPourSite(d.site)).map(x => {
       const on = d.dests.includes(x);
       return h('button', { class: 'case' + (on ? ' on' : ''), onclick: () => { const n = d.dests.indexOf(x); if (n >= 0) d.dests.splice(n, 1); else d.dests.push(x); d.destsTouche = true; drawCases(); } },
         h('span', { class: 'coche' }, on ? '✓' : ''), x);
@@ -2026,10 +2032,17 @@ VIEWS.sigEnregistre = async ({ ref }) => page('Signalement enregistré', null,
     h('p', { class: 'muted' }, navigator.onLine ? 'Il est envoyé au DPMS.' : 'Pas de réseau : il partira automatiquement dès qu’il y en aura.')),
   h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'),
   h('button', { class: 'sec', onclick: () => { sigDraft = null; go('signalement', { from: 'hr' }, { noPush: true }); } }, 'Faire un autre signalement'));
+/* Destinataire propre à un parking : « Designa (Dumotel) » n'est proposé que pour les signalements de Dumotel */
+function destSite(nom) {
+  const m = /\(([^)]+)\)\s*$/.exec(nom || ''); if (!m) return null;
+  const s = (state.cfg.sites || []).find(x => sansAccent(x.nom) === sansAccent(m[1]));
+  return s ? s.id : null;
+}
+const destPourSite = site => x => { const ds = destSite(x); return !ds || !site || ds === site; };
 function appliquerCat(d, nom) {
   d.cat = nom; d.sub = null;
   const c = catByNom(nom);
-  if (!d.destsTouche) { d.dests.splice(0, d.dests.length, ...((c && c.dests) || []).filter(x => state.cfg.dests.includes(x))); }
+  if (!d.destsTouche) { d.dests.splice(0, d.dests.length, ...((c && c.dests) || []).filter(x => state.cfg.dests.includes(x)).filter(destPourSite(d.site))); }
 }
 
 /* ---------- Barrière ouverte / refermée ---------- */
@@ -4955,12 +4968,32 @@ async function publishCfg(cfg) {
 }
 
 /* ---------- Listes, catégories et coordonnées ---------- */
-VIEWS.supConfig = async () => {
+VIEWS.supConfig = async ({ prefillDests } = {}) => {
   const c = JSON.parse(JSON.stringify(state.cfg));
+  let taxoTexte = taxoToText(c.cats);
+  if (prefillDests) {   // fusion : un destinataire existant (même nom, hors parenthèse) est mis à jour, les autres sont ajoutés
+    const base = n => sansAccent(String(n).replace(/\s*\([^)]*\)\s*$/, ''));
+    const renomLigne = (l, a, b) => { const i = l.indexOf('|'); if (i < 0) return l; const ds = l.slice(i + 1).split(',').map(x => x.trim()); return ds.includes(a) ? l.slice(0, i + 1) + ' ' + [...new Set(ds.map(x => x === a ? b : x))].join(', ') : l; };
+    for (const [a, b] of Object.entries(prefillDests.renommer || {})) {
+      const k = c.dests.findIndex(x => sansAccent(x) === sansAccent(a));
+      if (k < 0 || c.dests.some(x => sansAccent(x) === sansAccent(b))) continue;
+      const ancien = c.dests[k]; c.dests[k] = b; c.contacts[b] = c.contacts[ancien] || {}; delete c.contacts[ancien];
+      taxoTexte = taxoTexte.split('\n').map(l => renomLigne(l, ancien, b)).join('\n');
+    }
+    for (const [nom, tel, mail] of prefillDests.dests) {
+      const ex = c.dests.find(x => sansAccent(x) === sansAccent(nom)) || (prefillDests.remplacer && prefillDests.remplacer[nom] ? null : c.dests.find(x => base(x) === base(nom) && !/\(/.test(x)));
+      if (ex) { const k = c.contacts[ex] || {}; delete c.contacts[ex]; c.dests[c.dests.indexOf(ex)] = nom; c.contacts[nom] = { tel: tel || k.tel || '', mail: mail || k.mail || '' }; }
+      else { c.dests.push(nom); c.contacts[nom] = { tel: tel || '', mail: mail || '' }; }
+    }
+    for (const [ancien, nouveaux] of Object.entries(prefillDests.remplacer || {})) {   // dans les catégories : un nom remplacé par plusieurs (un par parking)
+      taxoTexte = taxoTexte.split('\n').map(l => { const i = l.indexOf('|'); if (i < 0) return l; const ds = l.slice(i + 1).split(',').map(x => x.trim()); if (!ds.includes(ancien)) return l; return l.slice(0, i + 1) + ' ' + [...new Set(ds.flatMap(x => x === ancien ? nouveaux : [x]))].join(', '); }).join('\n');
+      if (!prefillDests.dests.some(x => x[0] === ancien)) { const k = c.dests.indexOf(ancien); if (k >= 0 && !taxoTexte.includes(ancien)) { c.dests.splice(k, 1); delete c.contacts[ancien]; } }
+    }
+  }
   const ta = (lines, hmin = 140) => h('textarea', { value: lines.join('\n'), style: `min-height:${hmin}px` });
   const tAgents = ta(c.agents), tMotifs = ta(c.motifs), tObjets = ta(c.objetsContact);
   const tDests = ta(c.dests.map(d => { const k = c.contacts[d] || {}; return [d, k.tel || '', k.mail || ''].join(' | ').replace(/( \| )+$/, ''); }), 170);
-  const tTaxo = h('textarea', { value: taxoToText(c.cats), style: 'min-height:420px;font-size:15px' });
+  const tTaxo = h('textarea', { value: taxoTexte, style: 'min-height:420px;font-size:15px' });
   const tCtl = h('textarea', { value: controlesToText(c.controles), style: 'min-height:420px;font-size:15px' });
   const sitesInputs = c.sites.map(s => ({ nom: h('input', { type: 'text', value: s.nom }), barr: h('input', { type: 'text', value: s.barrieres.join(', ') }) }));
   const tel = h('input', { type: 'tel', value: c.urgenceTel || '', placeholder: '01 …' });
@@ -4970,12 +5003,13 @@ VIEWS.supConfig = async () => {
   const hSynth = h('input', { type: 'time', value: c.synthese.heure });
   const lines = t => t.value.split('\n').map(x => x.trim()).filter(Boolean);
   return page('Listes et catégories', { back: true },
+    prefillDests ? h('div', { class: 'banner warn' }, 'Destinataires reçus par lien : vérifiez « Destinataires et coordonnées » et les catégories, puis « Enregistrer » en bas de page.') : null,
     h('div', { class: 'banner info' }, 'Les modifications sont transmises automatiquement à tous les appareils.'),
     h('div', { class: 'card' }, h('h2', null, 'Parkings et barrières'),
       ...sitesInputs.map(si => h('div', { style: 'margin-bottom:10px' }, si.nom, h('label', { class: 'f small' }, 'Barrières (séparées par des virgules)'), si.barr))),
     h('label', { class: 'f' }, 'Agents (un par ligne)'), tAgents,
     h('label', { class: 'f' }, 'Destinataires et coordonnées'),
-    h('p', { class: 'muted small' }, 'Une ligne par destinataire : nom | téléphone | courriel. Les coordonnées servent aux boutons « Appeler » et « Courriel » du traitement.'),
+    h('p', { class: 'muted small' }, 'Une ligne par destinataire : nom | téléphone | courriel. Les coordonnées servent aux boutons « Appeler » et « Courriel » du traitement. Un nom suivi d’un parking entre parenthèses, par exemple « Designa (Dumotel) », n’est proposé que pour les signalements de ce parking.'),
     tDests,
     h('label', { class: 'f' }, 'Points de contrôle'),
     h('p', { class: 'muted small' }, 'Trois rubriques : [Quotidien] (une fois par jour et par parking), [Mensuel] (tous les 30 jours), [Trimestriel] (tous les 90 jours). Une ligne par point : « - Libellé : ce qu’il faut regarder | catégorie du signalement en cas de non-conformité ». Un « ? » devant le libellé permet à l’agent d’indiquer que ce point n’existe pas dans le parking.'),
@@ -5041,7 +5075,7 @@ async function boot() {
   if (state.mode && !state.conn) { state.mode = null; }
   if (state.mode === 'agent' && (await kvGet('ronde'))) Geo.start();
   const hash = location.hash;
-  if (hash && /^#(join|site|cfg|sup|ptype)=/.test(hash)) {
+  if (hash && /^#(join|site|cfg|sup|ptype|dests)=/.test(hash)) {
     history.replaceState(null, '', location.pathname + location.search);
     await handleLink(hash, false);
     if (state.view === 'home') render();
@@ -5056,7 +5090,7 @@ async function boot() {
 }
 window.addEventListener('hashchange', () => {
   const hash = location.hash;
-  if (hash && /^#(join|site|cfg|sup|ptype)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
+  if (hash && /^#(join|site|cfg|sup|ptype|dests)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
   else if (hash === '#synthese' && state.mode === 'superviseur') { history.replaceState(null, '', location.pathname + location.search); go('synthese'); }
   else if (hash === '#planning' && state.mode) { history.replaceState(null, '', location.pathname + location.search); go(state.mode === 'superviseur' ? 'planning' : 'planningAgents'); }
 });
