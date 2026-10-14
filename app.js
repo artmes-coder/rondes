@@ -1374,7 +1374,7 @@ function parseLink(text) {
   let hash = '';
   try { hash = new URL(text, appBaseURL()).hash; } catch (e) { hash = ''; }
   if (!hash && text.startsWith('#')) hash = text;
-  const m = /^#(join|site|cfg|sup)=(.+)$/.exec(hash);
+  const m = /^#(join|site|cfg|sup|ptype)=(.+)$/.exec(hash);
   return m ? { kind: m[1], val: m[2] } : null;
 }
 async function handleLink(text, fromScan) {
@@ -1386,6 +1386,12 @@ async function handleLink(text, fromScan) {
     if (state.mode === 'superviseur') { toast('Cet appareil est superviseur : configuration ignorée.', true); go('home'); return; }
     if (estEquipe()) { if (confirm('Reconfigurer cet appareil avec ce QR ?')) await safe(setupEquipe)(j); else go('home'); return; }
     state.pendingJoin = j; go('home'); return;
+  }
+  if (l.kind === 'ptype') {   // lien « planning-type et règles » préparé par Claude : pré-remplit l'écran, le superviseur vérifie et enregistre
+    let p = null; try { p = JSON.parse(td.decode(fflate.inflateSync(b64u.dec(l.val)))); } catch (e) { p = null; }
+    if (!p || typeof p.type !== 'string') { toast('Lien de planning illisible.', true); go('home'); return; }
+    if (state.mode !== 'superviseur') { toast('Ce lien s’ouvre sur l’application superviseur.', true); go('home'); return; }
+    go('planningParam', { prefill: { type: p.type, regles: typeof p.regles === 'string' ? p.regles : null, ancre: /^\d{4}-\d{2}-\d{2}$/.test(p.ancre || '') ? p.ancre : null } }); return;
   }
   if (l.kind === 'sup') {   // QR « autre superviseur » : adresse du relais seulement ; la phrase de passe reste demandée
     let u = ''; try { u = td.decode(b64u.dec(l.val)); } catch (e) { u = ''; }
@@ -2819,13 +2825,15 @@ async function exporterPlanning(m, G) {
 }
 
 /* Paramètres : planning-type, règles, horaires */
-VIEWS.planningParam = async () => {
+VIEWS.planningParam = async ({ prefill } = {}) => {
   const c = JSON.parse(JSON.stringify(state.cfg)); c.planning = { ...PLANNING_DEFAUT, ...(c.planning || {}) };
+  if (prefill) { c.planning.type = prefill.type; if (prefill.regles) c.planning.regles = prefill.regles; if (prefill.ancre) c.planning.ancre = prefill.ancre; }
   const tType = h('textarea', { value: c.planning.type, style: 'min-height:160px;font-family:ui-monospace,Consolas,monospace;font-size:14px', placeholder: 'Yacine : R MAT MAT MAT MAT SOI MAT | R MAT MAT MAT MAT R R' });
   const tRegles = h('textarea', { value: c.planning.regles, style: 'min-height:140px' });
   const ancre = h('input', { type: 'date', value: c.planning.ancre });
   const vacs = c.planning.vacations.map(v => ({ v, lbl: h('input', { type: 'text', value: v.lbl }), d: h('input', { type: 'time', value: v.debut }), f: h('input', { type: 'time', value: v.fin }) }));
   return page('Planning-type et règles', { back: () => go('planning') },
+    prefill ? h('div', { class: 'banner warn' }, 'Planning-type et règles reçus par lien : vérifiez, puis « Enregistrer » en bas de page.') : null,
     h('div', { class: 'card' }, h('h2', null, 'Planning-type (cycle de 2 semaines)'),
       h('p', { class: 'muted small' }, 'Une ligne par agent : nom, deux-points, 7 codes de la semaine 1 (lundi → dimanche), « | », 7 codes de la semaine 2. R = repos. Les noms doivent correspondre à ceux de la liste des agents.'),
       tType,
@@ -4935,7 +4943,7 @@ async function boot() {
   if (state.mode && !state.conn) { state.mode = null; }
   if (state.mode === 'agent' && (await kvGet('ronde'))) Geo.start();
   const hash = location.hash;
-  if (hash && /^#(join|site|cfg|sup)=/.test(hash)) {
+  if (hash && /^#(join|site|cfg|sup|ptype)=/.test(hash)) {
     history.replaceState(null, '', location.pathname + location.search);
     await handleLink(hash, false);
     if (state.view === 'home') render();
@@ -4950,7 +4958,7 @@ async function boot() {
 }
 window.addEventListener('hashchange', () => {
   const hash = location.hash;
-  if (hash && /^#(join|site|cfg|sup)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
+  if (hash && /^#(join|site|cfg|sup|ptype)=/.test(hash)) { history.replaceState(null, '', location.pathname + location.search); handleLink(hash, false); }
   else if (hash === '#synthese' && state.mode === 'superviseur') { history.replaceState(null, '', location.pathname + location.search); go('synthese'); }
   else if (hash === '#planning' && state.mode) { history.replaceState(null, '', location.pathname + location.search); go(state.mode === 'superviseur' ? 'planning' : 'planningAgents'); }
 });
