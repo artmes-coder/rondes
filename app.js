@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.17.1';
+const APP_VERSION = '2.18.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -425,30 +425,7 @@ const CONTROLES_DEFAUT = `[Quotidien]
 - Plans d’évacuation et consignes : en place, lisibles, non dégradés | Issues de secours et évacuation | Plan d’évacuation absent ou arraché ; Plan ou consignes dégradés ou illisibles
 - Propreté : déchets, dépôts, urine, seringues, tags | Propreté et hygiène
 - Sûreté : présences, squat, effraction, caméra masquée ou arrachée | Sûreté et présences
-- Véhicules : épave, véhicule gênant, sur place PMR, ventouse, entré sans ticket | Véhicules | Épave ou véhicule hors d’usage ; Véhicule mal stationné ou gênant ; Véhicule sur place PMR sans carte ; Véhicule ventouse (stationnement prolongé) ; Véhicule entré sans ticket ; Véhicule fracturé ou vitre brisée ; Personne dans un véhicule
-[Mensuel]
-- Extincteurs (un par un) : goupille et scellé présents, support fixé, panneau au-dessus | Sécurité incendie | Goupille ou scellé absent ; Support d’extincteur arraché ; Panneau de l’extincteur absent
-- Bac d’absorbant : rempli, pelle présente | Sécurité incendie | Bac d’absorbant vide ou absent ; Pelle absente
-- ?Déclencheurs manuels d’alarme : intacts, non masqués, accessibles (sans les actionner) | Sécurité incendie | Déclencheur cassé, masqué ou enclenché ; Déclencheur inaccessible
-- Blocs d’éclairage de sécurité (un par un) : voyant de charge allumé, bloc non arraché | Issues de secours et évacuation | Voyant de charge éteint ; Bloc de sécurité arraché ou cassé
-- Ferme-portes des portes coupe-feu : la porte lâchée se referme complètement seule | Sécurité incendie | Porte coupe-feu qui ne se referme pas seule ; Ferme-porte cassé ou décroché
-- ?Commandes de désenfumage : accessibles, boîtier fermé et intact, signalées (sans les actionner) | Sécurité incendie | Boîtier de commande ouvert ou dégradé ; Commande inaccessible ; Signalétique de la commande absente
-- Bouches de ventilation : dégagées, rien stationné ni stocké devant | Ventilation et qualité de l’air | Bouche de ventilation obstruée ; Bouche de ventilation dégradée
-- Signalétique d’évacuation : panneaux en place et visibles | Issues de secours et évacuation | Panneau d’évacuation absent ou masqué ; Panneau d’évacuation éteint ou cassé
-- ?Interphones et appel d’urgence : essai d’appel depuis chaque borne et depuis la cabine d’ascenseur | Barrières, bornes et caisses | Interphone de borne hors service ; Téléphone de cabine d’ascenseur hors service ; Appel sans réponse du centre
-- Signalisation routière : hauteur maximale à l’entrée, gabarit, marquage au sol, places PMR, numérotation | Signalisation et marquage
-- ?Bornes de recharge : en service, câbles intacts, extincteur à proximité | Bornes de recharge électrique
-- Issues côté extérieur : rien stationné ni entreposé devant les sorties et les accès pompiers | Issues de secours et évacuation | Véhicule stationné devant une sortie ; Objets entreposés devant une sortie ; Accès pompiers encombré !
-[Trimestriel]
-- Entretien des extincteurs : sur chaque extincteur, étiquette de vérification de moins d’un an | Entretien et maintenance | Vérification des extincteurs dépassée ; Étiquette absente ou illisible
-- ?Entretien des portails, barrières et portes automatiques : dernière visite d’entretien datée de moins de 6 mois | Entretien et maintenance | Entretien des portails, barrières ou portes automatiques dépassé ; Date d’entretien absente ou illisible
-- ?Entretien des ascenseurs : passage de l’ascensoriste noté, dernière visite de moins de 6 semaines | Entretien et maintenance | Visite de l’ascensoriste dépassée ; Date d’entretien absente ou illisible
-- ?Entretien du désenfumage : dernière vérification datée, échéance indiquée non dépassée | Entretien et maintenance | Vérification du désenfumage dépassée ; Date d’entretien absente ou illisible
-- Entretien de l’éclairage de sécurité : dernière vérification datée, échéance indiquée non dépassée | Entretien et maintenance | Vérification de l’éclairage de sécurité dépassée ; Date d’entretien absente ou illisible
-- ?Entretien des bornes de recharge : dernière maintenance datée, échéance indiquée non dépassée | Entretien et maintenance | Maintenance des bornes de recharge dépassée ; Date d’entretien absente ou illisible
-- ?Colonnes sèches : prises accessibles, capots et bouchons présents, signalétique en place | Sécurité incendie | Prise de colonne sèche inaccessible ; Capot ou bouchon manquant ; Signalétique absente
-- ?Locaux techniques : portes fermées à clé, signalées, aucun stockage | Bâtiment et infiltrations | Local technique ouvert ou non verrouillé ; Stockage dans un local technique ; Signalétique absente
-- Clés, badges et télécommandes d’exploitation : inventaire | Autre | Clé, badge ou télécommande manquant`;
+- Véhicules : épave, véhicule gênant, sur place PMR, ventouse, entré sans ticket | Véhicules | Épave ou véhicule hors d’usage ; Véhicule mal stationné ou gênant ; Véhicule sur place PMR sans carte ; Véhicule ventouse (stationnement prolongé) ; Véhicule entré sans ticket ; Véhicule fracturé ou vitre brisée ; Personne dans un véhicule`;
 const CONTROLES_DEFAUT_V16 = `[Quotidien]
 - Rampes et voies de circulation : dégagées ; en hiver, ni verglas ni neige | Accès et circulation
 - ?Portails : fonctionnent, boutons-poussoirs sur « on » | Accès et circulation
@@ -521,6 +498,7 @@ const CONTROLES_DEFAUT_V15 = `[Quotidien]
 - ?Locaux techniques : portes fermées à clé, signalées, aucun stockage | Bâtiment et infiltrations
 - Dates d’entretien affichées : ascenseurs, portes automatiques, extincteurs ; relever et signaler les dates dépassées | Autre
 - Clés, badges et télécommandes d’exploitation : inventaire | Autre`;
+const NIVEAUX_ACTIFS = ['quotidien'];   // contrôles mensuels et trimestriels retirés (2.18) : sécurité incendie et entretien relèvent du prestataire ou de l'AFUL
 const NIVEAUX = { quotidien: { titre: 'Quotidien', lbl: 'Contrôle quotidien', jours: 1 }, mensuel: { titre: 'Mensuel', lbl: 'Contrôle mensuel', jours: 30 }, trimestriel: { titre: 'Trimestriel', lbl: 'Contrôle trimestriel', jours: 90 } };
 function slug(t) { return t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40); }
 function parseControles(text) {
@@ -528,7 +506,7 @@ function parseControles(text) {
   for (const raw of text.split('\n')) {
     const l = raw.trim(); if (!l) continue;
     const m = /^\[(.+)\]$/.exec(l);
-    if (m) { const k = slug(m[1]); niv = NIVEAUX[k] ? k : null; continue; }
+    if (m) { const k = slug(m[1]); niv = NIVEAUX_ACTIFS.includes(k) ? k : null; continue; }
     if (!niv || !/^[-•*]/.test(l)) continue;
     let t = l.replace(/^[-•*]\s*/, ''), opt = false;
     if (t.startsWith('?')) { opt = true; t = t.slice(1).trim(); }
@@ -541,7 +519,7 @@ function parseControles(text) {
   return out;
 }
 function controlesToText(list) {
-  return Object.keys(NIVEAUX).map(n => [`[${NIVEAUX[n].titre}]`, ...list.filter(c => c.niveau === n).map(c => `- ${c.opt ? '?' : ''}${c.lbl}${c.detail ? ' : ' + c.detail : ''}${c.cat ? ' | ' + c.cat : ''}${(c.subs || []).length ? ' | ' + c.subs.map(x => x.lbl + (x.urgent ? ' !' : '')).join(' ; ') : ''}`)].join('\n')).join('\n');
+  return NIVEAUX_ACTIFS.map(n => [`[${NIVEAUX[n].titre}]`, ...list.filter(c => c.niveau === n).map(c => `- ${c.opt ? '?' : ''}${c.lbl}${c.detail ? ' : ' + c.detail : ''}${c.cat ? ' | ' + c.cat : ''}${(c.subs || []).length ? ' | ' + c.subs.map(x => x.lbl + (x.urgent ? ' !' : '')).join(' ; ') : ''}`)].join('\n')).join('\n');
 }
 const MOTIFS_DEFAUT = ['Panne de la barrière', 'Panne de borne ou de caisse', 'Intervention technique', 'Forte affluence', 'Consigne de la hiérarchie', 'Autre'];
 const CAT_AUTRE = 'Autre';
@@ -602,6 +580,7 @@ function normalizeCfg(c) {
     const dc = taxo.find(x => x.nom === c.nom), ds = dc && dc.subs.find(x => x.lbl === sc.lbl);
     sc.dests = ds ? ds.dests.slice() : [];
   }));
+  n.controles = n.controles.filter(c => NIVEAUX_ACTIFS.includes(c.niveau));
   [...new Set(n.controles.map(c => c.cat).filter(Boolean))].forEach(nom => {
     if (nom !== CAT_AUTRE && !n.cats.some(c => c.nom === nom)) { const d = taxo.find(c => c.nom === nom); if (d) n.cats.push(d); }
   });
@@ -1558,7 +1537,7 @@ VIEWS.plus = async () => {
 async function carteControlesAFaire() {
   const st = await etatControles();
   const lignes = state.cfg.sites.map(s => {
-    const dus = Object.keys(NIVEAUX).filter(n => echeance(st, s.id, n).du);
+    const dus = NIVEAUX_ACTIFS.filter(n => echeance(st, s.id, n).du);
     return dus.length ? h('div', { class: 'stat' }, h('span', null, s.nom), h('span', { class: 'small' }, ...dus.map(n => h('span', { class: 'badge ' + (n === 'quotidien' ? 'b-info' : 'b-warn') }, n)))) : null;
   }).filter(Boolean);
   return lignes.length ? h('div', { class: 'card' }, h('h2', null, 'Contrôles à faire'), ...lignes, h('p', { class: 'muted small' }, 'Ils sont proposés pendant la ronde du parking concerné.')) : null;
@@ -1593,7 +1572,6 @@ async function beginRonde(site, agent) {
   etapes.push({ id: 'comptage', lbl: 'Comptage des véhicules' });
   if (await tkReleveDu(site)) etapes.push({ id: 'tickets', lbl: 'Borne à tickets (relevé de la semaine)' });
   etapes.push({ id: 'quotidien', lbl: 'Contrôle quotidien' });
-  ['mensuel', 'trimestriel'].forEach(n => { if (echeance(st, site, n).du && pointsSite(st, site, n).length) etapes.push({ id: n, lbl: NIVEAUX[n].lbl }); });
   etapes.push({ id: 'fin', lbl: 'Fin de ronde' });
   const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), etapes, step: etapes[0].id, pos: {}, revus: [], reporte: {}, lance: {},
     checklist: {}, sigsCrees: [], compte: 0, compteValide: false, quotidienDu: true, ctl: {}, ctlEmis: {} };
@@ -4821,7 +4799,7 @@ async function carteControlesSup() {
   const regs = await etatRegistres();
   const etatReg = r => h('span', { class: 'badge ' + (r.du ? 'b-bad' : 'b-ok') }, `registre : ${!r.dernier ? 'à contrôler' : r.du ? `à contrôler (${r.depuis} j)` : r.depuis === 0 ? 'aujourd’hui' : `il y a ${r.depuis} j`}`);
   return h('div', { class: 'card' }, h('h2', null, 'Contrôles'),
-    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...Object.keys(NIVEAUX).map(n => etat(s.id, n)), etatReg(regs.find(r => r.site === s.id))))),
+    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...NIVEAUX_ACTIFS.map(n => etat(s.id, n)), etatReg(regs.find(r => r.site === s.id))))),
     h('button', { class: 'sec', onclick: () => go('supControles') }, 'Détail des contrôles'));
 }
 VIEWS.supControles = async () => {
@@ -4838,7 +4816,7 @@ VIEWS.supControles = async () => {
           rg.du ? h('span', { class: 'badge b-bad' }, 'à contrôler') : h('span', { class: 'badge b-ok' }, 'à jour'),
           h('div', { class: 'muted small' }, rg.dernier ? `Dernier : ${fmtDT(rg.dernier.at)}${rg.dernier.note ? ' — ' + rg.dernier.note : ''} — prochain avant le ${fmtJour(localDate(new Date(new Date(rg.dernier.at).getTime() + 30 * 86400000)))}` : 'Jamais contrôlé'),
           h('button', { class: 'sec', style: 'margin-top:6px', onclick: safe(async () => { if (await registreControle(s.id)) go('supControles', {}, { noPush: true, keepScroll: true }); }) }, 'Registre contrôlé')),
-        ...Object.keys(NIVEAUX).map(n => {
+        ...NIVEAUX_ACTIFS.map(n => {
           const e = echeance(st, s.id, n);
           const proch = e.dernier && n !== 'quotidien' ? new Date(new Date(e.dernier.at).getTime() + NIVEAUX[n].jours * 86400000) : null;
           return h('div', { class: 'stat', style: 'display:block' }, h('b', null, NIVEAUX[n].lbl), ' ',
@@ -5656,7 +5634,7 @@ async function donneesSynthese(p) {
       dureeMoy: durees.length ? Math.round(durees.reduce((a, b) => a + b, 0) / durees.length) : null,
       vehMoy: comptes.length ? Math.round(comptes.reduce((a, b) => a + b, 0) / comptes.length) : null,
       ctlQuot: ctl.filter(c => c.niveau === 'quotidien').length,
-      nc, mensuel: echeance(st, x.id, 'mensuel'), trimestriel: echeance(st, x.id, 'trimestriel'), registre: regs.find(r => r.site === x.id),
+      nc, registre: regs.find(r => r.site === x.id),
       barrieres: b.filter(y => dans(y.ouverte.quand)).length, dureeB, barrOuvertes: barr.filter(y => y.site === x.id && !y.fermee)
     };
   });
@@ -5752,11 +5730,11 @@ async function pdfSynthese(D) {
     [22, 12, 18, 16, 15, 40]);
   // contrôles
   titre('Contrôles');
-  tableau(['Parking', 'Contrôles quotidiens', 'Mensuel', 'Trimestriel', 'Registre de sécurité (DPMS)'],
+  tableau(['Parking', 'Contrôles quotidiens', 'Registre de sécurité (DPMS)'],
     D.parSite.map(x => {
       const e = (v, n) => !v.dernier ? 'jamais fait' : `${fmtJour(localDate(new Date(v.dernier.at)))}${v.du ? ' — EN RETARD' : ''}`;
-      return [x.site.nom, x.ctlQuot, e(x.mensuel), e(x.trimestriel), x.registre && x.registre.dernier ? `${fmtJour(localDate(new Date(x.registre.dernier.at)))}${x.registre.du ? ' — à faire' : ''}` : 'jamais contrôlé'];
-    }), [22, 18, 24, 24, 30]);
+      return [x.site.nom, x.ctlQuot, x.registre && x.registre.dernier ? `${fmtJour(localDate(new Date(x.registre.dernier.at)))}${x.registre.du ? ' — à faire' : ''}` : 'jamais contrôlé'];
+    }), [40, 40, 38]);
   const ncl = D.parSite.flatMap(x => Object.entries(x.nc).map(([l, n]) => [x.site.nom, l, n])).sort((a, b) => b[2] - a[2]);
   para('Points relevés non conformes dans la semaine :', { gras: true });
   tableau(['Parking', 'Point de contrôle', 'Nombre de rondes'], ncl.slice(0, 15), [22, 60, 18], { vide: 'Aucune non-conformité.' });
@@ -5920,7 +5898,7 @@ VIEWS.supConfig = async ({ prefillDests } = {}) => {
     h('p', { class: 'muted small' }, 'Une ligne par destinataire : nom | téléphone | courriel. Les coordonnées servent aux boutons « Appeler » et « Courriel » du traitement. Un nom suivi d’un parking entre parenthèses, par exemple « Designa (Dumotel) », n’est proposé que pour les signalements de ce parking.'),
     tDests,
     h('label', { class: 'f' }, 'Points de contrôle'),
-    h('p', { class: 'muted small' }, 'Trois rubriques : [Quotidien] (une fois par jour et par parking), [Mensuel] (tous les 30 jours), [Trimestriel] (tous les 90 jours). Une ligne par point : « - Libellé : ce qu’il faut regarder | catégorie du signalement en cas de non-conformité ». Un « ? » devant le libellé permet à l’agent d’indiquer que ce point n’existe pas dans le parking.'),
+    h('p', { class: 'muted small' }, 'Rubrique [Quotidien] : contrôle fait à chaque ronde, une fois par jour et par parking (les contrôles mensuels et trimestriels ont été retirés : sécurité incendie et entretien relèvent du prestataire ou de l’AFUL). Une ligne par point : « - Libellé : ce qu’il faut regarder | catégorie du signalement en cas de non-conformité ». Un « ? » devant le libellé permet à l’agent d’indiquer que ce point n’existe pas dans le parking.'),
     tCtl,
     h('label', { class: 'f' }, 'Catégories et sous-catégories des signalements'),
     h('p', { class: 'muted small' }, 'Une catégorie par ligne, suivie si besoin de « | » et des destinataires proposés par défaut. Puis ses sous-catégories, une par ligne commençant par « - ». Un « ! » en fin de ligne marque une sous-catégorie urgente par défaut. Une sous-catégorie peut avoir ses propres destinataires : « - Tags ou graffitis | Ateliers, DPMS, Police municipale ». Chaque catégorie est une ligne de contrôle de la ronde. « Autre (préciser) » est ajouté automatiquement.'),
