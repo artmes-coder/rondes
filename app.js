@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.14.0';
+const APP_VERSION = '2.15.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -4624,7 +4624,8 @@ async function supHome() {
       rondes.length ? rondes.map(rondeLigne) : h('p', { class: 'muted' }, 'Aucune ronde reçue.'),
       h('div', { class: 'row' },
         rondes.length ? h('button', { class: 'sec', onclick: () => go('supRondes') }, 'Toutes les rondes') : null,
-        h('button', { class: 'sec', onclick: () => go('supBarrieres') }, 'Barrières'))),
+        h('button', { class: 'sec', onclick: () => go('supBarrieres') }, 'Barrières')),
+      h('button', { class: 'ok', style: 'margin-top:8px', onclick: () => go('suiviRondes', {}) }, 'Suivi des rondes par agent')),
     h('div', { class: 'card' }, h('h2', null, 'Exports'),
       h('button', { class: 'sec', onclick: () => go('synthese') }, 'Synthèse hebdomadaire (PDF)'),
       h('button', { class: 'sec', onclick: safe(supExcel) }, 'Excel complet (heures et positions)'),
@@ -4746,6 +4747,121 @@ async function cloturerRonde(r) {
   await fold(); syncNow();
   toast('Ronde clôturée.'); render();
 }
+/* ---------- Suivi individuel des rondes : une ronde par agent et par service, dans le parking qui lui est affecté ---------- */
+function affectations() { return (state.cfg && state.cfg.affectations) || {}; }
+async function codePlanningJour(agent, iso) {   // code du planning publié (à défaut, planning-type) pour un agent de la liste
+  const pub = await planningPublie(), noms = [...new Set([...typePlanning().map(x => x.nom), ...Object.keys(pub.jours[iso] || {})])];
+  const n = noms.includes(agent) ? agent : trouverNom(agent, noms);
+  if (!n) return { code: null, source: null };
+  if (pub.jours[iso] && pub.jours[iso][n] != null) return { code: pub.jours[iso][n] || 'R', source: 'publié' };
+  if (ferieFerme(iso)) return { code: 'F', source: 'férié' };
+  const c = codeType(n, iso);
+  return { code: c || (typePlanning().some(x => x.nom === n) ? 'R' : null), source: c || typePlanning().some(x => x.nom === n) ? 'planning-type' : null };
+}
+async function suiviRondes(jours) {
+  const aff = affectations(), agents = state.cfg.agents.filter(a => aff[a]);
+  const rondes = await dbAll('rondes');
+  const parJour = {};
+  for (const r of rondes) if (r.jour) (parJour[r.jour] = parJour[r.jour] || []).push(r);
+  const auj = localDate(), fin = (state.cfg.rondeMatin && state.cfg.rondeMatin.heure) || '20:00';
+  const passeFin = iso => iso < auj || (iso === auj && `${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}` >= fin);
+  const out = {};
+  for (const a of agents) {
+    out[a] = {};
+    for (const iso of jours) {
+      const { code, source } = await codePlanningJour(a, iso);
+      const site = aff[a], du = rs => rs.filter(r => r.agent === a);
+      const jr = parJour[iso] || [], siennes = du(jr), ici = siennes.filter(r => r.site === site), ailleurs = siennes.filter(r => r.site !== site);
+      const parAutre = jr.filter(r => r.site === site && r.agent !== a);
+      const travaille = code && estVacation(code), ferie = code === 'F' || ferieFerme(iso), absent = !!(code && ABSENCES[code]);
+      let et;
+      if (ici.length) {
+        const r = ici.find(x => x.fin && !x.closDPMS) || ici[0];
+        et = r.fin && !r.closDPMS ? 'ok' : r.closDPMS ? 'oubli' : iso === auj ? 'cours' : 'incomplete';
+        if (!travaille && et === 'ok') et = 'horsplan';
+      } else if (ferie) et = 'ferie';
+      else if (absent) et = 'abs';
+      else if (!travaille) et = code ? 'repos' : 'inconnu';
+      else if (ailleurs.length) et = 'ailleurs';
+      else if (!passeFin(iso)) et = iso === auj ? 'attente' : 'avenir';
+      else et = 'manque';
+      out[a][iso] = { et, code, source, site, ici, ailleurs, parAutre };
+    }
+  }
+  return { agents, out };
+}
+const SUIVI_ET = {
+  ok: { s: '✓', l: 'Ronde faite', c: 'sv-ok' }, horsplan: { s: '✓', l: 'Ronde faite (jour non prévu au planning)', c: 'sv-ok2' },
+  oubli: { s: '!', l: 'Ronde commencée, non terminée (clôturée par le DPMS)', c: 'sv-warn' }, incomplete: { s: '!', l: 'Ronde commencée, fin non reçue', c: 'sv-warn' },
+  cours: { s: '…', l: 'Ronde en cours', c: 'sv-cours' }, ailleurs: { s: '≠', l: 'Ronde faite dans un autre parking', c: 'sv-warn' },
+  manque: { s: '✗', l: 'Pas de ronde', c: 'sv-bad' }, attente: { s: '·', l: 'En service, ronde pas encore reçue', c: 'sv-att' }, avenir: { s: '', l: 'À venir', c: 'sv-vide' },
+  repos: { s: '', l: 'Repos', c: 'sv-vide' }, abs: { s: 'A', l: 'Absent', c: 'sv-abs' }, ferie: { s: 'F', l: 'Férié (parkings fermés)', c: 'sv-abs' }, inconnu: { s: '?', l: 'Pas dans le planning', c: 'sv-vide' }
+};
+VIEWS.suiviRondes = async ({ mois } = {}) => {
+  const auj = localDate(), m = mois || moisDe(auj);
+  const [y, mm] = m.split('-').map(Number), nbJ = new Date(y, mm, 0).getDate();
+  const jours = Array.from({ length: nbJ }, (_, i) => `${m}-${String(i + 1).padStart(2, '0')}`);
+  const aff = affectations();
+  const recharger = () => go('suiviRondes', { mois: m }, { noPush: true, keepScroll: true });
+  // affectations : agent → parking
+  const selects = state.cfg.agents.map(a => ({ a, s: h('select', null, h('option', { value: '' }, '— pas de ronde attendue —'), ...state.cfg.sites.map(x => h('option', { value: x.id, selected: aff[a] === x.id ? true : null }, x.nom))) }));
+  const carteAff = h('details', { class: 'card', open: Object.keys(aff).length ? null : true },
+    h('summary', null, 'Affectation des agents (parking de la ronde de chaque service)'),
+    ...selects.map(x => h('div', { class: 'row', style: 'align-items:center' }, h('b', { style: 'flex:1' }, x.a), x.s)),
+    h('button', { class: 'ok', onclick: safe(async () => {
+      const c = JSON.parse(JSON.stringify(state.cfg)); c.affectations = {};
+      selects.forEach(x => { if (x.s.value) c.affectations[x.a] = x.s.value; });
+      c.cfgId = randCode(8); await publishCfg(c); toast('Affectations enregistrées.'); recharger();
+    }) }, 'Enregistrer les affectations'));
+  if (!Object.keys(aff).length) return page('Suivi des rondes par agent', { back: true },
+    h('div', { class: 'banner info' }, 'Indiquez d’abord le parking de chaque agent : chaque jour de service prévu au planning, une ronde y est attendue.'), carteAff);
+  const { agents, out } = await suiviRondes(jours);
+  const nonVus = Object.values(out).some(l => Object.values(l).some(x => x.source === 'planning-type'));
+  const detail = (a, iso) => {
+    const x = out[a][iso], e = SUIVI_ET[x.et];
+    const fermer = () => box.remove();
+    const ligneR = r => h('div', { class: 'small' }, `${siteNom(r.site)} — ${r.agent} : ${fmtHeure(r.debut)}${r.fin ? ' → ' + fmtHeure(r.fin) : ''}${r.fin && r.debut && !r.closDPMS ? ` (${Math.round((new Date(r.fin) - new Date(r.debut)) / 60000)} min)` : ''}${r.compte != null ? `, ${r.compte} véhicule(s)` : ''}, ${r.nbSig || 0} signalement(s)${r.closDPMS ? ' — clôturée par le DPMS' : !r.fin ? ' — fin non reçue' : ''}`);
+    const box = h('div', { class: 'confirm-contact', onclick: ev => { if (ev.target === box) fermer(); } }, h('div', { class: 'sheet' },
+      h('h3', null, `${a} — ${jourLong(iso)}`),
+      h('p', null, h('span', { class: `sv-pastille ${e.c}` }, e.s || ' '), ' ', h('b', null, e.l)),
+      h('p', { class: 'muted small' }, `Planning : ${x.code ? libelleCode(x.code) : 'non renseigné'}${x.source === 'planning-type' ? ' (planning-type : mois non publié)' : ''} · parking affecté : ${siteNom(x.site)}`),
+      ...x.ici.map(ligneR), ...x.ailleurs.map(ligneR),
+      x.parAutre.length ? [h('p', { class: 'small', style: 'margin:10px 0 2px;font-weight:600' }, `Rondes de ${siteNom(x.site)} faites par d’autres ce jour-là :`), ...x.parAutre.map(ligneR)] : null,
+      h('button', { class: 'link', onclick: fermer }, 'Fermer')));
+    document.body.append(box);
+  };
+  const stats = a => {
+    const l = Object.entries(out[a]).filter(([iso]) => iso <= auj).map(([, x]) => x.et);
+    const attendues = l.filter(e => ['ok', 'oubli', 'incomplete', 'ailleurs', 'manque'].includes(e)).length;
+    const faites = l.filter(e => e === 'ok').length;
+    return { attendues, faites, manque: l.filter(e => e === 'manque').length, part: l.filter(e => ['oubli', 'incomplete', 'ailleurs'].includes(e)).length, hors: l.filter(e => e === 'horsplan').length };
+  };
+  const exporter = safe(async () => {
+    const aoa = [['Agent', 'Parking', ...jours.map(iso => jourCourt(iso)), 'Attendues', 'Faites', 'Manquantes', 'Incomplètes ou ailleurs']];
+    for (const a of agents) { const st = stats(a); aoa.push([a, siteNom(aff[a]), ...jours.map(iso => { const x = out[a][iso]; return x.et === 'repos' || x.et === 'avenir' ? '' : SUIVI_ET[x.et].l; }), st.attendues, st.faites, st.manque, st.part]); }
+    await shareOrDownload(xlsxBlob([[`Rondes ${m}`, aoa, [16, 12, ...jours.map(() => 14), 10, 8, 11, 12]]]), `suivi_rondes_${m}.xlsx`);
+  });
+  return page('Suivi des rondes par agent', { back: true },
+    h('div', { class: 'card plan-tete' },
+      h('div', { class: 'row', style: 'align-items:center' },
+        h('button', { class: 'sec', style: 'width:auto', onclick: () => go('suiviRondes', { mois: moisSuivant(m, -1) }, { noPush: true }) }, '‹'),
+        h('h2', { style: 'margin:0;flex:1;text-align:center;text-transform:none;font-size:22px' }, nomMois(m)),
+        h('button', { class: 'sec', style: 'width:auto', onclick: () => go('suiviRondes', { mois: moisSuivant(m, 1) }, { noPush: true }) }, '›')),
+      h('p', { class: 'muted small', style: 'text-align:center;margin:4px 0' }, 'Une ronde attendue par jour de service prévu au planning, dans le parking affecté. Touchez une case pour le détail.')),
+    nonVus ? h('div', { class: 'banner warn' }, 'Une partie du mois n’a pas de planning publié : les jours de service sont pris dans le planning-type.') : null,
+    h('div', { class: 'plan-scroll' }, h('table', { class: 'plan sv' },
+      h('thead', null, h('tr', null, h('th', { class: 'nom' }, ''), ...jours.map(iso => { const d = dDe(iso); return h('th', { class: `pj${d.getDay() === 0 || d.getDay() === 6 ? ' we' : ''}${iso === auj ? ' auj' : ''}${ferieFerme(iso) ? ' ferie' : ''}` }, h('div', null, JC[d.getDay()]), h('div', null, d.getDate())); }))),
+      h('tbody', null, ...agents.map(a => h('tr', null,
+        h('th', { class: 'nom' }, a, h('div', { class: 'muted small', style: 'font-weight:500' }, siteNom(aff[a]))),
+        ...jours.map(iso => { const x = out[a][iso], e = SUIVI_ET[x.et]; return h('td', { class: `sv-c ${e.c}`, title: `${a} — ${jourLong(iso)} : ${e.l}`, onclick: () => detail(a, iso) }, e.s); })))))),
+    h('div', { class: 'plan-legende' }, ...['ok', 'manque', 'oubli', 'ailleurs', 'attente', 'abs', 'ferie', 'horsplan'].map(k => h('span', { class: `sv-pastille ${SUIVI_ET[k].c}` }, `${SUIVI_ET[k].s} ${SUIVI_ET[k].l}`)), h('span', { class: 'sv-pastille sv-vide' }, 'vide : repos ou à venir')),
+    h('div', { class: 'card' }, h('h2', null, `Bilan au ${jourCourt(m === moisDe(auj) ? auj : jours[jours.length - 1])}`),
+      ...agents.map(a => { const st = stats(a); return h('div', { class: 'stat' }, h('span', null, h('b', null, a), ` — ${siteNom(aff[a])}`),
+        h('b', { style: st.manque ? 'color:var(--bad)' : '' }, `${st.faites} / ${st.attendues}${st.manque ? ` · ${st.manque} manquante${st.manque > 1 ? 's' : ''}` : ''}${st.part ? ` · ${st.part} incomplète${st.part > 1 ? 's' : ''} ou ailleurs` : ''}${st.hors ? ` · ${st.hors} hors planning` : ''}`)); })),
+    h('button', { class: 'sec', onclick: exporter }, 'Excel du mois'),
+    carteAff);
+};
+
 function rondeLigne(r) {
   const dur = r.debut && r.fin && !r.closDPMS ? Math.round((new Date(r.fin) - new Date(r.debut)) / 60000) : null;
   const anos = r.checklist ? Object.entries(r.checklist).filter(([, v]) => v !== 'RAS').map(([k, v]) => v === 'Anomalie' ? k : `${k} (${v.toLowerCase()})`) : [];
