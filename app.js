@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.12.0';
+const APP_VERSION = '2.13.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -85,7 +85,14 @@ function download(blob, name) {
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
-async function shareOrDownload(blob, name, title) {
+// Téléchargement direct (dossier Téléchargements) : plus de fenêtre de partage du système, peu pratique.
+async function shareOrDownload(blob, name) {
+  download(blob, name);
+  toast(`${name} : téléchargé (dossier Téléchargements).`);
+  return 'telechargement';
+}
+const partagePossible = () => { try { return !!(navigator.canShare && navigator.canShare({ files: [new File([''], 'x.pdf', { type: 'application/pdf' })] })); } catch (e) { return false; } };
+async function partagerFichier(blob, name, title) {
   const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file], title }); return 'partage'; }
@@ -1164,10 +1171,10 @@ async function notifPourSup(ev) {
   if (ev.t === 'revue' && ev.data.verdict === 'aggrave') return { type: 'aggrave', titre: `Signalement aggravé — ${lieu}`, corps: `${quoi} — ${qui}${ev.data.comment ? ' : ' + ev.data.comment : ''}` };
   if (ev.t === 'action') return { type: 'action', titre: `${ACTIONS[ev.data.type] || 'Traitement'} — ${lieu}`, corps: `${quoi}${ev.data.dest ? ' — ' + ev.data.dest : ''}${ev.data.prevu ? ' — le ' + fmtDT(ev.data.prevu) : ''}${ev.data.texte ? ' : ' + ev.data.texte : ''} (${qui})` };
   if (ev.t === 'pm') return { type: 'pm', titre: `Police municipale — ${PM_STATUTS[ev.data.statut] || ''}`, corps: `${quoi}${ev.data.obs ? ' : ' + ev.data.obs : ''}` };
-  if (ev.t === 'barriere' && ev.data.action === 'fermee') return { type: 'barriere_fermee', titre: `Barrière refermée — ${lieu}`, corps: `${ev.data.barriere} — ${qui}` };
+  if (ev.t === 'barriere' && ev.data.action === 'fermee') return { type: 'barriere_fermee', titre: `Barrières refermées — ${lieu}`, corps: `${ev.data.barriere === BARR_TOUTES ? 'Entrée et sortie' : ev.data.barriere} — ${qui}` };
   if (ev.t === 'ronde_annulee') return { type: 'ronde_annulee', titre: `Ronde annulée — ${lieu}`, corps: qui };
   if (ev.t === 'signalement') return { type: ev.data.urgent ? 'urgent' : 'sig', titre: `${ev.data.urgent ? 'URGENT — ' : ''}Signalement — ${lieu}`, corps: `${ev.data.cat}${ev.data.sub ? ' — ' + ev.data.sub : ''}${ev.data.horsRonde ? ' (hors ronde)' : ''} — ${qui}` };
-  if (ev.t === 'barriere' && ev.data.action === 'ouverte') return { type: 'barriere_ouverte', titre: `Barrière ouverte — ${lieu}`, corps: `${ev.data.barriere} : ${ev.data.motif || ''} — ${qui}` };
+  if (ev.t === 'barriere' && ev.data.action === 'ouverte') return { type: 'barriere_ouverte', titre: `Barrières ouvertes — ${lieu}`, corps: `${ev.data.motif || ''} — ${qui}` };
   if (ev.t === 'ronde_fin') return { type: 'ronde_fin', titre: `Ronde terminée — ${lieu}`, corps: `${qui} : ${ev.data.compte} véhicule(s), ${ev.data.nbSig} signalement(s)` };
   if (ev.t === 'contact') return { type: 'contact', titre: `Main courante — ${ev.data.site ? siteNom(ev.data.site) : 'général'}`, corps: `${CANAUX[ev.data.canal] || ''} : ${ev.data.objet} — ${ev.data.nom}. ${SUITES[ev.data.suite] || ''}${ev.data.service ? ' : ' + ev.data.service : ''} (${qui})` };
   if (ev.t === 'contact_suivi' && ev.data.type === 'reponse') return { type: 'contact', titre: `Réponse à l’usager — ${ev.data.ref}`, corps: `${ev.data.nom} : ${ev.data.texte}${ev.data.regle ? ' (réglée)' : ' (attente)'} — ${qui}` };
@@ -1431,12 +1438,14 @@ function syncCard(enAttente, lastSync, syncErr) {
     syncErr ? h('p', { class: 'muted small' }, `Dernier essai : ${syncErr.msg}.`) : null,
     h('button', { class: 'sec', disabled: state.sync.busy, onclick: safe(async () => { showBusy('Synchronisation…'); const r = await syncNow(); hideBusy(); toast(r && r.err ? 'Échec : ' + r.err : r && r.offline ? 'Pas de réseau.' : 'Synchronisé.', !!(r && (r.err || r.offline))); render(); }) }, enAttente > 0 ? 'Envoyer maintenant' : 'Actualiser'));
 }
+const BARR_TOUTES = 'Entrée et sortie';   // depuis la 2.13 : une seule déclaration par parking
+const nomBarr = b => !b.barriere || b.barriere === BARR_TOUTES ? 'barrières' : `barrière ${b.barriere}`;
 async function barrieresOuvertes() { return ((await kvGet('barrieres')) || []).filter(b => b.ouverte && !b.fermee).sort((a, b) => a.ouverte.quand.localeCompare(b.ouverte.quand)); }
 function barriereLigne(b, withBtn) {
   return h('div', { class: 'stat', style: 'display:block' },
-    h('div', null, h('b', null, `${siteNom(b.site)} — barrière ${b.barriere}`), h('span', { class: 'badge b-bad' }, 'ouverte')),
+    h('div', null, h('b', null, `${siteNom(b.site)} — ${nomBarr(b)}`), h('span', { class: 'badge b-bad' }, nomBarr(b) === 'barrières' ? 'ouvertes' : 'ouverte')),
     h('div', { class: 'muted small' }, `depuis ${fmtQuand(b.ouverte.quand)} (${fmtDuree(Date.now() - new Date(b.ouverte.quand))}) — ${b.ouverte.agent || ''}${b.ouverte.motif ? ' — ' + b.ouverte.motif : ''}`),
-    withBtn ? h('button', { class: 'ok', onclick: () => go('barriere', { bid: b.bid }) }, 'Barrière refermée') : null);
+    withBtn ? h('button', { class: 'ok big', onclick: () => go('barriere', { bid: b.bid }) }, nomBarr(b) === 'barrières' ? 'Barrières refermées' : 'Barrière refermée') : null);
 }
 const ICO = {
   ronde: '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v2h6V3"/><path d="m9 12 2 2 4-4"/></svg>',
@@ -1484,6 +1493,7 @@ async function agentHome() {
     await carteMessagesAccueil(),
     await carteATransmettre(),
     await cartePlanningAgents(),
+    ouvertes.length ? h('div', { class: 'card', style: 'border:2px solid var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
     ronde ? h('div', { class: 'card encours' },
       h('div', { class: 'small' }, 'Ronde en cours'),
       h('div', { class: 'grand' }, `${siteNom(ronde.site)} — ${ronde.agent}`),
@@ -1492,9 +1502,8 @@ async function agentHome() {
       lienAnnuler())
       : gros('ronde', 'Commencer ma ronde', 'principal', () => go('choixParking')),
     gros('alerte', 'Signalement hors ronde', 'sec', () => go('signalement', { from: 'hr' })),
-    gros('barriere', 'Barrière ouverte', 'sec', () => go('barriere', {})),
+    gros('barriere', 'J’ouvre les barrières', 'sec', () => { barrDraft = null; go('barriere', {}); }),
     gros('usager', 'Usager ou demande reçue', 'sec', () => { mcDraft = null; go('contact'); }),
-    ouvertes.length ? h('div', { class: 'card', style: 'border:2px solid var(--bad)' }, h('h2', null, 'Barrières ouvertes'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
     nbEnCours ? h('button', { class: 'sec', style: 'margin-top:18px', onclick: () => go('suivi') }, `Suivi des signalements en cours (${nbEnCours})`) : null,
     h('button', { class: 'sec', style: 'margin-top:10px', onclick: () => go('plus') }, 'Plus : usagers, échanges, réglages…'),
     cfg.urgenceTel ? h('a', { class: 'btn danger', style: 'margin-top:10px', href: 'tel:' + cfg.urgenceTel }, 'Urgence : appeler le DPMS') : null,
@@ -1835,7 +1844,7 @@ async function etapeFin(ronde) {
     h('p', { class: 'question' }, 'Autre chose à signaler dans ce parking ?'),
     h('div', { class: 'row' },
       h('button', { class: 'sec big', onclick: () => go('signalement', { from: 'ronde' }) }, '+ Signalement'),
-      h('button', { class: 'sec big', onclick: () => go('barriere', { site: ronde.site, from: 'ronde' }) }, 'Barrière ouverte')),
+      h('button', { class: 'sec big', onclick: () => { barrDraft = null; go('barriere', { site: ronde.site, from: 'ronde' }); } }, 'Barrières ouvertes / refermées')),
     h('div', { class: 'card' }, h('h2', null, 'Récapitulatif'),
       ligne('Véhicules comptés', ronde.compteValide ? String(ronde.compte) : 'non validé', revenir('comptage')),
       ligne('Contrôle quotidien', resteQ ? `${resteQ} thème(s) restant(s)` : `${cQ} conforme(s), ${ncQ} non conforme(s)`, revenir('quotidien')),
@@ -2074,21 +2083,23 @@ function appliquerCat(d, nom) {
 
 /* ---------- Barrière ouverte / refermée ---------- */
 let barrDraft = null;
-/* Barrière ouverte / refermée, en étapes : (parking) → barrière → motif → depuis quand → (qui) → enregistrer */
+/* Barrières ouvertes / refermées : une déclaration par parking (entrée et sortie ensemble).
+   Ouverture : (parking) → motif → qui et quand, enregistrer. Fermeture : un seul écran. */
 VIEWS.barriere = async ({ site, bid, from, agent }) => {
   const cfg = state.cfg;
   const toutes = (await kvGet('barrieres')) || [];
-  const b = bid ? toutes.find(x => x.bid === bid) : null;
-  if (bid && (!b || b.fermee)) { toast('Cette barrière est déjà signalée refermée.'); return agentHome(); }
+  const ouvertesSite = sid => toutes.filter(x => x.site === sid && x.ouverte && !x.fermee);
+  let b = bid ? toutes.find(x => x.bid === bid) : null;
+  if (bid && (!b || b.fermee)) { toast('Ces barrières sont déjà signalées refermées.'); return agentHome(); }
+  if (!b && site && ouvertesSite(site).length) b = ouvertesSite(site)[0];   // déjà ouvertes : on propose de les refermer
   const ronde = from === 'ronde' ? await kvGet('ronde') : null;
-  const cle = (bid || 'new|' + (site || '')) + '|' + (agent || '');
+  const cle = (b ? b.bid : 'new|' + (site || '')) + '|' + (agent || '');
   if (!barrDraft || barrDraft.cle !== cle) {
-    barrDraft = { cle, site: site || (b && b.site) || null, barriere: null, motif: null, comment: '', agent: ronde ? ronde.agent : agent || await agentPrefere(), maintenant: null, quand: localDT(), etape: null };
+    barrDraft = { cle, site: site || (b && b.site) || null, motif: null, comment: '', agent: ronde ? ronde.agent : agent || await agentPrefere(), plusTot: false, quand: localDT(), etape: null };
   }
   Geo.start();
   const d = barrDraft;
-  const etapes = () => b ? ['quand', ...(ronde ? [] : ['agent']), 'ok']
-    : [...(site ? [] : ['parking']), 'barriere', 'motif', 'quand', ...(ronde || agent ? [] : ['agent']), 'ok'];
+  const etapes = () => b ? ['ok'] : [...(site ? [] : ['parking']), 'motif', 'ok'];
   if (!d.etape || !etapes().includes(d.etape)) d.etape = etapes()[0];
   const ets = etapes(), k = ets.indexOf(d.etape);
   const aller = e => { d.etape = e; go('barriere', { site, bid, from, agent }, { noPush: true }); };
@@ -2098,24 +2109,23 @@ VIEWS.barriere = async ({ site, bid, from, agent }) => {
   const choixListe = (opts, sel, fn) => opts.map(o => h('button', { class: 'choix' + ((typeof o === 'object' ? o.val : o) === sel ? ' on' : ''), onclick: () => fn(typeof o === 'object' ? o.val : o) }, typeof o === 'object' ? o.lbl : o));
 
   const save = safe(async () => {
-    const quand = d.maintenant ? new Date() : new Date(d.quand);
+    const quand = d.plusTot ? new Date(d.quand) : new Date();
     if (isNaN(quand)) throw new Error('Heure invalide.');
     if (quand.getTime() > Date.now() + 120000) throw new Error('L’heure ne peut pas être dans le futur.');
     if (quand.getTime() < Date.now() - 7 * 86400000) throw new Error('Au-delà de 7 jours, prévenez le DPMS.');
-    if (!d.agent) throw new Error('Indiquez qui fait la déclaration.');
+    if (!d.agent) throw new Error('Indiquez qui fait la déclaration (votre nom).');
     if (b) {
       if (quand < new Date(b.ouverte.quand)) throw new Error(`La fermeture ne peut pas précéder l’ouverture (${fmtDT(b.ouverte.quand)}).`);
-      await appendEvent('barriere', { site: b.site, agent: d.agent }, { bid: b.bid, action: 'fermee', barriere: b.barriere, quand: quand.toISOString(), comment: d.comment.trim(), retro: !d.maintenant });
+      await appendEvent('barriere', { site: b.site, agent: d.agent }, { bid: b.bid, action: 'fermee', barriere: b.barriere, quand: quand.toISOString(), comment: d.comment.trim(), retro: d.plusTot });
     } else {
       if (!d.site) throw new Error('Choisissez le parking.');
-      if (!d.barriere) throw new Error('Choisissez la barrière.');
-      if (toutes.some(x => x.site === d.site && x.barriere === d.barriere && !x.fermee)) throw new Error('Cette barrière est déjà signalée ouverte.');
-      if (!d.motif) throw new Error('Indiquez pourquoi elle est ouverte.');
-      await appendEvent('barriere', { site: d.site, agent: d.agent }, { bid: uuid(), action: 'ouverte', barriere: d.barriere, quand: quand.toISOString(), motif: d.motif, comment: d.comment.trim(), retro: !d.maintenant });
+      if (ouvertesSite(d.site).length) throw new Error('Les barrières de ce parking sont déjà signalées ouvertes.');
+      if (!d.motif) throw new Error('Indiquez pourquoi elles sont ouvertes.');
+      await appendEvent('barriere', { site: d.site, agent: d.agent }, { bid: uuid(), action: 'ouverte', barriere: BARR_TOUTES, quand: quand.toISOString(), motif: d.motif, comment: d.comment.trim(), retro: d.plusTot });
     }
     await kvSet('dernierAgent', { nom: d.agent, at: Date.now() });
     await fold();
-    const msg = b ? `Barrière ${b.barriere} (${siteNom(b.site)}) : fermeture enregistrée.` : `Barrière ${d.barriere} (${siteNom(d.site)}) : ouverture enregistrée.`;
+    const msg = b ? `${siteNom(b.site)} : fermeture des ${nomBarr(b)} enregistrée.` : `${siteNom(d.site)} : ouverture des barrières enregistrée.`;
     barrDraft = null;
     syncNow().then(refreshIfHome);
     if (from === 'ronde') { toast(msg); go('ronde', {}, { noPush: true }); }
@@ -2124,50 +2134,37 @@ VIEWS.barriere = async ({ site, bid, from, agent }) => {
 
   let corps;
   if (d.etape === 'parking') {
-    corps = [h('p', { class: 'question' }, 'Dans quel parking ?'), ...choixListe(cfg.sites.map(x => ({ val: x.id, lbl: x.nom })), d.site, v => { if (v !== d.site) d.barriere = null; d.site = v; suivante(); })];
-  } else if (d.etape === 'barriere') {
-    const s = siteById(d.site || site);
-    const ouv = toutes.filter(x => x.site === s.id && !x.fermee).map(x => x.barriere);
-    corps = [h('p', { class: 'question' }, 'Quelle barrière ?'),
-      ...s.barrieres.map(x => ouv.includes(x)
-        ? h('button', { class: 'choix', disabled: true }, `${x} (déjà signalée ouverte)`)
-        : h('button', { class: 'choix' + (d.barriere === x ? ' on' : ''), onclick: () => { d.barriere = x; d.site = s.id; suivante(); } }, x))];
+    corps = [h('p', { class: 'question' }, 'Dans quel parking ?'),
+      ...cfg.sites.map(x => {
+        const o = ouvertesSite(x.id)[0];
+        return o ? h('button', { class: 'choix', onclick: () => { barrDraft = null; go('barriere', { bid: o.bid, from, agent }, { noPush: true }); } }, `${x.nom} — déjà ouvertes : les refermer`)
+          : h('button', { class: 'choix' + (d.site === x.id ? ' on' : ''), onclick: () => { d.site = x.id; suivante(); } }, x.nom);
+      })];
   } else if (d.etape === 'motif') {
-    corps = [h('p', { class: 'question' }, 'Pourquoi est-elle ouverte ?'), ...choixListe(cfg.motifs, d.motif, v => { d.motif = v; suivante(); })];
-  } else if (d.etape === 'quand') {
-    const plusTot = h('div', { style: d.maintenant === false ? '' : 'display:none' },
-      h('label', { class: 'f' }, b ? 'Refermée à' : 'Ouverte depuis'),
-      h('input', { type: 'datetime-local', value: d.quand, max: localDT(new Date(Date.now() + 60000)), oninput: e => d.quand = e.target.value }),
-      h('button', { class: 'ok big', onclick: suivante }, 'Suivant'));
-    corps = [b ? h('div', { class: 'card' }, barriereLigne(b, false)) : null,
-      h('p', { class: 'question' }, b ? 'Quand a-t-elle été refermée ?' : 'Depuis quand est-elle ouverte ?'),
-      h('button', { class: 'choix' + (d.maintenant === true ? ' on' : ''), onclick: () => { d.maintenant = true; suivante(); } }, b ? 'Maintenant' : 'Maintenant (je viens de l’ouvrir)'),
-      h('button', { class: 'choix' + (d.maintenant === false ? ' on' : ''), onclick: () => { d.maintenant = false; plusTot.style.display = ''; } }, 'Plus tôt (oubli de déclaration)'),
-      plusTot];
-  } else if (d.etape === 'agent') {
-    corps = [h('p', { class: 'question' }, 'Qui fait la déclaration ?'), ...choixListe(cfg.agents, d.agent, v => { d.agent = v; suivante(); })];
+    corps = [h('p', { class: 'question' }, 'Pourquoi les barrières sont-elles ouvertes ?'), ...choixListe(cfg.motifs, d.motif, v => { d.motif = v; suivante(); })];
   } else {
-    const quand = d.maintenant ? 'maintenant' : fmtDT(new Date(d.quand));
+    const heure = h('div', { style: d.plusTot ? '' : 'display:none' },
+      h('label', { class: 'f' }, b ? 'Refermées à' : 'Ouvertes depuis'),
+      h('input', { type: 'datetime-local', value: d.quand, max: localDT(new Date(Date.now() + 60000)), oninput: e => d.quand = e.target.value }));
     corps = [
-      h('div', { class: 'card resume' },
-        h('b', null, b ? `Barrière ${b.barriere} — ${siteNom(b.site)}` : `Barrière ${d.barriere} — ${siteNom(d.site)}`),
-        h('div', null, b ? `Refermée : ${quand}` : `Ouverte : ${quand}`),
-        !b ? h('div', null, `Motif : ${d.motif}`) : null,
-        h('div', { class: 'muted small' }, `Déclarée par ${d.agent}`)),
-      h('p', { class: 'question' }, 'Commentaire (facultatif)'),
-      h('input', { type: 'text', value: d.comment, oninput: e => d.comment = e.target.value }),
-      h('button', { class: (b ? 'ok' : 'danger') + ' big', style: 'margin-top:16px', onclick: save }, b ? 'Enregistrer la fermeture' : 'Enregistrer l’ouverture')];
+      b ? h('div', { class: 'card' }, barriereLigne(b, false))
+        : h('div', { class: 'card resume' }, h('b', null, `${siteNom(d.site)} — barrières ouvertes (entrée et sortie)`), h('div', null, `Motif : ${d.motif}`)),
+      ronde ? null : [h('p', { class: 'question' }, 'Qui fait la déclaration ?'), chips(cfg.agents, d.agent, v => { d.agent = v; })],
+      d.plusTot ? null : h('button', { class: 'link', onclick: () => { d.plusTot = true; heure.style.display = ''; } }, b ? 'Refermées plus tôt ? Indiquer l’heure' : 'Ouvertes plus tôt ? Indiquer l’heure'),
+      heure,
+      h('details', null, h('summary', { class: 'small muted' }, 'Ajouter un commentaire (facultatif)'), h('input', { type: 'text', value: d.comment, oninput: e => d.comment = e.target.value })),
+      h('button', { class: (b ? 'ok' : 'danger') + ' big', style: 'margin-top:16px', onclick: save }, b ? 'Barrières refermées' + (d.plusTot ? '' : ' maintenant') : 'Enregistrer : barrières ouvertes')];
   }
-  return page(b ? 'Barrière refermée' : 'Barrière ouverte', { back },
+  return page(b ? 'Barrières refermées' : 'Barrières ouvertes', { back },
     ronde ? bandeauRondier(ronde, false) : null,
     ets.length > 1 ? h('div', { class: 'etapes' }, h('div', { class: 'etapes-txt' }, `Étape ${k + 1} sur ${ets.length}`),
       h('div', { class: 'etapes-barre' }, ...ets.map((e, n) => h('span', { class: n < k ? 'fait' : n === k ? 'en-cours' : '' })))) : null,
-    ...corps.filter(Boolean),
+    ...corps.flat().filter(Boolean),
     k > 0 ? h('button', { class: 'link', onclick: back }, '◀ Étape précédente') : null);
 };
-VIEWS.barriereOk = async ({ msg, ouverte }) => page(ouverte ? 'Barrière ouverte' : 'Barrière refermée', null,
+VIEWS.barriereOk = async ({ msg, ouverte }) => page(ouverte ? 'Barrières ouvertes' : 'Barrières refermées', null,
   h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, ouverte ? 'Ouverture enregistrée' : 'Fermeture enregistrée'), h('p', null, msg),
-    ouverte ? h('p', { class: 'muted' }, 'Elle reste affichée en rouge sur l’accueil jusqu’à « Barrière refermée ».') : null),
+    ouverte ? h('p', { class: 'muted' }, 'Elles restent affichées en rouge sur l’accueil. Quand vous les refermez, touchez « Barrières refermées ».') : null),
   h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'));
 
 /* ====================================================================== */
@@ -2687,7 +2684,7 @@ function promptClaude(m, G, consigne) {
     ...regles.interdits.map(x => `- ${x.nom} ne travaille jamais le ${NOMS_JOURS[x.jour]}.`),
     ...(internes.length ? [`- Ligne(s) interne(s), non montrée(s) aux agents : ${internes.join(', ')}.`] : []),
     (() => { const f = jours.filter(ferieFerme); return f.length ? `- Jours fériés : parkings fermés, personne ne travaille (code F pour tous) : ${f.map(iso => `${jourLong(iso)} (${ferieFerme(iso)})`).join(', ')}. Un jour férié normalement travaillé compte comme travaillé.` : '- Aucun jour férié sur la période.'; })(),
-    '- Les absences (CA, MAL, FOR, ABS) et les jours fériés (F) sont imposés : ne les modifie jamais.',
+    '- Les absences (CA, MAL, FOR, ABS) sont imposées : ne les modifie pas, sauf si la consigne particulière le demande expressément (absence saisie par erreur, congé annulé). Les jours fériés (F) ne se modifient jamais.',
     '- Respecte au maximum les jours de repos du planning-type et change le moins de cases possible.',
     '',
     `PLANNING-TYPE (2 semaines ; la semaine 1 commence le ${jourLong(cp.ancre)})`,
@@ -2735,17 +2732,20 @@ function lireReponseClaude(texte, G) {
     G.jours.forEach((iso, k) => { (cells[iso] = cells[iso] || {})[nom] = codes[k]; });
   }
   if (!vus.size) throw new Error('Aucune ligne exploitable dans le bloc de Claude.' + (erreurs.length ? ' ' + erreurs[0] : ''));
-  // absences imposées : jamais remplacées par la proposition
+  // absences saisies que la réponse modifie : relevées, le superviseur décide (cas d'une absence saisie par erreur) ;
+  // jours fériés : toujours conservés (parkings fermés)
+  const absChangees = [];
   for (const iso of G.jours) for (const n of vus) {
     const avant = G.grille[iso][n];
-    if (ABSENCES[avant] && cells[iso][n] !== avant) { erreurs.push(`${n}, ${jourLong(iso)} : absence (${ABSENCES[avant].toLowerCase()}) conservée`); cells[iso][n] = avant; }
+    if (ABSENCES[avant] && cells[iso][n] !== avant) absChangees.push({ iso, n, avant, apres: cells[iso][n] });
     if (avant === 'F' && cells[iso][n] !== 'F' && ferieFerme(iso)) { erreurs.push(`${n}, ${jourLong(iso)} : jour férié conservé`); cells[iso][n] = 'F'; }
   }
-  return { cells, erreurs, mois, lignes: [...vus] };
+  return { cells, erreurs, mois, lignes: [...vus], absChangees };
 }
 
 /* Vue superviseur */
 let _planSel = null;   // { iso, n } case en cours de choix
+let _planAbs = null;   // formulaire « absences connues »
 VIEWS.planning = async ({ mois } = {}) => {
   if (state.mode !== 'superviseur') return VIEWS.planningAgents({});
   const auj = localDate();
@@ -2791,10 +2791,11 @@ VIEWS.planning = async ({ mois } = {}) => {
     h('tbody', null, ...lignes.map(n => h('tr', { class: G.internes.includes(n) ? 'interne' : null },
       h('th', { class: 'nom' }, n, G.internes.includes(n) ? h('span', { class: 'muted small' }, ' (interne)') : null), ...G.jours.map(iso => td(iso, n)))))));
   // absences : saisie rapide
-  const ab = { n: G.agents[0], du: G.jours.find(x => moisDe(x) === m), au: G.jours.find(x => moisDe(x) === m), c: 'CA' };
+  if (!_planAbs || _planAbs.m !== m || !G.agents.includes(_planAbs.n)) _planAbs = { m, n: G.agents[0], du: G.jours.find(x => moisDe(x) === m), au: G.jours.find(x => moisDe(x) === m), c: 'CA' };
+  const ab = _planAbs;   // conservé d'une action à l'autre (agent, dates)
   const formAbs = h('div', { class: 'card' }, h('h2', null, '1. Absences connues'),
     h('div', { class: 'row' },
-      h('select', { onchange: e => ab.n = e.target.value }, ...G.agents.map(n => h('option', { value: n }, n))),
+      h('select', { onchange: e => ab.n = e.target.value }, ...G.agents.map(n => h('option', { value: n, selected: n === ab.n ? true : null }, n))),
       h('input', { type: 'date', value: ab.du, min: G.jours[0], max: G.jours[G.jours.length - 1], onchange: e => ab.du = e.target.value }),
       h('input', { type: 'date', value: ab.au, min: G.jours[0], max: G.jours[G.jours.length - 1], onchange: e => ab.au = e.target.value })),
     chips(Object.entries(ABSENCES).map(([val, lbl]) => ({ val, lbl })), ab.c, x => ab.c = x),
@@ -2803,6 +2804,12 @@ VIEWS.planning = async ({ mois } = {}) => {
       await majBrouillon(m, b => { for (let iso = ab.du; iso <= ab.au; iso = ajJ(iso, 1)) if (G.jours.includes(iso) && !ferieFerme(iso)) (b.cells[iso] = b.cells[iso] || {})[ab.n] = ab.c; });   // les jours fériés restent fériés
       toast(`${ABSENCES[ab.c]} : ${ab.n}, du ${jourCourt(ab.du)} au ${jourCourt(ab.au)}.`); recharger();
     }) }, 'Ajouter l’absence'),
+    h('button', { class: 'link', onclick: safe(async () => {
+      if (!ab.du || !ab.au || ab.au < ab.du) throw new Error('Dates invalides.');
+      let nb = 0;
+      await majBrouillon(m, b => { for (let iso = ab.du; iso <= ab.au; iso = ajJ(iso, 1)) if (G.jours.includes(iso) && ABSENCES[G.grille[iso][ab.n]]) { (b.cells[iso] = b.cells[iso] || {})[ab.n] = ferieFerme(iso) ? 'F' : (codeType(ab.n, iso) || 'R'); nb++; } });
+      toast(nb ? `${ab.n} : ${nb} jour(s) d’absence retiré(s), du ${jourCourt(ab.du)} au ${jourCourt(ab.au)} (planning-type rétabli).` : `Aucune absence de ${ab.n} sur cette période.`, !nb); recharger();
+    }) }, 'Retirer les absences de cet agent sur ces dates (retour au planning-type)'),
     h('p', { class: 'muted small' }, 'Ou touchez directement une case du tableau. Les motifs (congés, maladie…) ne sont visibles que des superviseurs ; les agents voient « Absent ».'));
   // Claude
   const consigne = h('textarea', { placeholder: 'Consigne particulière (facultatif). Ex. : Nassiha demande à échanger son samedi 21 avec Saïd.', style: 'min-height:70px' });
@@ -2828,6 +2835,13 @@ VIEWS.planning = async ({ mois } = {}) => {
       if (!reponse.value.trim()) { try { reponse.value = await navigator.clipboard.readText(); } catch (e) { } }
       const r = lireReponseClaude(reponse.value, G);
       if (r.mois && r.mois !== m && !(await demander({ titre: 'Autre mois ?', texte: `La réponse de Claude concerne ${nomMois(r.mois)}, vous êtes sur ${nomMois(m)}. L’appliquer quand même ?`, oui: 'Appliquer', non: 'Annuler' }))) return;
+      if (r.absChangees.length) {
+        const parAgent = {};
+        r.absChangees.forEach(x => { (parAgent[x.n] = parAgent[x.n] || []).push(x); });
+        const resume = Object.entries(parAgent).map(([n, l]) => `${n} : ${l.length} jour(s) d’absence (${[...new Set(l.map(x => ABSENCES[x.avant].toLowerCase()))].join(', ')}), du ${jourCourt(l[0].iso)} au ${jourCourt(l[l.length - 1].iso)}`).join('\n');
+        const retirer = await demander({ titre: 'La réponse retire des absences', texte: `La réponse de Claude remplace des absences saisies :\n${resume}\n\nRetirer ces absences (par exemple si elles avaient été saisies par erreur) ?`, oui: 'Oui, retirer ces absences', non: 'Non, les garder' });
+        if (!retirer) { r.absChangees.forEach(x => { r.cells[x.iso][x.n] = x.avant; }); r.erreurs.push(`${r.absChangees.length} jour(s) d’absence conservé(s)`); }
+      }
       const changes = [];
       for (const iso of G.jours) for (const n of r.lignes) if (normCode(r.cells[iso][n]) !== normCode(G.grille[iso][n])) changes.push(iso + '|' + n);
       await majBrouillon(m, b => { for (const iso of G.jours) for (const n of r.lignes) (b.cells[iso] = b.cells[iso] || {})[n] = r.cells[iso][n]; b.claude = changes; });
@@ -2887,6 +2901,11 @@ VIEWS.planning = async ({ mois } = {}) => {
     h('div', { class: 'card' }, h('h2', null, '3. Publication'), notes,
       h('button', { class: 'ok big', onclick: publier }, G.publieMois ? 'Publier les modifications aux agents' : `Publier le planning de ${nomMois(m)}`),
       G.brouillon ? h('button', { class: 'link', onclick: safe(async () => { if (!(await demander({ titre: 'Abandonner le brouillon ?', texte: 'Le tableau revient au planning publié (ou au planning-type).', oui: 'Oui, abandonner', non: 'Non', danger: true }))) return; await kvUpdate('planningBrouillons', a => { const x = a || {}; delete x[m]; return x; }); recharger(); }) }, 'Abandonner les modifications non publiées') : null),
+    h('button', { class: 'sec', style: 'margin-top:4px', onclick: safe(async () => {
+      if (!(await demander({ titre: `Réinitialiser ${nomMois(m)} ?`, texte: 'Tout le mois revient au planning-type : absences, échanges et propositions de Claude sont effacés (les jours fériés restent fermés).\n\nRien ne change pour les agents tant que vous ne publiez pas.', oui: 'Réinitialiser', non: 'Annuler', danger: true }))) return;
+      await majBrouillon(m, b => { b.cells = {}; for (const iso of G.jours) { b.cells[iso] = {}; for (const n of lignes) b.cells[iso][n] = ferieFerme(iso) ? 'F' : (codeType(n, iso) || 'R'); } b.claude = []; });
+      toast(`${nomMois(m)} remis au planning-type. Vérifiez, ajoutez les absences, puis publiez.`); recharger();
+    }) }, 'Réinitialiser le mois (planning-type)'),
     h('div', { class: 'row' },
       h('button', { class: 'sec', onclick: safe(() => exporterPlanning(m, G)) }, 'Excel'),
       G.publieMois ? h('button', { class: 'sec', onclick: safe(() => telechargerPlanningPDF(m)) }, 'PDF (version agents)') : null,
@@ -4293,14 +4312,14 @@ function retroInfo(rec) {
 VIEWS.supBarrieres = async () => {
   const list = ((await kvGet('barrieres')) || []).sort((a, b) => b.ouverte.quand.localeCompare(a.ouverte.quand));
   const total = {};
-  list.forEach(b => { const fin = b.fermee ? new Date(b.fermee.quand) : new Date(); const k = `${siteNom(b.site)} — ${b.barriere}`; total[k] = (total[k] || 0) + (fin - new Date(b.ouverte.quand)); });
+  list.forEach(b => { const fin = b.fermee ? new Date(b.fermee.quand) : new Date(); const k = `${siteNom(b.site)} — ${nomBarr(b)}`; total[k] = (total[k] || 0) + (fin - new Date(b.ouverte.quand)); });
   return page('Barrières ouvertes', { back: true },
     Object.keys(total).length ? h('div', { class: 'card' }, h('h2', null, 'Durée cumulée d’ouverture'),
       ...Object.entries(total).map(([k, v]) => h('div', { class: 'stat' }, h('span', null, k), h('b', null, fmtDuree(v))))) : null,
     list.length ? list.map(b => {
       const ro = retroInfo(b.ouverte), rf = retroInfo(b.fermee);
       return h('div', { class: 'card', style: b.fermee ? '' : 'border-color:var(--bad)' },
-        h('div', null, h('b', null, `${siteNom(b.site)} — barrière ${b.barriere}`), b.fermee ? h('span', { class: 'badge b-ok' }, 'refermée') : h('span', { class: 'badge b-bad' }, 'ouverte')),
+        h('div', null, h('b', null, `${siteNom(b.site)} — ${nomBarr(b)}`), b.fermee ? h('span', { class: 'badge b-ok' }, 'refermée(s)') : h('span', { class: 'badge b-bad' }, 'ouverte(s)')),
         h('p', { class: 'small' }, `Ouverte ${fmtQuand(b.ouverte.quand)} par ${b.ouverte.agent || '?'} — ${b.ouverte.motif}${b.ouverte.comment ? ' — ' + b.ouverte.comment : ''}`, ro ? h('span', { class: 'badge b-warn' }, ro) : null),
         b.fermee ? h('p', { class: 'small' }, `Refermée ${fmtQuand(b.fermee.quand)} par ${b.fermee.agent || '?'}${b.fermee.comment ? ' — ' + b.fermee.comment : ''}`, rf ? h('span', { class: 'badge b-warn' }, rf) : null) : null,
         h('p', { class: 'small' }, h('b', null, 'Durée : '), fmtDuree((b.fermee ? new Date(b.fermee.quand) : new Date()) - new Date(b.ouverte.quand)), b.fermee ? '' : ' (en cours)'));
@@ -5034,7 +5053,8 @@ VIEWS.synthese = async (params = {}) => {
       h('div', { class: 'stat' }, h('span', null, 'En cours (dont + de 30 jours)'), h('b', null, `${D.ouverts.length} (${D.anciens.length})`)),
       h('div', { class: 'stat' }, h('span', null, 'Ouvertures de barrière'), h('b', null, D.parSite.reduce((a, x) => a + x.barrieres, 0))),
       h('div', { class: 'stat' }, h('span', null, 'Main courante (en attente de réponse)'), h('b', null, `${D.mc.sem.length} (${D.mc.attente.length})`))),
-    h('button', { class: 'ok big', onclick: safe(async () => { showBusy('Préparation du PDF…'); try { const b = await pdfSynthese(await donneesSynthese(p)); hideBusy(); await shareOrDownload(b, nomFichier, 'Synthèse hebdomadaire des parkings'); } finally { hideBusy(); } }) }, 'Ouvrir / partager le PDF'),
+    h('button', { class: 'ok big', onclick: safe(async () => { showBusy('Préparation du PDF…'); try { const b = await pdfSynthese(await donneesSynthese(p)); hideBusy(); await shareOrDownload(b, nomFichier); } finally { hideBusy(); } }) }, 'Télécharger le PDF'),
+    partagePossible() ? h('button', { class: 'link', onclick: safe(async () => { showBusy('Préparation du PDF…'); try { const b = await pdfSynthese(await donneesSynthese(p)); hideBusy(); await partagerFichier(b, nomFichier, 'Synthèse hebdomadaire des parkings'); } finally { hideBusy(); } }) }, 'Envoyer le PDF par une application (courriel…)') : null,
     h('button', { class: 'sec', onclick: safe(async () => { const r = await syncNow(); toast(r && r.err ? 'Relève impossible : ' + r.err : 'Données à jour.', !!(r && r.err)); render(); }) }, 'Actualiser les données'),
     h('p', { class: 'muted small' }, 'Le PDF est fabriqué sur ce téléphone à partir des données relevées : le relais ne peut pas lire les données, il ne peut donc pas l’envoyer lui-même par courriel.'));
 };
@@ -5135,8 +5155,9 @@ VIEWS.supConfig = async ({ prefillDests } = {}) => {
   return page('Listes et catégories', { back: true },
     prefillDests ? h('div', { class: 'banner warn' }, 'Destinataires reçus par lien : vérifiez « Destinataires et coordonnées » et les catégories, puis « Enregistrer » en bas de page.') : null,
     h('div', { class: 'banner info' }, 'Les modifications sont transmises automatiquement à tous les appareils.'),
-    h('div', { class: 'card' }, h('h2', null, 'Parkings et barrières'),
-      ...sitesInputs.map(si => h('div', { style: 'margin-bottom:10px' }, si.nom, h('label', { class: 'f small' }, 'Barrières (séparées par des virgules)'), si.barr))),
+    h('div', { class: 'card' }, h('h2', null, 'Parkings'),
+      ...sitesInputs.map(si => h('div', { style: 'margin-bottom:10px' }, si.nom)),
+      h('p', { class: 'muted small' }, 'Les barrières d’un parking (entrée et sortie) se déclarent ensemble, ouvertes ou refermées.')),
     h('label', { class: 'f' }, 'Agents (un par ligne)'), tAgents,
     h('label', { class: 'f' }, 'Destinataires et coordonnées'),
     h('p', { class: 'muted small' }, 'Une ligne par destinataire : nom | téléphone | courriel. Les coordonnées servent aux boutons « Appeler » et « Courriel » du traitement. Un nom suivi d’un parking entre parenthèses, par exemple « Designa (Dumotel) », n’est proposé que pour les signalements de ce parking.'),
@@ -5176,8 +5197,6 @@ VIEWS.supConfig = async ({ prefillDests } = {}) => {
         if (!lines(tAgents).length || !dests.length) throw new Error('Listes vides.');
         sitesInputs.forEach((si, k) => {
           if (si.nom.value.trim()) c.sites[k].nom = si.nom.value.trim();
-          const b = si.barr.value.split(',').map(x => x.trim()).filter(Boolean);
-          if (b.length) c.sites[k].barrieres = b;
         });
         Object.assign(c, { agents: lines(tAgents), dests, contacts, cats, controles, motifs: lines(tMotifs), objetsContact: lines(tObjets), urgenceTel: tel.value.trim(), urgenceMail: mail.value.trim(), cfgId: randCode(8),
           rondeMatin: { ...c.rondeMatin, heure: hMatin.value || '20:00', jours: [...c.rondeMatin.jours].sort() }, synthese: { ...c.synthese, jour: parseInt(jSynth.value, 10), heure: hSynth.value || '08:00' } });
