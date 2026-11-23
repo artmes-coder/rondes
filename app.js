@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.18.0';
+const APP_VERSION = '2.18.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -4703,7 +4703,6 @@ async function supHome() {
     await cartePlanningSup(),
     await carteMessagesAccueil(),
     await carteAppareil(),
-    await alerteRegistres(),
     barrOuv.length ? h('div', { class: 'card', style: 'border-color:var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...barrOuv.map(b => barriereLigne(b, false))) : null,
     h('button', { class: 'big', onclick: () => go('supStats') }, 'Statistiques et graphiques'),
     h('div', { class: 'card' }, h('h2', null, 'Signalements'),
@@ -4765,29 +4764,7 @@ async function carteRondesJour() {
       h('button', { class: 'sec', style: 'width:auto;margin:0', onclick: safe(() => cloturerRonde(r)) }, 'Clôturer la ronde'))),
     ...lignes);
 }
-/* Registres de sécurité : contrôle mensuel par le DPMS (30 jours glissants) */
-async function etatRegistres() {
-  const r = (await kvGet('registres')) || [];
-  return state.cfg.sites.map(s => {
-    const d = r.find(x => x.site === s.id) || null;
-    const j = d ? joursDepuis(d.at) : null;
-    return { site: s.id, nom: s.nom, dernier: d, depuis: j, du: !d || j >= 30, hist: r.filter(x => x.site === s.id) };
-  });
-}
-async function registreControle(site) {
-  const note = prompt(`Registre de sécurité — ${siteNom(site)}\nObservations (facultatif) :`, '');
-  if (note === null) return false;
-  await queueDec('d', { type: 'registre', id: uuid(), ts: new Date().toISOString(), site, note: note.trim(), par: 'DPMS' });
-  await fold(); syncNow(); toast('Contrôle du registre enregistré.');
-  return true;
-}
-async function alerteRegistres() {
-  const dus = (await etatRegistres()).filter(r => r.du);
-  if (!dus.length) return null;
-  return h('button', { class: 'list-item', style: 'border-color:var(--warn)', onclick: () => go('supControles') },
-    h('div', { class: 'l1' }, 'Registres de sécurité à contrôler', h('span', { class: 'badge b-warn' }, 'mensuel')),
-    h('div', { class: 'muted small' }, dus.map(r => `${r.nom} (${r.dernier ? `dernier contrôle il y a ${r.depuis} jours` : 'jamais contrôlé'})`).join(' · ')));
-}
+/* Registres de sécurité : rappel mensuel du DPMS retiré en 2.18.1 (l'historique reste dans l'Excel) */
 async function carteControlesSup() {
   const st = await etatControles();
   const etat = (site, n) => {
@@ -4796,26 +4773,18 @@ async function carteControlesSup() {
     if (n === 'quotidien') return h('span', { class: 'badge ' + (e.depuis <= 1 ? 'b-ok' : 'b-bad') }, `${n} : ${e.depuis === 0 ? 'aujourd’hui' : e.depuis === 1 ? 'hier' : `il y a ${e.depuis} j`}`);
     return h('span', { class: 'badge ' + (e.du ? 'b-bad' : 'b-ok') }, `${n} : ${e.du ? `en retard (${e.depuis} j)` : e.depuis === 0 ? 'aujourd’hui' : `il y a ${e.depuis} j`}`);
   };
-  const regs = await etatRegistres();
-  const etatReg = r => h('span', { class: 'badge ' + (r.du ? 'b-bad' : 'b-ok') }, `registre : ${!r.dernier ? 'à contrôler' : r.du ? `à contrôler (${r.depuis} j)` : r.depuis === 0 ? 'aujourd’hui' : `il y a ${r.depuis} j`}`);
   return h('div', { class: 'card' }, h('h2', null, 'Contrôles'),
-    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...NIVEAUX_ACTIFS.map(n => etat(s.id, n)), etatReg(regs.find(r => r.site === s.id))))),
+    ...state.cfg.sites.map(s => h('div', { class: 'stat', style: 'flex-wrap:wrap;gap:6px' }, h('b', null, s.nom), h('span', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, ...NIVEAUX_ACTIFS.map(n => etat(s.id, n))))),
     h('button', { class: 'sec', onclick: () => go('supControles') }, 'Détail des contrôles'));
 }
 VIEWS.supControles = async () => {
   const st = await etatControles();
   const hist = (await kvGet('controlesHist')) || [];
   const tous = state.cfg.controles;
-  const regs = await etatRegistres();
   return page('Contrôles', { back: true },
     ...state.cfg.sites.map(s => {
       const na = ((st[s.id] || {}).na || []).map(id => tous.find(c => c.id === id)).filter(Boolean);
-      const rg = regs.find(r => r.site === s.id);
       return h('div', { class: 'card' }, h('h2', null, s.nom),
-        h('div', { class: 'stat', style: 'display:block' }, h('b', null, 'Registre de sécurité (DPMS, mensuel)'), ' ',
-          rg.du ? h('span', { class: 'badge b-bad' }, 'à contrôler') : h('span', { class: 'badge b-ok' }, 'à jour'),
-          h('div', { class: 'muted small' }, rg.dernier ? `Dernier : ${fmtDT(rg.dernier.at)}${rg.dernier.note ? ' — ' + rg.dernier.note : ''} — prochain avant le ${fmtJour(localDate(new Date(new Date(rg.dernier.at).getTime() + 30 * 86400000)))}` : 'Jamais contrôlé'),
-          h('button', { class: 'sec', style: 'margin-top:6px', onclick: safe(async () => { if (await registreControle(s.id)) go('supControles', {}, { noPush: true, keepScroll: true }); }) }, 'Registre contrôlé')),
         ...NIVEAUX_ACTIFS.map(n => {
           const e = echeance(st, s.id, n);
           const proch = e.dernier && n !== 'quotidien' ? new Date(new Date(e.dernier.at).getTime() + NIVEAUX[n].jours * 86400000) : null;
@@ -5614,7 +5583,6 @@ async function donneesSynthese(p) {
   const barr = ((await kvGet('barrieres')) || []);
   const hist = ((await kvGet('controlesHist')) || []).filter(x => dans(x.ts || x.at));
   const st = await etatControles();
-  const regs = await etatRegistres();
   const joursAttendus = p.jours.filter(j => (rm.jours || [1, 2, 3, 4, 5, 6, 7]).includes(jourIso(j)) && j < finEff && !ferieFerme(localDate(j)));
   const parSite = cfg.sites.map(x => {
     const rs = rondes.filter(r => r.site === x.id);
@@ -5634,7 +5602,7 @@ async function donneesSynthese(p) {
       dureeMoy: durees.length ? Math.round(durees.reduce((a, b) => a + b, 0) / durees.length) : null,
       vehMoy: comptes.length ? Math.round(comptes.reduce((a, b) => a + b, 0) / comptes.length) : null,
       ctlQuot: ctl.filter(c => c.niveau === 'quotidien').length,
-      nc, registre: regs.find(r => r.site === x.id),
+      nc,
       barrieres: b.filter(y => dans(y.ouverte.quand)).length, dureeB, barrOuvertes: barr.filter(y => y.site === x.id && !y.fermee)
     };
   });
@@ -5730,11 +5698,7 @@ async function pdfSynthese(D) {
     [22, 12, 18, 16, 15, 40]);
   // contrôles
   titre('Contrôles');
-  tableau(['Parking', 'Contrôles quotidiens', 'Registre de sécurité (DPMS)'],
-    D.parSite.map(x => {
-      const e = (v, n) => !v.dernier ? 'jamais fait' : `${fmtJour(localDate(new Date(v.dernier.at)))}${v.du ? ' — EN RETARD' : ''}`;
-      return [x.site.nom, x.ctlQuot, x.registre && x.registre.dernier ? `${fmtJour(localDate(new Date(x.registre.dernier.at)))}${x.registre.du ? ' — à faire' : ''}` : 'jamais contrôlé'];
-    }), [40, 40, 38]);
+  tableau(['Parking', 'Contrôles quotidiens'], D.parSite.map(x => [x.site.nom, x.ctlQuot]), [60, 58]);
   const ncl = D.parSite.flatMap(x => Object.entries(x.nc).map(([l, n]) => [x.site.nom, l, n])).sort((a, b) => b[2] - a[2]);
   para('Points relevés non conformes dans la semaine :', { gras: true });
   tableau(['Parking', 'Point de contrôle', 'Nombre de rondes'], ncl.slice(0, 15), [22, 60, 18], { vide: 'Aucune non-conformité.' });
