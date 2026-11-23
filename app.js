@@ -2812,7 +2812,7 @@ VIEWS.planning = async ({ mois } = {}) => {
     }) }, 'Retirer les absences de cet agent sur ces dates (retour au planning-type)'),
     h('p', { class: 'muted small' }, 'Ou touchez directement une case du tableau. Les motifs (congés, maladie…) ne sont visibles que des superviseurs ; les agents voient « Absent ».'));
   // Claude
-  const consigne = h('textarea', { placeholder: 'Consigne particulière (facultatif). Ex. : Nassiha demande à échanger son samedi 21 avec Saïd.', style: 'min-height:70px' });
+  const consigne = h('textarea', { placeholder: 'Consigne particulière (facultatif). Ex. : Agent 2 demande à échanger son samedi 21 avec Agent 3.', style: 'min-height:70px' });
   const reponse = h('textarea', { placeholder: 'Collez ici la réponse de Claude (au moins le bloc === PLANNING-CLAUDE … === FIN ===)', style: 'min-height:90px' });
   const sansPb = !v.pb.some(p => p.niveau === 'bad');
   const carteClaude = h('div', { class: 'card' }, h('h2', null, '2. Proposition de Claude (mois compliqué)'),
