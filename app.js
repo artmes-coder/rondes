@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.13.0';
+const APP_VERSION = '2.14.0';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -717,7 +717,7 @@ async function render() {
   }
 }
 function refreshIfHome() { if (state.view === 'home' && !document.getElementById('busy')) render(); }
-const VUES_SAISIE = ['signalement', 'barriere'];
+const VUES_SAISIE = ['signalement', 'barriere', 'tkReception', 'tkReleve', 'tkCommande', 'tkInventaire', 'tkParam'];
 window.addEventListener('popstate', () => {
   if (VUES_SAISIE.includes(state.view) && !confirm('Abandonner cette saisie ?')) { history.pushState({ v: state.view }, ''); return; }
   if (VUES_SAISIE.includes(state.view)) { sigDraft = null; barrDraft = null; }
@@ -809,8 +809,8 @@ function pmBanner(s) {
 /* Reconstitution de l'état à partir du journal                           */
 /* ====================================================================== */
 const ORD_LOCAL = 1e15;
-const TYPES_DEC = new Set(['cfg', 'action', 'msg', 'demande_close', 'vapid', 'contact', 'contact_suivi', 'ronde_close', 'registre', 'ctl_reactiver', 'sig', 'suppr', 'annul_suppr', 'planning']);
-const TYPES_EV = new Set(['signalement', 'revue', 'action', 'pm', 'barriere', 'ronde_debut', 'ronde_fin', 'ronde_annulee', 'ronde_agent', 'comptage', 'controle', 'msg', 'checklist', 'contact', 'contact_suivi']);
+const TYPES_DEC = new Set(['cfg', 'action', 'msg', 'demande_close', 'vapid', 'contact', 'contact_suivi', 'ronde_close', 'registre', 'ctl_reactiver', 'sig', 'suppr', 'annul_suppr', 'planning', 'tk']);
+const TYPES_EV = new Set(['signalement', 'revue', 'action', 'pm', 'barriere', 'ronde_debut', 'ronde_fin', 'ronde_annulee', 'ronde_agent', 'comptage', 'controle', 'msg', 'checklist', 'contact', 'contact_suivi', 'tk_reception', 'tk_releve', 'tk_commande', 'tk_inventaire']);
 async function fold() {
   const sup = state.mode === 'superviseur';
   const { entries, decQueue } = await (async () => {
@@ -839,6 +839,7 @@ async function fold() {
   const sigs = new Map(), rondes = new Map(), barr = new Map(), devs = {}, chains = {}, ctl = {}, ctlHist = [], regs = [], mcs = new Map();
   const rondesCloses = new Map();   // rid → décision du DPMS « ronde clôturée »
   const planning = { jours: {}, notes: {}, pubs: [] }, planMotifs = {};
+  const tk = [];   // journal des tickets (agents et DPMS), dans l'ordre du journal
   let cfg = null, vapid = null;
   const alertes = [];
   // Précédence causale : une saisie d'agent ne change le statut (clos / ouvert) que si l'appareil
@@ -861,6 +862,7 @@ async function fold() {
         if (ev.seq > dv.seq) { dv.seq = ev.seq; dv.at = e.at; }
       }
       if (e.supprime) continue;
+      if (ev.t.startsWith('tk_')) tk.push({ t: ev.t, site: ev.site, agent: ev.agent, d: ev.data || {} });
       if (ev.t === 'signalement') {
         if (!sigs.has(ev.data.id)) sigs.set(ev.data.id, {
           id: ev.data.id, ref: ev.data.ref, site: ev.site, cat: ev.data.cat, sub: ev.data.sub || '', desc: ev.data.desc,
@@ -944,6 +946,7 @@ async function fold() {
       }
       else if (d.type === 'msg') { const s = sigs.get(d.sig); if (s) s.messages.push({ id: d.id, role: 'dpms', de: 'DPMS', quand: d.ts, texte: d.texte || '', demande: !!d.demande }); }
       else if (d.type === 'demande_close') { const s = sigs.get(d.sig); if (s) s.messages.push({ id: d.id, role: 'dpms', de: 'DPMS', quand: d.ts, texte: '', cloture: true }); }
+      else if (d.type === 'tk' && d.t && d.site) tk.push({ t: d.t, site: d.site, agent: d.par || 'DPMS', d: d.data || {} });
       else if (d.type === 'vapid') { if (!vapid && d.pub && d.priv) vapid = { pub: d.pub, priv: d.priv }; }
       else if (d.type === 'contact') { mcAjout(mcs, d.contact, d.par || 'DPMS'); const c = mcs.get(d.contact && d.contact.id); if (c && c.statutN == null) marquer(c, e, 'dpms'); }
       else if (d.type === 'contact_suivi') mcSuivi(mcs, d.suivi, d.par || 'DPMS', { connu: () => true, marquer: x => marquer(x, e, 'dpms') });
@@ -1014,6 +1017,7 @@ async function fold() {
   await kvSet('mainCourante', [...mcs.values()].sort((a, b) => b.quand.localeCompare(a.quand)));
   await kvSet('rondesCloses', [...rondesCloses.keys()]);
   await kvSet('planning', planning);
+  await kvSet('tickets', tk);
   if (sup) await kvSet('planningMotifs', planMotifs);
   if (vapid) await kvSet('vapid', vapid);
   await kvSet('barrieres', [...barr.values()]);
@@ -1092,10 +1096,11 @@ const NOTIF_TYPES = {
     ['action', 'Traitement (appels, courriels, interventions)'], ['pm', 'Suites de la police municipale'], ['msg', 'Réponses des agents'],
     ['barriere_ouverte', 'Barrière ouverte'], ['barriere_fermee', 'Barrière refermée'], ['ronde_fin', 'Ronde terminée'], ['ronde_annulee', 'Ronde annulée'],
     ['contact', 'Main courante (usagers, demandes, réponses)'],
-    ['alerte_ronde', 'Aucune ronde dans la journée'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire'], ['rappel_planning', 'Rappel du 15 : planning du mois suivant']],
+    ['alerte_ronde', 'Aucune ronde dans la journée'], ['ronde_longue', 'Ronde de plus d’1 h'], ['synthese', 'Synthèse hebdomadaire'], ['rappel_planning', 'Rappel du 15 : planning du mois suivant'],
+    ['tickets', 'Tickets : alerte de commande, demandes, réceptions']],
   agent: [['msg', 'Messages et demandes d’action du DPMS'], ['planning', 'Planning publié ou modifié']]
 };
-const GROUPES_NOTIF = { urgent: 'Signalements', barriere_ouverte: 'Barrières', ronde_fin: 'Rondes', contact: 'Main courante', alerte_ronde: 'Alertes programmées (envoyées par le relais)' };
+const GROUPES_NOTIF = { urgent: 'Signalements', barriere_ouverte: 'Barrières', ronde_fin: 'Rondes', contact: 'Main courante', tickets: 'Tickets', alerte_ronde: 'Alertes programmées (envoyées par le relais)' };
 const typesNotif = () => NOTIF_TYPES[state.mode === 'superviseur' ? 'superviseur' : 'agent'];
 async function prefsNotif() {
   const p = await kvGet('notifPrefs'), tous = typesNotif().map(x => x[0]);
@@ -1178,6 +1183,9 @@ async function notifPourSup(ev) {
   if (ev.t === 'ronde_fin') return { type: 'ronde_fin', titre: `Ronde terminée — ${lieu}`, corps: `${qui} : ${ev.data.compte} véhicule(s), ${ev.data.nbSig} signalement(s)` };
   if (ev.t === 'contact') return { type: 'contact', titre: `Main courante — ${ev.data.site ? siteNom(ev.data.site) : 'général'}`, corps: `${CANAUX[ev.data.canal] || ''} : ${ev.data.objet} — ${ev.data.nom}. ${SUITES[ev.data.suite] || ''}${ev.data.service ? ' : ' + ev.data.service : ''} (${qui})` };
   if (ev.t === 'contact_suivi' && ev.data.type === 'reponse') return { type: 'contact', titre: `Réponse à l’usager — ${ev.data.ref}`, corps: `${ev.data.nom} : ${ev.data.texte}${ev.data.regle ? ' (réglée)' : ' (attente)'} — ${qui}` };
+  if (ev.t === 'tk_releve' && ev.data.alerte) return { type: 'tickets', titre: `Tickets à commander — ${lieu}`, corps: `Stock ≈ ${nbFr(ev.data.alerte.total)} tickets${ev.data.alerte.semaines != null ? ` (≈ ${String(ev.data.alerte.semaines).replace('.', ',')} semaine(s))` : ''} — relevé par ${qui}` };
+  if (ev.t === 'tk_commande') return { type: 'tickets', titre: `${ev.data.relance ? 'Relance de la commande' : 'Commande'} de tickets demandée — ${lieu}`, corps: `${ev.data.quantite || ''} — ${qui}` };
+  if (ev.t === 'tk_reception') return { type: 'tickets', titre: `Tickets reçus — ${lieu}`, corps: `${nbFr(ev.data.tickets)} tickets, rangés : ${ev.data.lieu || ''} — ${qui}` };
   if (ev.t === 'msg') return { type: 'msg', titre: `Réponse d’un agent — ${ev.data.ref}`, corps: `${qui} : ${ev.data.fait ? '[action faite] ' : ''}${ev.data.texte || ''}` };
   return null;
 }
@@ -1492,6 +1500,7 @@ async function agentHome() {
       h('button', { class: 'sec', onclick: safe(async () => { await kvDel('rondeCloseDPMS'); render(); }) }, 'J’ai compris')) : null,
     await carteMessagesAccueil(),
     await carteATransmettre(),
+    await carteTicketsAccueil(),
     await cartePlanningAgents(),
     ouvertes.length ? h('div', { class: 'card', style: 'border:2px solid var(--bad)' }, h('h2', null, 'Barrières ouvertes en ce moment'), ...ouvertes.map(b => barriereLigne(b, true))) : null,
     ronde ? h('div', { class: 'card encours' },
@@ -1504,6 +1513,7 @@ async function agentHome() {
     gros('alerte', 'Signalement hors ronde', 'sec', () => go('signalement', { from: 'hr' })),
     gros('barriere', 'J’ouvre les barrières', 'sec', () => { barrDraft = null; go('barriere', {}); }),
     gros('usager', 'Usager ou demande reçue', 'sec', () => { mcDraft = null; go('contact'); }),
+    h('button', { class: 'sec', style: 'margin-top:10px', onclick: () => go('tickets') }, 'Tickets : colis reçu, recharge, stock'),
     nbEnCours ? h('button', { class: 'sec', style: 'margin-top:18px', onclick: () => go('suivi') }, `Suivi des signalements en cours (${nbEnCours})`) : null,
     h('button', { class: 'sec', style: 'margin-top:10px', onclick: () => go('plus') }, 'Plus : usagers, échanges, réglages…'),
     cfg.urgenceTel ? h('a', { class: 'btn danger', style: 'margin-top:10px', href: 'tel:' + cfg.urgenceTel }, 'Urgence : appeler le DPMS') : null,
@@ -1573,7 +1583,9 @@ async function beginRonde(site, agent) {
   const ouverts = (await dbAll('sigs')).filter(s => s.site === site && s.statut === 'ouvert').length;
   const etapes = [];
   if (ouverts) etapes.push({ id: 'revue', lbl: 'Signalements en cours' });
-  etapes.push({ id: 'comptage', lbl: 'Comptage des véhicules' }, { id: 'quotidien', lbl: 'Contrôle quotidien' });
+  etapes.push({ id: 'comptage', lbl: 'Comptage des véhicules' });
+  if (await tkReleveDu(site)) etapes.push({ id: 'tickets', lbl: 'Borne à tickets (relevé de la semaine)' });
+  etapes.push({ id: 'quotidien', lbl: 'Contrôle quotidien' });
   ['mensuel', 'trimestriel'].forEach(n => { if (echeance(st, site, n).du && pointsSite(st, site, n).length) etapes.push({ id: n, lbl: NIVEAUX[n].lbl }); });
   etapes.push({ id: 'fin', lbl: 'Fin de ronde' });
   const ronde = { rid: uuid(), site, agent, debut: new Date().toISOString(), etapes, step: etapes[0].id, pos: {}, revus: [], reporte: {}, lance: {},
@@ -1673,6 +1685,7 @@ VIEWS.ronde = async () => {
   ancienneRonde(ronde);
   if (ronde.step === 'revue') return etapeRevue(ronde);
   if (ronde.step === 'comptage') return etapeComptage(ronde);
+  if (ronde.step === 'tickets') return etapeTickets(ronde);
   if (ronde.step === 'quotidien' || ronde.step === 'mensuel' || ronde.step === 'trimestriel') return etapeControle(ronde, ronde.step);
   return etapeFin(ronde);
 };
@@ -3961,6 +3974,454 @@ VIEWS.reglages = async () => {
 };
 
 /* ====================================================================== */
+/* TICKETS : stock par parking (tickets différents), réception des colis, */
+/* relevé hebdomadaire des bornes, recharge, alerte de commande           */
+/* ====================================================================== */
+const TK_DEFAUT = { bornes: {}, parCarton: {}, lieu: 'Armoire du parking Dumotel', livraisonJ: 14, margeJ: 7, cibleSem: 8, affichage: 'reste', dests: ['DPMS'] };   // autres destinataires : Paramètres des tickets (noms hors du code publié)
+function cfgTickets() {
+  const t = { ...TK_DEFAUT, ...((state.cfg && state.cfg.tickets) || {}) };
+  t.bornes = t.bornes || {}; t.parCarton = t.parCarton || {};
+  return t;
+}
+function bornesSite(site) { const b = cfgTickets().bornes[site]; return Array.isArray(b) && b.length ? b : ['Borne à tickets']; }
+const parCartonSite = site => Number(cfgTickets().parCarton[site]) || null;
+const nbFr = n => n == null || isNaN(n) ? '—' : Math.round(n).toLocaleString('fr-FR');
+const lundiDe = iso => { const d = dDe(iso), k = (d.getDay() + 6) % 7; return ajJ(iso, -k); };
+
+/* Enregistrement : agents (journal chaîné) ou superviseur (décision) */
+async function tkEnregistrer(t, site, agent, data) {
+  data = { ...data, quand: data.quand || new Date().toISOString() };
+  if (state.mode === 'superviseur') await queueDec('d', { type: 'tk', id: uuid(), ts: new Date().toISOString(), par: agent || 'DPMS', t, site, data });
+  else { await appendEvent(t, { site, agent }, data); if (agent) await kvSet('dernierAgent', { nom: agent, at: Date.now() }); }
+}
+
+/* État calculé à partir du journal des tickets (ordre de réception) */
+function etatTickets(J) {
+  const T = cfgTickets(), now = Date.now(), out = {};
+  for (const s of state.cfg.sites) out[s.id] = { site: s.id, reserve: null, bornes: {}, commande: null, derniereReception: null, inventaire: null, histo: [] };
+  for (const x of J || []) {
+    const o = out[x.site]; if (!o) continue;
+    o.histo.push(x);
+    const d = x.d || {};
+    if (x.t === 'tk_inventaire') {
+      o.reserve = Number(d.reserve) || 0; o.inventaire = x;
+      for (const [bn, v] of Object.entries(d.bornes || {})) o.bornes[bn] = { reste: v.reste, charge: v.charge != null ? v.charge : null, at: d.quand, consos: (o.bornes[bn] || {}).consos || [] };
+    } else if (x.t === 'tk_reception') {
+      o.reserve = (o.reserve || 0) + (Number(d.tickets) || 0); o.derniereReception = x;
+      if (o.commande) o.commande = null;
+    } else if (x.t === 'tk_releve') {
+      const b = o.bornes[d.borne] = o.bornes[d.borne] || { reste: null, charge: null, at: null, consos: [] };
+      if (b.reste != null && d.reste != null && b.at) {
+        const jours = (new Date(d.quand) - new Date(b.at)) / 86400000, dist = b.reste - d.reste;
+        if (jours > 0.25 && dist >= 0) b.consos.push({ dist, jours, at: d.quand });
+      }
+      if (d.recharge) o.reserve = (o.reserve || 0) - d.recharge;
+      b.reste = d.apres != null ? d.apres : d.reste; b.at = d.quand;
+      if (d.charge != null) b.charge = d.charge;
+    } else if (x.t === 'tk_commande') o.commande = x;
+  }
+  for (const o of Object.values(out)) {
+    const limite = now - 42 * 86400000;
+    let dist = 0, jours = 0;
+    for (const b of Object.values(o.bornes)) for (const c of b.consos) if (new Date(c.at).getTime() >= limite) { dist += c.dist; jours += c.jours; }
+    // plusieurs bornes : consommations additionnées (jours moyens)
+    const nbB = Math.max(1, Object.values(o.bornes).filter(b => b.consos.some(c => new Date(c.at).getTime() >= limite)).length);
+    o.parJour = jours >= 5 * nbB ? dist / (jours / nbB) : null;
+    o.parSemaine = o.parJour != null ? o.parJour * 7 : null;
+    o.machine = Object.values(o.bornes).reduce((a, b) => a + (b.reste || 0), 0);
+    o.total = (o.reserve || 0) + o.machine;
+    o.connu = o.reserve != null;
+    o.joursRestants = o.parJour ? o.total / o.parJour : null;
+    o.seuil = o.parJour ? o.parJour * (T.livraisonJ + T.margeJ) : null;
+    o.dateLimite = o.parJour ? new Date(now + Math.max(0, o.joursRestants - T.livraisonJ - T.margeJ) * 86400000).toISOString() : null;
+    const pc = parCartonSite(o.site);
+    const brut = o.parJour ? o.parJour * 7 * T.cibleSem : null;
+    o.conseil = brut ? (pc ? { cartons: Math.max(1, Math.ceil(brut / pc)), tickets: Math.max(1, Math.ceil(brut / pc)) * pc } : { cartons: null, tickets: Math.ceil(brut / 100) * 100 }) : null;
+    const cmdDepuis = o.commande ? (now - new Date(o.commande.d.quand).getTime()) / 86400000 : null;
+    o.alerte = !o.connu ? null
+      : o.commande ? (cmdDepuis > T.livraisonJ + 3 ? 'relancer' : null)
+      : (o.parJour ? o.total <= o.seuil : o.reserve <= 0) ? 'commander' : null;
+    o.releveSemaine = bornesSite(o.site).every(bn => o.bornes[bn] && o.bornes[bn].at && localDate(new Date(o.bornes[bn].at)) >= lundiDe(localDate()));
+  }
+  return out;
+}
+async function etatTicketsActuel() { return etatTickets((await kvGet('tickets')) || []); }
+function statutTk(o) {
+  const T = cfgTickets();
+  if (!o.connu) return h('span', { class: 'badge b-warn' }, 'inventaire à faire');
+  if (o.alerte === 'commander') return h('span', { class: 'badge b-bad' }, 'à commander');
+  if (o.alerte === 'relancer') return h('span', { class: 'badge b-bad' }, 'commande à relancer');
+  if (o.commande) return h('span', { class: 'badge b-warn' }, `commandé le ${jourCourt(localDate(new Date(o.commande.d.quand)))}`);
+  if (o.joursRestants != null && o.joursRestants <= T.livraisonJ + T.margeJ + 14) return h('span', { class: 'badge b-warn' }, 'à surveiller');
+  return h('span', { class: 'badge b-ok' }, 'suffisant');
+}
+function carteStockSite(o) {
+  const T = cfgTickets(), pc = parCartonSite(o.site);
+  const lignes = [
+    ['En réserve', o.connu ? `${nbFr(o.reserve)} tickets${pc ? ` (≈ ${String(Math.round(o.reserve / pc * 10) / 10).replace('.', ',')} carton${o.reserve / pc >= 2 ? 's' : ''})` : ''}` : '—'],
+    ...bornesSite(o.site).map(bn => { const b = o.bornes[bn]; return [bornesSite(o.site).length > 1 ? bn : 'Dans la borne', b && b.reste != null ? `≈ ${nbFr(b.reste)} (relevé ${fmtQuand(b.at)})` : 'pas encore relevé']; }),
+    ['Consommation', o.parSemaine != null ? `≈ ${nbFr(o.parSemaine)} par semaine` : 'calculée après deux relevés'],
+    ['Autonomie', o.joursRestants != null ? `≈ ${String(Math.round(o.joursRestants / 7 * 10) / 10).replace('.', ',')} semaines` : '—']];
+  if (o.commande) lignes.push(['Commande', `demandée le ${fmtDT(o.commande.d.quand)} par ${o.commande.agent || '?'}${o.commande.d.quantite ? ` (${o.commande.d.quantite})` : ''}`]);
+  else if (o.dateLimite && o.alerte !== 'commander') lignes.push(['Commander avant le', jourLong(localDate(new Date(o.dateLimite)))]);
+  return h('div', { class: 'card tk-site' + (o.alerte ? ' tk-alerte' : '') },
+    h('div', { class: 'tk-tete' }, h('b', null, siteNom(o.site)), statutTk(o)),
+    ...lignes.map(([a, b]) => h('div', { class: 'stat' }, h('span', null, a), h('b', null, b))));
+}
+async function carteTicketsAccueil() {
+  if (!state.cfg) return null;
+  const E = await etatTicketsActuel(), l = Object.values(E).filter(o => o.alerte);
+  if (!l.length) return null;
+  const cmd = l.filter(o => o.alerte === 'commander'), rel = l.filter(o => o.alerte === 'relancer');
+  return h('div', { class: 'card a-transmettre' },
+    h('div', { class: 'at-titre' }, cmd.length ? `Tickets à commander : ${cmd.map(o => siteNom(o.site)).join(', ')}` : `Tickets commandés non reçus : ${rel.map(o => siteNom(o.site)).join(', ')}`),
+    h('p', { class: 'small', style: 'margin:2px 0 8px' }, cmd.length ? `Il reste environ ${cmd.map(o => o.joursRestants != null ? `${Math.max(0, Math.round(o.joursRestants / 7 * 10) / 10).toString().replace('.', ',')} semaine(s) à ${siteNom(o.site)}` : `une réserve vide à ${siteNom(o.site)}`).join(', ')} ; la livraison prend environ deux semaines. Demandez la commande au DPMS et à ${cfgTickets().dests.filter(x => !/^dpms$/i.test(x)).join(', ') || 'au service'}.` : 'La livraison aurait dû arriver : relancez la demande.'),
+    h('button', { class: 'danger big', onclick: () => go('tkCommande', {}) }, cmd.length ? 'Demander la commande' : 'Relancer la commande'));
+}
+async function tkReleveDu(site) {
+  const E = await etatTicketsActuel();
+  return E[site] && !E[site].releveSemaine;
+}
+
+async function carteTicketsSup() {
+  const E = await etatTicketsActuel(), l = Object.values(E);
+  return h('div', { class: 'card' + (l.some(o => o.alerte) ? ' tk-alerte' : '') }, h('h2', null, 'Tickets'),
+    ...l.map(o => h('button', { class: 'list-item', onclick: () => go('tickets') }, h('div', { class: 'stat' },
+      h('span', null, siteNom(o.site), ' ', statutTk(o)),
+      h('b', null, o.connu ? `${nbFr(o.total)}${o.joursRestants != null ? ` · ${String(Math.round(o.joursRestants / 7 * 10) / 10).replace('.', ',')} sem.` : ''}` : '—')))));
+}
+/* ---------- Vue d'ensemble (agents et superviseur) ---------- */
+VIEWS.tickets = async () => {
+  const sup = state.mode === 'superviseur';
+  const E = await etatTicketsActuel(), T = cfgTickets();
+  const sansInventaire = Object.values(E).filter(o => !o.connu);
+  const J = (await kvGet('tickets')) || [];
+  const libT = x => {
+    const d = x.d || {};
+    if (x.t === 'tk_reception') return `Colis reçu : ${nbFr(d.tickets)} tickets${d.cartons ? ` (${d.cartons} carton${d.cartons > 1 ? 's' : ''})` : ''}, rangé : ${d.lieu || ''}`;
+    if (x.t === 'tk_releve') return `${d.borne} : ${d.compteur != null ? `compteur ${nbFr(d.compteur)}, ` : ''}reste ≈ ${nbFr(d.reste)}${d.recharge ? ` ; rechargée de ${nbFr(d.recharge)} tickets` : ''}`;
+    if (x.t === 'tk_commande') return `${d.relance ? 'Relance de la commande' : 'Commande demandée'}${d.quantite ? ` (${d.quantite})` : ''} — ${d.moyen === 'tel' ? 'par téléphone' : d.moyen === 'mail' ? 'par courriel' : 'autrement'} à ${(d.dests || []).join(', ')}${d.texte ? ' — ' + d.texte : ''}`;
+    if (x.t === 'tk_inventaire') return `Inventaire : réserve ${nbFr(d.reserve)}${Object.entries(d.bornes || {}).map(([bn, v]) => ` ; ${bn} ${nbFr(v.reste)}`).join('')}${d.note ? ' — ' + d.note : ''}`;
+    return x.t;
+  };
+  return page('Tickets', { back: () => go('home') },
+    sansInventaire.length ? h('div', { class: 'banner warn' }, h('b', null, 'Inventaire de départ à faire : '), `${sansInventaire.map(o => siteNom(o.site)).join(', ')}. Comptez les tickets en réserve et relevez chaque borne.`,
+      h('button', { class: 'ok', style: 'margin-top:8px', onclick: () => go('tkInventaire', {}) }, 'Faire l’inventaire')) : null,
+    await carteTicketsAccueil(),
+    h('button', { class: 'ok big', onclick: () => go('tkReception', {}) }, 'J’ai reçu un colis de tickets'),
+    h('button', { class: 'sec big', onclick: () => go('tkReleve', {}) }, 'Relevé ou recharge d’une borne'),
+    h('button', { class: 'sec', onclick: () => go('tkCommande', {}) }, 'Demander une commande de tickets'),
+    h('p', { class: 'muted small', style: 'margin:14px 0 0' }, `Réserve rangée dans : ${T.lieu.replace(/^./, c => c.toLowerCase())}.`),
+    ...Object.values(E).map(carteStockSite),
+    h('p', { class: 'muted small' }, `Alerte quand le stock ne couvre plus que ${T.livraisonJ + T.margeJ} jours (livraison ${T.livraisonJ} jours + marge ${T.margeJ} jours). Le relevé des bornes se fait chaque semaine, pendant la première ronde de la semaine dans le parking.`),
+    h('button', { class: 'link', onclick: () => go('tkInventaire', {}) }, sup ? 'Inventaire ou correction du stock' : 'Inventaire (compter le stock)'),
+    sup ? h('button', { class: 'sec', onclick: () => go('tkParam') }, 'Paramètres des tickets') : null,
+    sup ? h('button', { class: 'sec', onclick: safe(() => exporterTickets()) }, 'Excel : historique des tickets') : null,
+    J.length ? h('details', { class: 'card' }, h('summary', null, `Historique (${J.length})`),
+      ...J.slice().reverse().slice(0, 80).map(x => h('div', { class: 'small', style: 'padding:6px 0;border-bottom:1px solid var(--line)' },
+        h('b', null, `${fmtDT(x.d.quand)} — ${siteNom(x.site)}`), ` — ${x.agent || ''}`, h('div', null, libT(x))))) : null);
+};
+async function exporterTickets() {
+  const J = (await kvGet('tickets')) || [];
+  const aoa = [['Date', 'Parking', 'Opération', 'Par', 'Borne', 'Tickets reçus', 'Cartons', 'Compteur', 'Reste dans la borne', 'Rechargé', 'Réserve (inventaire)', 'Détail']];
+  for (const x of J) {
+    const d = x.d || {};
+    aoa.push([fmtDT(d.quand), siteNom(x.site), { tk_reception: 'Réception', tk_releve: 'Relevé', tk_commande: d.relance ? 'Relance' : 'Commande demandée', tk_inventaire: 'Inventaire' }[x.t] || x.t, x.agent || '',
+      d.borne || '', x.t === 'tk_reception' ? d.tickets : '', d.cartons || '', d.compteur != null ? d.compteur : '', d.reste != null ? d.reste : '', d.recharge || '', x.t === 'tk_inventaire' ? d.reserve : '',
+      x.t === 'tk_reception' ? `rangé : ${d.lieu || ''}` : x.t === 'tk_commande' ? `${d.quantite || ''} — ${(d.dests || []).join(', ')}${d.texte ? ' — ' + d.texte : ''}` : d.note || '']);
+  }
+  await shareOrDownload(xlsxBlob([['Tickets', aoa, [16, 12, 18, 14, 16, 12, 9, 11, 14, 11, 14, 50]]]), `tickets_${fileStamp()}.xlsx`);
+}
+
+/* ---------- Petit compteur +/− ---------- */
+function compteurNb(val, onChange, { min = 0, pas = 1 } = {}) {
+  const aff = h('input', { type: 'number', inputmode: 'numeric', min, value: val, class: 'tk-nb', oninput: e => onChange(Math.max(min, parseInt(e.target.value, 10) || 0)) });
+  const maj = v => { v = Math.max(min, v); aff.value = v; onChange(v); };
+  return h('div', { class: 'tk-compteur' },
+    h('button', { class: 'sec', onclick: () => maj((parseInt(aff.value, 10) || 0) - pas) }, '−'), aff,
+    h('button', { class: 'sec', onclick: () => maj((parseInt(aff.value, 10) || 0) + pas) }, '+'));
+}
+function quiDeclare(d, titre = 'Qui fait la déclaration ?') {
+  if (state.mode === 'superviseur') { d.agent = d.agent || 'DPMS'; return null; }
+  return h('div', { class: 'card qui-transmet' }, h('p', { class: 'question', style: 'margin-top:0' }, titre), chips(state.cfg.agents, d.agent, v => { d.agent = v; }));
+}
+
+/* ---------- Réception d'un colis ---------- */
+let tkRecDraft = null;
+VIEWS.tkReception = async () => {
+  const T = cfgTickets();
+  if (!tkRecDraft) tkRecDraft = { lignes: Object.fromEntries(state.cfg.sites.map(s => [s.id, { cartons: 0, parCarton: parCartonSite(s.id) || '' }])), range: false, agent: await agentPrefere() };
+  const d = tkRecDraft;
+  const totalSite = sid => { const l = d.lignes[sid]; return (l.cartons || 0) * (Number(l.parCarton) || 0); };
+  const recap = h('p', { class: 'small', style: 'font-weight:600' });
+  const majRecap = () => { recap.textContent = state.cfg.sites.filter(s => d.lignes[s.id].cartons).map(s => `${s.nom} : ${d.lignes[s.id].cartons} carton(s) = ${nbFr(totalSite(s.id))} tickets`).join(' · ') || 'Indiquez le nombre de cartons reçus pour chaque parking.'; };
+  majRecap();
+  const save = safe(async () => {
+    const sites = state.cfg.sites.filter(s => d.lignes[s.id].cartons > 0);
+    if (!sites.length) throw new Error('Indiquez le nombre de cartons reçus.');
+    for (const s of sites) if (!(Number(d.lignes[s.id].parCarton) > 0)) throw new Error(`${s.nom} : indiquez le nombre de tickets par carton (écrit sur le carton).`);
+    if (!d.range) throw new Error('Cochez la case : colis rangé à l’endroit prévu.');
+    if (!d.agent) throw new Error('Indiquez qui a réceptionné le colis.');
+    for (const s of sites) { const l = d.lignes[s.id]; await tkEnregistrer('tk_reception', s.id, d.agent, { cartons: l.cartons, parCarton: Number(l.parCarton), tickets: totalSite(s.id), lieu: T.lieu, certifie: true }); }
+    await fold(); syncNow();
+    const msg = sites.map(s => `${s.nom} : ${nbFr(totalSite(s.id))} tickets`).join(' · ');
+    tkRecDraft = null;
+    go('tkOk', { titre: 'Réception enregistrée', msg: `${msg}. Le stock est mis à jour.` }, { noPush: true });
+  });
+  return page('Colis de tickets reçu', { back: () => { tkRecDraft = null; go('tickets'); } },
+    h('p', { class: 'question' }, 'Combien de cartons pour chaque parking ?'),
+    h('p', { class: 'muted small' }, 'Les tickets sont différents pour chaque parking : regardez l’étiquette des cartons.'),
+    ...state.cfg.sites.map(s => {
+      const l = d.lignes[s.id];
+      return h('div', { class: 'card tk-ligne' }, h('b', null, s.nom),
+        compteurNb(l.cartons, v => { l.cartons = v; majRecap(); }),
+        h('label', { class: 'f small' }, 'Tickets par carton'),
+        h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.parCarton, oninput: e => { l.parCarton = e.target.value; majRecap(); } }));
+    }),
+    recap,
+    h('label', { class: 'tk-certif' + (d.range ? ' on' : '') }, h('input', { type: 'checkbox', checked: d.range ? true : null, onchange: e => { d.range = e.target.checked; e.target.parentNode.classList.toggle('on', d.range); } }),
+      h('span', null, h('b', null, 'Je certifie avoir rangé le colis : '), T.lieu.replace(/^./, c => c.toLowerCase()), '.')),
+    quiDeclare(d, 'Qui a réceptionné le colis ?'),
+    h('button', { class: 'ok big', onclick: save }, 'Enregistrer la réception'));
+};
+VIEWS.tkOk = async ({ titre, msg }) => page(titre, null,
+  h('div', { class: 'fini' }, h('span', { html: ICO.ok }), h('h2', null, titre), h('p', null, msg)),
+  h('button', { class: 'sec big', onclick: () => go('tickets') }, 'Voir le stock de tickets'),
+  h('button', { class: 'big', onclick: () => go('home') }, 'Retour à l’accueil'));
+
+/* ---------- Relevé hebdomadaire / recharge (seul ou pendant la ronde) ---------- */
+let tkRelDraft = null;
+function formReleve(d, E) {
+  const T = cfgTickets(), compteur = T.affichage === 'compteur';
+  const o = E[d.site];
+  return bornesSite(d.site).map(bn => {
+    const l = d.bornes[bn] = d.bornes[bn] || { valeur: '', recharge: null, ajout: parCartonSite(d.site) || '' };
+    const b = o && o.bornes[bn];
+    const zoneAjout = h('div', { style: l.recharge ? '' : 'display:none' },
+      h('label', { class: 'f' }, 'Combien de tickets avez-vous mis dans la borne ?'),
+      h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.ajout, oninput: e => l.ajout = e.target.value }),
+      h('p', { class: 'muted small' }, `Ils sont retirés de la réserve. ${compteur ? 'Pensez à remettre le compteur de la borne à 0.' : ''}`));
+    const ouiNon = h('div', { class: 'row' },
+      h('button', { class: 'choix' + (l.recharge === false ? ' on' : ''), onclick: e => { l.recharge = false; zoneAjout.style.display = 'none'; [...e.target.parentNode.children].forEach(x => x.classList.toggle('on', x === e.target)); } }, 'Non'),
+      h('button', { class: 'choix' + (l.recharge === true ? ' on' : ''), onclick: e => { l.recharge = true; zoneAjout.style.display = ''; [...e.target.parentNode.children].forEach(x => x.classList.toggle('on', x === e.target)); } }, 'Oui, je l’ai rechargée'));
+    return h('div', { class: 'card' },
+      bornesSite(d.site).length > 1 ? h('h2', null, bn) : null,
+      h('p', { class: 'question', style: 'margin-top:0' }, compteur ? 'Compteur de la borne (tickets délivrés depuis la dernière recharge)' : 'Combien de tickets reste-t-il dans la borne ?'),
+      h('p', { class: 'muted small' }, compteur ? 'Relevez le compteur avant de recharger.' : 'Avant de recharger. Une estimation suffit.'),
+      h('input', { type: 'number', inputmode: 'numeric', min: 0, class: 'tk-nb grand', value: l.valeur, oninput: e => l.valeur = e.target.value }),
+      b && b.reste != null ? h('p', { class: 'muted small' }, `Dernier relevé : ≈ ${nbFr(b.reste)} tickets dans la borne (${fmtQuand(b.at)}).`) : null,
+      h('p', { class: 'question' }, 'Avez-vous rechargé la borne ?'), ouiNon, zoneAjout);
+  });
+}
+async function enregistrerReleve(d, E) {
+  const T = cfgTickets(), compteur = T.affichage === 'compteur', o = E[d.site];
+  const ops = [];
+  for (const bn of bornesSite(d.site)) {
+    const l = d.bornes[bn];
+    if (l.valeur === '' || isNaN(parseInt(l.valeur, 10))) throw new Error(compteur ? 'Indiquez le compteur de la borne.' : 'Indiquez combien de tickets il reste dans la borne.');
+    if (l.recharge == null) throw new Error('Indiquez si vous avez rechargé la borne.');
+    const v = parseInt(l.valeur, 10), ajout = l.recharge ? parseInt(l.ajout, 10) : 0;
+    if (l.recharge && !(ajout > 0)) throw new Error('Indiquez combien de tickets vous avez mis dans la borne.');
+    const b = o && o.bornes[bn];
+    let reste = v, data = {};
+    if (compteur) {
+      if (!b || b.charge == null) throw new Error('Inventaire de départ à faire d’abord (Tickets → Inventaire) : il faut connaître le chargement de la borne.');
+      reste = Math.max(0, b.charge - v); data.compteur = v;
+    }
+    const apres = reste + ajout;
+    ops.push({ bn, data: { ...data, borne: bn, reste, recharge: ajout || 0, apres, ...(compteur ? { charge: ajout ? apres : b.charge } : {}) } });
+  }
+  // alerte transmise avec le relevé (notification au DPMS) si le stock passe sous le seuil
+  const quand = new Date().toISOString();
+  ops.forEach(x => { x.data.quand = quand; });
+  const sim = etatTickets([...((await kvGet('tickets')) || []), ...ops.map(x => ({ t: 'tk_releve', site: d.site, agent: d.agent, d: x.data }))])[d.site];
+  if (sim && sim.alerte === 'commander' && !(o && o.alerte === 'commander')) ops[ops.length - 1].data.alerte = { total: Math.round(sim.total), semaines: sim.joursRestants != null ? Math.round(sim.joursRestants / 7 * 10) / 10 : null };
+  for (const x of ops) await tkEnregistrer('tk_releve', d.site, d.agent, x.data);
+  await fold(); syncNow();
+  return ops;
+}
+VIEWS.tkReleve = async ({ site } = {}) => {
+  const E = await etatTicketsActuel();
+  if (!tkRelDraft || (site && tkRelDraft.site !== site)) tkRelDraft = { site: site || null, bornes: {}, agent: await agentPrefere() };
+  const d = tkRelDraft;
+  if (!d.site) return page('Relevé ou recharge', { back: () => { tkRelDraft = null; go('tickets'); } },
+    h('p', { class: 'question' }, 'Quelle borne ? (parking)'),
+    ...state.cfg.sites.map(s => h('button', { class: 'choix', onclick: () => { d.site = s.id; go('tkReleve', { site: s.id }, { noPush: true }); } }, s.nom)));
+  return page(`Borne à tickets — ${siteNom(d.site)}`, { back: () => { tkRelDraft = null; go('tickets'); } },
+    ...formReleve(d, E),
+    quiDeclare(d),
+    h('button', { class: 'ok big', onclick: safe(async () => {
+      if (!d.agent) throw new Error('Indiquez qui fait le relevé.');
+      const ops = await enregistrerReleve(d, E);
+      tkRelDraft = null;
+      go('tkOk', { titre: 'Relevé enregistré', msg: ops.map(x => `${x.bn} : ≈ ${nbFr(x.data.reste)} tickets${x.data.recharge ? `, rechargée de ${nbFr(x.data.recharge)} (réserve diminuée d’autant)` : ''}`).join(' · ') }, { noPush: true });
+    }) }, 'Enregistrer'));
+};
+async function etapeTickets(ronde) {
+  const E = await etatTicketsActuel();
+  if (!tkRelDraft || tkRelDraft.site !== ronde.site || tkRelDraft.rid !== ronde.rid) tkRelDraft = { site: ronde.site, rid: ronde.rid, bornes: {}, agent: ronde.agent };
+  const d = tkRelDraft; d.agent = ronde.agent;
+  return pageRonde(ronde,
+    h('div', { class: 'banner info' }, 'Relevé de la semaine : une fois par semaine et par parking.'),
+    ...formReleve(d, E),
+    h('button', { class: 'ok big', onclick: safe(async () => {
+      const ops = await enregistrerReleve(d, E);
+      tkRelDraft = null;
+      toast(ops.map(x => `${x.bn} : ≈ ${nbFr(x.data.reste)} tickets${x.data.recharge ? ', recharge enregistrée' : ''}`).join(' · '));
+      await avancer(await kvGet('ronde'));
+    }) }, 'Enregistrer et continuer'),
+    h('button', { class: 'link', onclick: safe(async () => { tkRelDraft = null; toast('Relevé non fait : il sera redemandé à la prochaine ronde.'); await avancer(ronde); }) }, 'Borne inaccessible aujourd’hui : passer'));
+}
+
+/* ---------- Demande de commande (au DPMS et au service désigné) ---------- */
+let tkCmdDraft = null;
+VIEWS.tkCommande = async () => {
+  const T = cfgTickets(), E = await etatTicketsActuel();
+  if (!tkCmdDraft) tkCmdDraft = { sites: Object.values(E).filter(o => o.alerte).map(o => o.site), agent: await agentPrefere(), precision: '' };
+  const d = tkCmdDraft;
+  const relance = d.sites.length && d.sites.every(s => E[s] && E[s].commande);
+  const qte = sid => { const c = E[sid] && E[sid].conseil; return c ? (c.cartons ? `${c.cartons} carton${c.cartons > 1 ? 's' : ''} (${nbFr(c.tickets)} tickets)` : `environ ${nbFr(c.tickets)} tickets`) : 'quantité à définir'; };
+  const contact = nom => {
+    const cs = state.cfg.contacts || {};
+    const c = cs[nom] || cs[Object.keys(cs).find(k => sansAccent(k) === sansAccent(nom)) || ''] || {};
+    if (/^dpms$/i.test(nom)) return { tel: c.tel || state.cfg.urgenceTel || '', mail: c.mail || state.cfg.urgenceMail || '' };
+    return c;
+  };
+  const texteDe = () => {
+    const l = d.sites.map(sid => { const o = E[sid]; return `- Parking ${siteNom(sid)} : stock ≈ ${nbFr(o.total)} tickets${o.joursRestants != null ? ` (≈ ${Math.round(o.joursRestants / 7 * 10) / 10} semaines)` : ''} ; quantité indicative : ${qte(sid)}`.replace(/(\d)\.(\d)/g, '$1,$2'); });
+    return `Bonjour,\n\n${relance ? 'Je reviens vers vous au sujet de la commande de tickets demandée : la livraison n’est pas encore arrivée.' : `Le stock de tickets de parking arrive au seuil de commande (livraison d’environ ${Math.round(T.livraisonJ / 7)} semaines) :`}\n${l.join('\n')}\n\nMerci de lancer la commande.\n\n${d.agent || ''}${d.agent ? ', ' : ''}agent de surveillance des parkings`;
+  };
+  const objet = () => `${relance ? 'Relance — ' : ''}Commande de tickets — parking${d.sites.length > 1 ? 's' : ''} ${d.sites.map(siteNom).join(', ')}`;
+  if (state.mode === 'superviseur') d.agent = d.agent || 'DPMS';
+  const enregistrer = moyen => safe(async () => {
+    if (!d.sites.length) throw new Error('Choisissez au moins un parking.');
+    if (!d.agent) throw new Error('Indiquez qui fait la demande.');
+    for (const sid of d.sites) await tkEnregistrer('tk_commande', sid, d.agent, { moyen, dests: T.dests, quantite: qte(sid), texte: d.precision.trim(), relance: !!(E[sid] && E[sid].commande) });
+    await fold(); syncNow();
+    tkCmdDraft = null;
+    go('tkOk', { titre: relance ? 'Relance enregistrée' : 'Demande enregistrée', msg: `${d.sites.map(siteNom).join(', ')} : commande demandée. L’alerte s’arrête jusqu’à la réception du colis (relance proposée si rien n’arrive après ${T.livraisonJ + 3} jours).` }, { noPush: true });
+  });
+  return page(relance ? 'Relancer la commande' : 'Demander une commande', { back: () => { tkCmdDraft = null; go('tickets'); } },
+    h('p', { class: 'question' }, 'Pour quels parkings ?'),
+    chips(state.cfg.sites.map(s => ({ val: s.id, lbl: `${s.nom}${E[s.id] && E[s.id].alerte ? ' (alerte)' : ''}` })), d.sites, () => go('tkCommande', {}, { noPush: true, keepScroll: true }), { multi: true }),
+    h('div', { class: 'banner warn', style: 'font-size:16px' }, h('b', null, 'À faire : '), `envoyer la demande à ${T.dests.join(' et ')}, par courriel (ordinateur de la loge) ou par téléphone, puis l’indiquer ici.`),
+    ...T.dests.map(nom => { const c = contact(nom); return h('div', { class: 'card dest' }, h('div', { class: 'dest-nom' }, nom),
+      c.mail ? h('div', { class: 'dest-l' }, h('span', { class: 'muted small' }, 'Courriel'), h('span', { class: 'dest-mail' }, c.mail), h('button', { class: 'sec mini', onclick: () => copier(c.mail, 'Adresse') }, 'Copier l’adresse')) : null,
+      c.tel ? h('div', { class: 'dest-l' }, h('span', { class: 'muted small' }, 'Téléphone'), h('a', { class: 'dest-tel', href: 'tel:' + c.tel.replace(/\s/g, '') }, c.tel)) : null,
+      !c.mail && !c.tel ? h('p', { class: 'muted small' }, 'Coordonnées non renseignées (Paramètres du superviseur).') : null); }),
+    h('details', { class: 'card', open: true }, h('summary', null, 'Texte du courriel (à copier)'),
+      h('p', { class: 'small', style: 'margin:8px 0 4px' }, h('b', null, 'Objet : '), objet()),
+      h('pre', { class: 'texte-sig' }, texteDe()),
+      h('div', { class: 'row' },
+        h('button', { class: 'sec', onclick: () => copier(objet(), 'Objet') }, 'Copier l’objet'),
+        h('button', { class: 'sec', onclick: () => copier(texteDe(), 'Texte') }, 'Copier le texte'))),
+    h('div', { class: 'card qui-transmet' }, h('p', { class: 'question', style: 'margin-top:0' }, 'Qui fait la demande ?'), state.mode === 'superviseur' ? h('p', null, 'DPMS') : chips(state.cfg.agents, d.agent, v => { d.agent = v; go('tkCommande', {}, { noPush: true, keepScroll: true }); })),
+    h('input', { type: 'text', placeholder: 'Précision (facultatif) : réponse obtenue, nom de la personne…', value: d.precision, oninput: e => d.precision = e.target.value }),
+    h('p', { class: 'small', style: 'margin:10px 0 4px;font-weight:600' }, 'Une fois fait, touchez :'),
+    h('div', { class: 'dest-btns' },
+      h('button', { class: 'ok', onclick: enregistrer('mail') }, '✓ J’ai envoyé le courriel'),
+      h('button', { class: 'ok', onclick: enregistrer('tel') }, '✓ J’ai appelé')),
+    h('button', { class: 'link', onclick: enregistrer('autre') }, 'Demandé autrement (de vive voix…)'));
+};
+
+/* ---------- Inventaire (départ, ou correction) ---------- */
+let tkInvDraft = null;
+VIEWS.tkInventaire = async () => {
+  const T = cfgTickets(), E = await etatTicketsActuel(), compteur = T.affichage === 'compteur';
+  if (!tkInvDraft) tkInvDraft = { sites: Object.fromEntries(state.cfg.sites.map(s => [s.id, { cartons: 0, parCarton: parCartonSite(s.id) || '', vrac: '', bornes: {}, fait: !E[s.id].connu || state.mode === 'superviseur' }])), agent: await agentPrefere(), note: '' };
+  const d = tkInvDraft;
+  const save = safe(async () => {
+    const sites = state.cfg.sites.filter(s => d.sites[s.id].fait);
+    if (!sites.length) throw new Error('Choisissez au moins un parking.');
+    if (!d.agent) throw new Error('Indiquez qui a compté.');
+    const ops = [];
+    for (const s of sites) {
+      const l = d.sites[s.id];
+      if (l.cartons && !(Number(l.parCarton) > 0)) throw new Error(`${s.nom} : nombre de tickets par carton manquant.`);
+      const reserve = (l.cartons || 0) * (Number(l.parCarton) || 0) + (parseInt(l.vrac, 10) || 0);
+      const bornes = {};
+      for (const bn of bornesSite(s.id)) {
+        const b = l.bornes[bn] = l.bornes[bn] || {};
+        if (compteur) {
+          if (b.compteur === '' || b.compteur == null || !(Number(b.charge) > 0)) throw new Error(`${s.nom} : compteur et chargement de la borne à indiquer.`);
+          bornes[bn] = { reste: Math.max(0, Number(b.charge) - Number(b.compteur)), charge: Number(b.charge), compteur: Number(b.compteur) };
+        } else {
+          if (b.reste === '' || b.reste == null) throw new Error(`${s.nom} : indiquez combien de tickets il reste dans la borne.`);
+          bornes[bn] = { reste: Number(b.reste) };
+        }
+      }
+      ops.push({ s, data: { reserve, cartons: l.cartons, parCarton: Number(l.parCarton) || null, vrac: parseInt(l.vrac, 10) || 0, bornes, note: d.note.trim() } });
+    }
+    for (const x of ops) await tkEnregistrer('tk_inventaire', x.s.id, d.agent, x.data);
+    await fold(); syncNow();
+    tkInvDraft = null;
+    go('tkOk', { titre: 'Inventaire enregistré', msg: ops.map(x => `${x.s.nom} : réserve ${nbFr(x.data.reserve)}, borne ${Object.values(x.data.bornes).map(b => nbFr(b.reste)).join(' + ')}`).join(' · ') }, { noPush: true });
+  });
+  return page('Inventaire des tickets', { back: () => { tkInvDraft = null; go('tickets'); } },
+    h('p', { class: 'muted small' }, `Comptez les cartons dans ${T.lieu.replace(/^./, c => c.toLowerCase())} (par parking : les tickets sont différents) et relevez chaque borne. Ce comptage remplace le stock calculé.`),
+    ...state.cfg.sites.map(s => {
+      const l = d.sites[s.id];
+      const corps = h('div', { style: l.fait ? '' : 'display:none' },
+        h('label', { class: 'f small' }, 'Cartons pleins en réserve'), compteurNb(l.cartons, v => { l.cartons = v; }),
+        h('label', { class: 'f small' }, 'Tickets par carton'), h('input', { type: 'number', inputmode: 'numeric', min: 1, value: l.parCarton, oninput: e => l.parCarton = e.target.value }),
+        h('label', { class: 'f small' }, 'Tickets hors carton plein (carton entamé), facultatif'), h('input', { type: 'number', inputmode: 'numeric', min: 0, value: l.vrac, oninput: e => l.vrac = e.target.value }),
+        ...bornesSite(s.id).flatMap(bn => {
+          const b = l.bornes[bn] = l.bornes[bn] || {};
+          const nom = bornesSite(s.id).length > 1 ? bn : 'la borne';
+          return compteur
+            ? [h('label', { class: 'f small' }, `Compteur de ${nom}`), h('input', { type: 'number', inputmode: 'numeric', min: 0, value: b.compteur || '', oninput: e => b.compteur = e.target.value }),
+              h('label', { class: 'f small' }, `Tickets chargés dans ${nom} à la dernière remise à zéro`), h('input', { type: 'number', inputmode: 'numeric', min: 1, value: b.charge || parCartonSite(s.id) || '', oninput: e => b.charge = e.target.value })]
+            : [h('label', { class: 'f small' }, `Tickets restant dans ${nom} (estimation)`), h('input', { type: 'number', inputmode: 'numeric', min: 0, value: b.reste || '', oninput: e => b.reste = e.target.value })];
+        }));
+      return h('div', { class: 'card' },
+        h('label', { class: 'tk-certif' + (l.fait ? ' on' : ''), style: 'margin:0' }, h('input', { type: 'checkbox', checked: l.fait ? true : null, onchange: e => { l.fait = e.target.checked; corps.style.display = l.fait ? '' : 'none'; e.target.parentNode.classList.toggle('on', l.fait); } }),
+          h('span', null, h('b', null, s.nom), E[s.id].connu ? h('span', { class: 'muted small' }, ` — stock actuel : ${nbFr(E[s.id].total)}`) : h('span', { class: 'badge b-warn' }, 'jamais compté'))),
+        corps);
+    }),
+    h('input', { type: 'text', placeholder: 'Commentaire (facultatif)', value: d.note, oninput: e => d.note = e.target.value }),
+    quiDeclare(d, 'Qui a compté ?'),
+    h('button', { class: 'ok big', onclick: save }, 'Enregistrer l’inventaire'));
+};
+
+/* ---------- Paramètres (superviseur) ---------- */
+VIEWS.tkParam = async () => {
+  const T = cfgTickets();
+  const lignes = state.cfg.sites.map(s => ({ s, bornes: h('input', { type: 'text', value: bornesSite(s.id).join(', ') }), pc: h('input', { type: 'number', min: 1, value: parCartonSite(s.id) || '' }) }));
+  const lieu = h('input', { type: 'text', value: T.lieu });
+  const liv = h('input', { type: 'number', min: 1, value: T.livraisonJ }), marge = h('input', { type: 'number', min: 0, value: T.margeJ }), cible = h('input', { type: 'number', min: 1, value: T.cibleSem });
+  const dests = h('textarea', { value: T.dests.join('\n'), style: 'min-height:60px' });
+  let aff = T.affichage;
+  return page('Paramètres des tickets', { back: () => go('tickets') },
+    h('div', { class: 'card' }, h('h2', null, 'Par parking'),
+      ...lignes.map(l => h('div', { style: 'margin-bottom:12px' }, h('b', null, l.s.nom),
+        h('label', { class: 'f small' }, 'Bornes à tickets (séparées par des virgules ; une seule en général)'), l.bornes,
+        h('label', { class: 'f small' }, 'Tickets par carton (laisser vide si inconnu : l’agent le saisit à la réception)'), l.pc))),
+    h('div', { class: 'card' }, h('h2', null, 'Borne'),
+      h('p', { class: 'small' }, 'Ce que la borne affiche :'),
+      chips([{ val: 'reste', lbl: 'Les tickets restants' }, { val: 'compteur', lbl: 'Un compteur de tickets délivrés (remis à 0 à la recharge)' }], aff, v => { aff = v; })),
+    h('div', { class: 'card' }, h('h2', null, 'Stock et commande'),
+      h('label', { class: 'f' }, 'Lieu de rangement des colis'), lieu,
+      h('label', { class: 'f' }, 'Délai de livraison (jours)'), liv,
+      h('label', { class: 'f' }, 'Marge de sécurité (jours)'), marge,
+      h('label', { class: 'f' }, 'Quantité indicative à commander (semaines de consommation)'), cible,
+      h('label', { class: 'f' }, 'Destinataires de la demande de commande (un par ligne ; coordonnées prises dans la liste des destinataires)'), dests),
+    h('button', { class: 'ok big', onclick: safe(async () => {
+      const c = JSON.parse(JSON.stringify(state.cfg));
+      const t = { bornes: {}, parCarton: {}, lieu: lieu.value.trim() || TK_DEFAUT.lieu, livraisonJ: Math.max(1, parseInt(liv.value, 10) || 14), margeJ: Math.max(0, parseInt(marge.value, 10) || 0),
+        cibleSem: Math.max(1, parseInt(cible.value, 10) || 8), affichage: aff, dests: dests.value.split('\n').map(x => x.trim()).filter(Boolean) };
+      if (!t.dests.length) throw new Error('Indiquez au moins un destinataire.');
+      for (const l of lignes) {
+        const b = l.bornes.value.split(',').map(x => x.trim()).filter(Boolean);
+        if (b.length) t.bornes[l.s.id] = b;
+        if (parseInt(l.pc.value, 10) > 0) t.parCarton[l.s.id] = parseInt(l.pc.value, 10);
+      }
+      c.tickets = t; c.cfgId = randCode(8);
+      await publishCfg(c);
+      toast('Paramètres des tickets enregistrés.'); go('tickets');
+    }) }, 'Enregistrer'));
+};
+
+/* ====================================================================== */
 /* SUPERVISEUR                                                            */
 /* ====================================================================== */
 const ETAPES_RELAIS = [
@@ -4158,6 +4619,7 @@ async function supHome() {
       h('button', { class: 'list-item', onclick: () => go('supSigs', { f: 'vehicules' }) }, h('div', { class: 'stat' }, h('span', null, 'Véhicules en attente de la PM'), h('b', null, vehPM)))),
     await carteMainCourante(),
     await carteControlesSup(),
+    await carteTicketsSup(),
     h('div', { class: 'card' }, h('h2', null, 'Dernières rondes'),
       rondes.length ? rondes.map(rondeLigne) : h('p', { class: 'muted' }, 'Aucune ronde reçue.'),
       h('div', { class: 'row' },

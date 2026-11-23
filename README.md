@@ -1,6 +1,6 @@
 # Rondes parkings — Ville de Cachan (DPMS)
 
-Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.13.0.
+Application web pour les rondes des agents de surveillance des parkings municipaux (Hénouille, Dumotel, Arobase). Version 2.14.0.
 
 L'outil appartient aux agents : rondes, comptage des véhicules, signalements, barrières, traitement des demandes auprès des services et prestataires. La police municipale suit les signalements de véhicules. Les superviseurs consultent, interviennent ponctuellement et produisent des statistiques.
 
@@ -59,7 +59,7 @@ Un appareil ajouté ou réinstallé retrouve toutes les données conservées sur
 ## 5. Utilisation
 
 ### Accueil des agents
-Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **J'ouvre les barrières**, **Usager ou demande reçue** ; au-dessus, **Messages du DPMS** quand il y en a ; puis **Suivi des signalements en cours** (avec leur nombre) ; en bas, **Urgence : appeler le DPMS** et **Plus** (échanges, suivi des usagers et demandes, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
+Quatre grands boutons : **Commencer ma ronde** (ou **Reprendre la ronde**), **Signalement hors ronde**, **J'ouvre les barrières**, **Usager ou demande reçue**, et **Tickets : colis reçu, recharge, stock** ; au-dessus, **Messages du DPMS** quand il y en a ; puis **Suivi des signalements en cours** (avec leur nombre) ; en bas, **Urgence : appeler le DPMS** et **Plus** (échanges, suivi des usagers et demandes, contrôles à faire, envoi au DPMS, notifications, extrait Excel, réglages).
 
 Quand un signalement n'a pas encore été transmis aux services, une **carte rouge « N signalement(s) à transmettre »** s'affiche en tête de l'accueil, sur tous les appareils agents, jusqu'à ce que la transmission soit indiquée.
 
@@ -106,6 +106,15 @@ Chaque signalement a son fil d'échanges.
   - **Choisir ses notifications** : **Réglages → Notifications reçues sur cet appareil**, type par type (urgents, autres signalements, aggravés, clos, traitement, PM, réponses des agents, barrière ouverte, barrière refermée, ronde terminée, ronde annulée, main courante, alertes programmées). Chaque appareil a ses propres choix.
 
   Le texte de la notification est chiffré par l'appareil qui l'envoie, pour l'appareil qui la reçoit : le relais et le service de notification ne voient qu'un bloc illisible. Les signalements faits pendant une ronde partent à la fin de la ronde (une seule notification), sauf s'ils sont urgents.
+
+### Tickets : stock, réception, relevé des bornes, commande
+Les tickets sont différents pour chaque parking ; la réserve est rangée à un seul endroit (par défaut l'armoire du parking Dumotel). Accueil → **Tickets : colis reçu, recharge, stock**.
+- **Inventaire de départ** (une fois, puis pour corriger) : par parking, cartons pleins × tickets par carton, tickets d'un carton entamé, et ce qui reste dans la borne.
+- **J'ai reçu un colis de tickets** : nombre de cartons pour chaque parking (tickets par carton pré-remplis), case obligatoire « Je certifie avoir rangé le colis : armoire… », qui a réceptionné. La réserve augmente.
+- **Relevé de la semaine** : étape « Borne à tickets » ajoutée à la première ronde de la semaine dans chaque parking (« Borne inaccessible aujourd'hui : passer » la reporte à la ronde suivante). L'agent indique combien de tickets restent dans la borne (ou le compteur, selon le paramètre), puis s'il l'a rechargée et de combien : la réserve diminue d'autant. **Relevé ou recharge d'une borne** fait la même chose hors ronde.
+- **Calcul** : consommation par semaine d'après les relevés des six dernières semaines ; stock = réserve + bornes ; autonomie ; date limite de commande.
+- **Alerte** : quand le stock ne couvre plus le délai de livraison + la marge (14 + 7 jours par défaut), carte rouge **Tickets à commander** sur l'accueil des agents et notification au superviseur. **Demander la commande** : destinataires (DPMS par défaut ; les autres s'ajoutent dans les Paramètres des tickets, coordonnées reprises de la liste des destinataires) avec leurs coordonnées, texte du courriel à copier (stock, autonomie, quantité indicative), puis **✓ J'ai envoyé le courriel** / **✓ J'ai appelé**. L'alerte s'arrête jusqu'à la réception ; sans réception après le délai de livraison + 3 jours, « Relancer la commande ».
+- **Superviseur** : carte Tickets sur l'accueil, vue détaillée par parking, historique, Excel, inventaire ou correction, **Paramètres des tickets** (bornes par parking, tickets par carton, ce qu'affiche la borne : tickets restants ou compteur remis à 0 à la recharge, lieu de rangement, délai de livraison, marge, quantité indicative, destinataires de la demande). Notifications « Tickets » (alerte, demandes, réceptions) réglables dans Réglages → Notifications.
 
 ### Main courante : usagers et demandes reçues
 Toute demande reçue (usager sur place, appel, courriel, service ou élu) est enregistrée et horodatée, par les agents (**Usager ou demande reçue** sur l'accueil) comme par le DPMS (**Main courante → Nouvelle entrée**).
