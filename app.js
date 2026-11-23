@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.17.0';
+const APP_VERSION = '2.17.1';
 const HISTO_JOURS = 92;            // période maximale de l'extrait Excel des agents
 const PBKDF2_ITER = 600000;
 const LOT_MAX_OCTETS = 4000000;    // taille maximale d'un envoi (photos comprises)
@@ -3137,7 +3137,8 @@ async function pdfPlanning(m) {
   };
   for (let i = 0; i < jours.length; i += 7) {
     const sem = jours.slice(i, i + 7);
-    const hBloc = hl * (3 + noms.length) + 5;
+    const avecRondes = sem.some(iso => pub.rondes[iso]);
+    const hBloc = hl * (3 + noms.length) + 5 + (avecRondes ? 6 + 6.5 * state.cfg.sites.length : 0);
     if (y + hBloc > 275) { doc.addPage(); y = 16; }
     const d0 = dDe(sem[0]), d6 = dDe(sem[6]);
     const titreSem = d0.getMonth() === d6.getMonth() ? `Semaine du ${jourNum(d0)} au ${dateLongue(sem[6])}` : `Semaine du ${dateLongue(sem[0])} au ${dateLongue(sem[6])}`;
@@ -3150,12 +3151,31 @@ async function pdfPlanning(m) {
       sem.forEach((iso, k) => { const c = (pub.jours[iso] || {})[n] || 'R'; const st = STY[c] || STY.R; cell(M + colN + k * colJ, y, colJ, hl, st[0], st[1], st[2], c !== 'R' && c !== 'F' && c !== 'ABS', c === 'R' ? 8.5 : 10); });
       y += hl;
     }
+    if (avecRondes) {   // planning des rondes de la semaine : une ligne par parking
+      cell(M, y, colN + colJ * 7, 6, [235, 240, 248], [29, 63, 115], 'RONDES', true, 9); y += 6;
+      for (const st of state.cfg.sites) {
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
+        doc.text(txt(st.nom), M + 1, y + 6.5 / 2 + 1.3);
+        sem.forEach((iso, k) => {
+          const r = (pub.rondes[iso] || {})[st.id];
+          if (!pub.rondes[iso]) return cell(M + colN + k * colJ, y, colJ, 6.5, ferieFerme(iso) ? [230, 233, 238] : [248, 248, 248], [128, 128, 128], ferieFerme(iso) ? 'FÉRIÉ' : '', false, 8);
+          const nom = r && r.a ? prenom(r.a) : r && r.m === 'x' ? '?' : '—';
+          const fond = !r || !r.a ? (r && r.m === 'x' ? [255, 220, 220] : [248, 248, 248]) : r.m === 'r' ? [253, 235, 200] : [255, 255, 255];
+          cell(M + colN + k * colJ, y, colJ, 6.5, fond, [0, 0, 0], nom, true, nom.length > 12 ? 7.5 : 9);
+        });
+        y += 6.5;
+      }
+    }
     y += 5;
   }
   if (y + 30 > 285) { doc.addPage(); y = 16; }
   doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(0, 0, 0); doc.text('LÉGENDE', M, y + 4); y += 7;
   const leg = [...vacs.map(v => [v.code, `${v.debut.replace(':', 'h')} – ${v.fin.replace(':', 'h')}`]), ['R', 'Jour de repos'], ['F', 'Jour férié : parkings fermés'], ['ABS', 'Absent']];
   for (const [c, l] of leg) { const st = STY[c] || STY.R; cell(M + colN, y, colJ, 6, st[0], st[1], st[2], c !== 'R' && c !== 'F' && c !== 'ABS', 9); doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(0, 0, 0); doc.text(txt(l), M + colN + colJ + 3, y + 4.3); y += 6.5; }
+  if (jours.some(iso => pub.rondes[iso])) {
+    cell(M + colN, y, colJ, 6, [253, 235, 200], [0, 0, 0], 'Prénom', true, 9); doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(0, 0, 0); doc.text(txt('Ronde : agent qui la fait en remplacement du titulaire du parking'), M + colN + colJ + 3, y + 4.3); y += 6.5;
+    if (jours.some(iso => Object.values(pub.rondes[iso] || {}).some(r => r.m === 'x'))) { cell(M + colN, y, colJ, 6, [255, 220, 220], [0, 0, 0], '?', true, 9); doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(0, 0, 0); doc.text(txt('Ronde sans agent disponible : le DPMS désignera qui la fait'), M + colN + colJ + 3, y + 4.3); y += 6.5; }
+  }
   if (pub.notes[m]) { y += 3; doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.splitTextToSize(txt(pub.notes[m]), W - 2 * M).forEach(l => { if (y > 285) { doc.addPage(); y = 16; } doc.text(l, M, y); y += 5; }); }
   doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(120, 120, 120);
   doc.text(txt(`Planning validé le ${fmtDT(p.ts)}`), M, 292);
